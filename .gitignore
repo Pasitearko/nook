@@ -1,0 +1,7 @@
+/build*/
+/.test-data/
+*.pkg.tar.*
+/packaging/src/
+/packaging/pkg/
+__pycache__/
+*.py[cod]

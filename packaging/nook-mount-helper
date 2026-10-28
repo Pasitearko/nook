@@ -1,0 +1,566 @@
+#!/usr/bin/python3 -I
+"""Narrow polkit fstab editor. No CLI/test mode; importing this file has no side effects.
+
+Wire format: {"version":1,"entries":[{"uuid":"...","enabled":true,"readOnly":false}]}.
+Only selected entries change; disabling never unmounts or removes directories.
+"""
+import collections
+import dataclasses
+import fcntl
+import json
+import os
+import pwd
+import re
+import select
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+HELPER = "/usr/lib/nook/nook-mount-helper"
+FSTAB = "/etc/fstab"
+GUID = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"
+MARK = "# nook:v1 UUID="
+MAX_INPUT = 16384
+MAX_ENTRIES = 32
+MAX_FSTAB = 1024 * 1024
+MAX_OUTPUT = 2 * 1024 * 1024
+ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "HOME": "/root"}
+UUID_RE = re.compile(r"(?:[0-9A-Fa-f]{16}|[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4})\Z")
+
+
+class Rejected(Exception):
+    pass
+
+
+@dataclasses.dataclass(frozen=True)
+class Choice:
+    uuid: str
+    enabled: bool
+    read_only: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class Device:
+    uuid: str
+    path: str
+    filesystem: str
+    label: str
+    mountpoints: tuple
+
+
+@dataclasses.dataclass(frozen=True)
+class Managed:
+    uuid: str
+    filesystem: str
+    uid: int
+    gid: int
+    read_only: bool
+
+
+def canonical_uuid(value):
+    if not isinstance(value, str) or not UUID_RE.fullmatch(value):
+        raise Rejected("Invalid NTFS/exFAT UUID.")
+    return value.upper()
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise Rejected("Duplicate JSON key: " + key)
+        result[key] = value
+    return result
+
+
+def parse_request(data):
+    if len(data) > MAX_INPUT:
+        raise Rejected("Request exceeds 16 KiB.")
+    try:
+        obj = json.loads(data, object_pairs_hook=unique_object)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise Rejected("Invalid JSON request.") from exc
+    if (not isinstance(obj, dict) or set(obj) != {"version", "entries"}
+            or type(obj["version"]) is not int or obj["version"] != 1):
+        raise Rejected("Expected version 1 and entries only.")
+    entries = obj["entries"]
+    if not isinstance(entries, list) or len(entries) > MAX_ENTRIES:
+        raise Rejected("Expected at most 32 entries.")
+    result, seen = [], set()
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"uuid", "enabled", "readOnly"}:
+            raise Rejected("Each entry must contain only uuid, enabled and readOnly.")
+        uuid = canonical_uuid(entry["uuid"])
+        if uuid in seen:
+            raise Rejected("Duplicate UUID in request: " + uuid)
+        if type(entry["enabled"]) is not bool or type(entry["readOnly"]) is not bool:
+            raise Rejected("enabled and readOnly must be JSON booleans.")
+        seen.add(uuid)
+        result.append(Choice(uuid, entry["enabled"], entry["readOnly"]))
+    return result
+
+
+def fixed_flag(value):
+    # Fail closed for missing/unknown RM metadata, on both disk and partition.
+    return value is False or type(value) is int and value == 0 or value == "0"
+
+
+def system_mount(path):
+    # A supported filesystem already serving the OS must not be offered as data.
+    if path == "/run" or path.startswith("/run/") and not path.startswith("/run/media/"):
+        return True
+    return path == "/" or any(path == p or path.startswith(p + "/") for p in
+                              ("/boot", "/efi", "/usr", "/etc", "/var", "/home", "/opt", "/srv",
+                               "/bin", "/sbin", "/lib", "/lib64", "/tmp", "/dev", "/proc", "/sys"))
+
+
+def discover(document):
+    """Pure lsblk parser; count UUIDs on ALL devices before filtering candidates."""
+    if not isinstance(document, dict) or not isinstance(document.get("blockdevices"), list):
+        raise Rejected("Invalid lsblk response.")
+    all_nodes, candidates = [], []
+
+    def walk(nodes, fixed_disk=False, removable=False):
+        if not isinstance(nodes, list):
+            raise Rejected("Invalid lsblk children.")
+        for node in nodes:
+            if not isinstance(node, dict):
+                raise Rejected("Invalid lsblk device.")
+            rm = removable or not fixed_flag(node.get("rm"))
+            kind = node.get("type")
+            fixed = fixed_disk and not rm
+            raw_uuid = node.get("uuid")
+            if isinstance(raw_uuid, str) and raw_uuid:
+                all_nodes.append(raw_uuid.upper())
+            fs = str(node.get("fstype") or "").lower()
+            path = node.get("path")
+            points = node.get("mountpoints") or []
+            if not isinstance(points, list) or any(p is not None and not isinstance(p, str) for p in points):
+                raise Rejected("Invalid lsblk mountpoints.")
+            points = tuple(p for p in points if p)
+            if (fixed and kind == "part" and fs in ("ntfs", "exfat")
+                    and str(node.get("parttype") or "").lower() == GUID
+                    and isinstance(raw_uuid, str) and UUID_RE.fullmatch(raw_uuid)
+                    and isinstance(path, str) and re.fullmatch(r"/dev/[A-Za-z0-9_./-]+", path)
+                    and not any(system_mount(p) for p in points)):
+                uuid = canonical_uuid(raw_uuid)
+                if (fs == "ntfs" and len(uuid) == 16) or (fs == "exfat" and len(uuid) == 9):
+                    candidates.append(Device(uuid, path, fs, str(node.get("label") or ""), points))
+            walk(node.get("children", []), kind == "disk" and not rm, rm)
+
+    walk(document["blockdevices"])
+    counts = collections.Counter(all_nodes)
+    return {d.uuid: d for d in candidates if counts[d.uuid] == 1}
+
+
+def target_for(uuid):
+    return "/mnt/nook-" + canonical_uuid(uuid)
+
+
+def options(uid, gid, read_only):
+    return (f"{'ro' if read_only else 'rw'},uid={uid},gid={gid},umask=0077,nosuid,nodev,nofail,"
+            "x-systemd.device-timeout=5s,x-systemd.mount-timeout=15s")
+
+
+def render_entry(choice, device, uid, gid):
+    filesystem = "ntfs3" if device.filesystem == "ntfs" else "exfat"
+    return (f"UUID={choice.uuid}\t{target_for(choice.uuid)}\t{filesystem}\t"
+            f"{options(uid, gid, choice.read_only)}\t0\t0\t{MARK}{choice.uuid}\n")
+
+
+def decode_field(value):
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), value)
+
+
+def parse_managed(line):
+    if "nook:" not in line:
+        return None
+    # Treat damaged/unknown ownership markers as errors, never adopt arbitrary lines.
+    fields = line.split()
+    if len(fields) != 9 or fields[6:8] != ["#", "nook:v1"] or not fields[0].startswith("UUID="):
+        raise Rejected("Malformed Nook-owned fstab line.")
+    uuid = canonical_uuid(fields[0][5:])
+    match = re.fullmatch(r"(ro|rw),uid=([0-9]+),gid=([0-9]+),.*", fields[3])
+    if (fields[0] != "UUID=" + uuid or fields[1] != target_for(uuid)
+            or fields[2] not in ("ntfs3", "exfat") or fields[4:6] != ["0", "0"]
+            or fields[8] != "UUID=" + uuid or not match):
+        raise Rejected("Unsafe Nook-owned fstab line.")
+    uid, gid, ro = int(match[2]), int(match[3]), match[1] == "ro"
+    if uid <= 0 or uid >= 2**32 - 1 or gid < 0 or gid >= 2**32 - 1 or fields[3] != options(uid, gid, ro):
+        raise Rejected("Unsafe options in Nook-owned fstab line.")
+    return Managed(uuid, fields[2], uid, gid, ro)
+
+
+def fstab_records(text):
+    result, seen = [], set()
+    for line in text.splitlines(keepends=True):
+        managed = parse_managed(line)
+        if managed:
+            if managed.uuid in seen:
+                raise Rejected("Duplicate UUID in Nook-owned fstab lines: " + managed.uuid)
+            seen.add(managed.uuid)
+        fields = line.split("#", 1)[0].split()
+        if fields and (not 4 <= len(fields) <= 6 or any(not re.fullmatch(r"[0-9]+", f) for f in fields[4:])):
+            raise Rejected("Malformed existing fstab line; administrator review required.")
+        result.append((line, managed, [decode_field(f) for f in fields]))
+    return result
+
+
+def udev_label(value):
+    # udev's /dev/disk/by-{label,partlabel} names preserve valid UTF-8 and
+    # alphanumerics and #+-.:=@_, escaping other bytes as \\xHH.
+    safe = "#+-.:=@_"
+    result = []
+    for char in value:
+        code = ord(char)
+        if ((char.isascii() and (char.isalnum() or char in safe))
+                or (code >= 128 and not 0xD800 <= code <= 0xDFFF)):
+            result.append(char)
+        else:
+            result.extend("\\x%02x" % byte for byte in char.encode("utf-8", "surrogateescape"))
+    return "".join(result)
+
+
+def source_conflicts(source, device, device_number=None):
+    source = source.strip('"')
+    if source.startswith("UUID="):
+        return source[5:].strip('"').upper() == device.uuid
+    if source.startswith("LABEL="):
+        return bool(device.label) and source[6:].strip('"') == device.label
+    if source == device.path or source.upper() == "/DEV/DISK/BY-UUID/" + device.uuid:
+        return True
+    if device.label and source == "/dev/disk/by-label/" + device.label:
+        return True
+    # Production resolves /dev aliases (including by-partuuid and mapper aliases).
+    if source.startswith("PARTUUID="):
+        source = "/dev/disk/by-partuuid/" + source[9:].strip('"')
+    elif source.startswith("PARTLABEL="):
+        source = "/dev/disk/by-partlabel/" + udev_label(source[10:].strip('"'))
+    if device_number is not None and source.startswith("/dev/"):
+        number = device_number(device.path)
+        return number is not None and device_number(source) == number
+    return False
+
+
+def plan_fstab(text, choices, devices, uid, gid, device_number=None, resolve_target=None):
+    """Pure planner except optional read-only device-alias resolver supplied by production."""
+    selected = {c.uuid for c in choices}
+    for choice in choices:
+        if choice.uuid not in devices:
+            raise Rejected("UUID is absent, duplicated, removable, system or unsupported: " + choice.uuid)
+    records = fstab_records(text)
+    for _, managed, fields in records:
+        if managed and managed.uuid in selected and (managed.uid != uid or managed.gid != gid):
+            raise Rejected("Nook-owned entry belongs to a different user; administrator review required.")
+        if not fields:
+            continue
+        for choice in choices:
+            if managed and managed.uuid == choice.uuid:
+                continue
+            target = os.path.normpath(fields[1].strip('"'))
+            target_conflict = target == target_for(choice.uuid)
+            if resolve_target is not None:
+                target_conflict = target_conflict or resolve_target(target) == target_for(choice.uuid)
+            if (target_conflict or source_conflicts(fields[0], devices[choice.uuid], device_number)):
+                raise Rejected("Existing fstab entry conflicts with UUID or target: " + choice.uuid)
+    result = "".join(line for line, managed, _ in records if not managed or managed.uuid not in selected)
+    additions = "".join(render_entry(c, devices[c.uuid], uid, gid) for c in choices if c.enabled)
+    if additions and result and not result.endswith("\n"):
+        result += "\n"
+    return result + additions
+
+
+def require_trusted(st, directory=False):
+    valid_kind = stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode)
+    if not valid_kind or st.st_uid != 0 or st.st_mode & 0o022:
+        raise Rejected("Expected a root-owned, non-writable trusted " + ("directory." if directory else "file."))
+
+
+def check_installation():
+    if os.getuid() != 0 or os.geteuid() != 0:
+        raise Rejected("This helper must be invoked as root by pkexec.")
+    if len(sys.argv) != 1 or os.path.abspath(__file__) != HELPER:
+        raise Rejected("Only the installed helper may be invoked, without arguments.")
+    for path in ("/", "/usr", "/usr/lib", "/usr/lib/nook"):
+        require_trusted(os.lstat(path), directory=True)
+    require_trusted(os.lstat(HELPER))
+    raw = os.environ.get("PKEXEC_UID", "")
+    if not re.fullmatch(r"[1-9][0-9]{0,9}", raw):
+        raise Rejected("Missing or invalid polkit caller identity.")
+    try:
+        caller = pwd.getpwuid(int(raw))
+    except (KeyError, OverflowError) as exc:
+        raise Rejected("Polkit caller does not exist.") from exc
+    if caller.pw_uid == 0 or caller.pw_gid < 0 or caller.pw_gid >= 2**32 - 1:
+        raise Rejected("Invalid polkit caller account.")
+    return caller.pw_uid, caller.pw_gid
+
+
+def read_request():
+    deadline = time.monotonic() + 15
+    data = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([0], [], [], max(0, remaining))[0]:
+            raise Rejected("Timed out reading request from stdin.")
+        chunk = os.read(0, min(4096, MAX_INPUT + 1 - len(data)))
+        if not chunk:
+            return parse_request(bytes(data))
+        data.extend(chunk)
+        if len(data) > MAX_INPUT:
+            raise Rejected("Request exceeds 16 KiB.")
+
+
+def run_command(argv, deadline, timeout=15):
+    remaining = min(timeout, deadline - time.monotonic())
+    if remaining <= 0:
+        raise Rejected("Operation deadline exceeded.")
+    # Files bound memory even if a diagnostic-producing program misbehaves.
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                env=ENV, close_fds=True, start_new_session=True)
+        try:
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            raise Rejected("Command timed out: " + argv[0]) from exc
+        out.seek(0)
+        err.seek(0)
+        stdout, stderr = out.read(MAX_OUTPUT + 1), err.read(MAX_OUTPUT + 1)
+        if len(stdout) > MAX_OUTPUT or len(stderr) > MAX_OUTPUT:
+            raise Rejected("Command output exceeded safety limit: " + argv[0])
+        if proc.returncode:
+            detail = (stderr or stdout).decode("utf-8", "replace")[:4096].strip()
+            raise Rejected(argv[0] + " failed: " + (detail or str(proc.returncode)))
+        return stdout
+
+
+def block_number(path):
+    try:
+        st = os.stat(path)
+        return st.st_rdev if stat.S_ISBLK(st.st_mode) else None
+    except OSError:
+        return None
+
+
+def snapshot(fd):
+    os.lseek(fd, 0, os.SEEK_SET)
+    data = bytearray()
+    while len(data) <= MAX_FSTAB:
+        chunk = os.read(fd, min(65536, MAX_FSTAB + 1 - len(data)))
+        if not chunk:
+            break
+        data.extend(chunk)
+    if len(data) > MAX_FSTAB:
+        raise Rejected("fstab exceeds safety limit.")
+    return os.fstat(fd), bytes(data)
+
+
+def fingerprint(st):
+    return (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid,
+            st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def assert_unchanged(fd, before, data):
+    current, contents = snapshot(fd)
+    if (fingerprint(os.lstat(FSTAB)) != fingerprint(before)
+            or fingerprint(current) != fingerprint(before) or contents != data):
+        raise Rejected("fstab changed concurrently; no changes saved. Refresh and retry.")
+
+
+def mount_table(deadline):
+    raw = run_command(["/usr/bin/findmnt", "--json", "--list", "--output",
+                       "SOURCE,TARGET,FSTYPE,UUID,OPTIONS"], deadline)
+    obj = json.loads(raw)
+    rows = obj.get("filesystems")
+    if not isinstance(rows, list):
+        raise Rejected("Invalid findmnt response.")
+    return rows
+
+
+def validate_mounts(choices, devices, rows):
+    for choice in choices:
+        if not choice.enabled:
+            continue
+        target = target_for(choice.uuid)
+        for row in rows:
+            if row.get("target") == target:
+                if (str(row.get("uuid") or "").upper() != choice.uuid
+                        or row.get("fstype") != ("ntfs3" if devices[choice.uuid].filesystem == "ntfs" else "exfat")):
+                    raise Rejected("Mount target is occupied by another filesystem: " + target)
+
+
+def ensure_mount_directory(target, mounted):
+    require_trusted(os.lstat("/mnt"), directory=True)
+    parent = os.open("/mnt", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        name = os.path.basename(target)
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent)
+        except FileExistsError:
+            pass
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        try:
+            st = os.fstat(fd)
+            # On an already mounted volume these metadata belong to the volume,
+            # not the covered root-owned mount directory. Never chmod the volume.
+            if not mounted and (st.st_uid != 0 or st.st_gid != 0 or stat.S_IMODE(st.st_mode) != 0o700 or os.listdir(fd)):
+                raise Rejected("Unmounted target must be an empty root:root directory with mode 0700: " + target)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent)
+
+
+def write_temp(data, before, prefix):
+    fd, path = tempfile.mkstemp(prefix=prefix, dir="/etc")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fchown(stream.fileno(), before.st_uid, before.st_gid)
+            os.fchmod(stream.fileno(), stat.S_IMODE(before.st_mode))
+            os.fsync(stream.fileno())
+    except BaseException:
+        os.unlink(path)
+        raise
+    return path
+
+
+def verify_additions(choices, devices, uid, gid, before, deadline):
+    # The planner validates the unchanged table's syntax. findmnt --verify also
+    # probes reachability, and would reject an unrelated absent nofail drive.
+    # Only newly enabled/changed rows need that device-level verification.
+    added = "".join(render_entry(c, devices[c.uuid], uid, gid) for c in choices if c.enabled)
+    if not added:
+        return
+    path = write_temp(added.encode("utf-8"), before, ".nook-verify-")
+    try:
+        run_command(["/usr/bin/findmnt", "--verify", "--tab-file", path], deadline)
+    finally:
+        os.unlink(path)
+
+
+def lock_helper():
+    require_trusted(os.lstat("/run"), directory=True)
+    fd = os.open("/run/nook-mount.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        st = os.fstat(fd)
+        require_trusted(st)
+        if st.st_nlink != 1 or stat.S_IMODE(st.st_mode) != 0o600:
+            raise Rejected("Unsafe helper lock file.")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise Rejected("Another disk configuration operation is running. Retry later.") from exc
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def perform(choices, uid, gid, result):
+    deadline = time.monotonic() + 180
+    lock = lock_helper()
+    fd = None
+    candidate = None
+    try:
+        raw = run_command(["/usr/bin/lsblk", "--json", "--tree", "--bytes", "--paths", "--output",
+                           "PATH,UUID,FSTYPE,LABEL,SIZE,PARTTYPE,MOUNTPOINTS,RM,TYPE"], deadline)
+        devices = discover(json.loads(raw))
+        require_trusted(os.lstat("/etc"), directory=True)
+        fd = os.open(FSTAB, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        before, original = snapshot(fd)
+        require_trusted(before)
+        if before.st_nlink != 1:
+            raise Rejected("fstab must not have hard links.")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        planned = plan_fstab(original.decode("utf-8", "surrogateescape"), choices, devices,
+                             uid, gid, block_number, os.path.realpath)
+        rows = mount_table(deadline)
+        validate_mounts(choices, devices, rows)
+        for choice in choices:
+            if choice.enabled:
+                target = target_for(choice.uuid)
+                ensure_mount_directory(target, any(r.get("target") == target for r in rows))
+        encoded = planned.encode("utf-8", "surrogateescape")
+        if encoded != original:
+            candidate = write_temp(encoded, before, ".nook-fstab-")
+            verify_additions(choices, devices, uid, gid, before, deadline)
+            assert_unchanged(fd, before, original)
+            backup = write_temp(original, before, "fstab.nook-backup-")
+            result["backup"] = backup
+            assert_unchanged(fd, before, original)
+            os.replace(candidate, FSTAB)
+            candidate = None
+            result["configSaved"] = True
+            etc = os.open("/etc", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                os.fsync(etc)
+            finally:
+                os.close(etc)
+        else:
+            assert_unchanged(fd, before, original)
+            result["configSaved"] = True
+        # Failures after this point MUST NOT imply the valid configuration was rolled back.
+        run_command(["/usr/bin/systemctl", "daemon-reload"], deadline, 20)
+        for choice in choices:
+            if not choice.enabled:
+                continue
+            try:
+                # Refresh immediately before each mount; never mount a UUID twice.
+                rows = mount_table(deadline)
+                validate_mounts([choice], devices, rows)
+                existing = [r for r in rows if str(r.get("uuid") or "").upper() == choice.uuid]
+                if existing:
+                    result["warnings"].append(choice.uuid + " is already mounted at " +
+                                              ", ".join(str(r.get("target")) for r in existing) +
+                                              "; new location/permission/read-only settings take effect after a normal unmount or reboot. No remount performed.")
+                    continue
+                ensure_mount_directory(target_for(choice.uuid), False)
+                run_command(["/usr/bin/mount", target_for(choice.uuid)], deadline, 25)
+                result["mounted"].append(choice.uuid)
+            except (Rejected, OSError, ValueError) as exc:
+                result["errors"].append(choice.uuid + ": " + str(exc))
+    finally:
+        if candidate is not None:
+            os.unlink(candidate)
+        if fd is not None:
+            os.close(fd)
+        os.close(lock)
+
+
+def main():
+    os.umask(0o077)
+    result = {"version": 1, "ok": False, "configSaved": False, "mounted": [], "warnings": [], "errors": []}
+    try:
+        uid, gid = check_installation()
+        choices = read_request()
+        if choices:
+            perform(choices, uid, gid, result)
+        result["ok"] = not result["errors"]
+    except (Rejected, OSError, ValueError, RecursionError) as exc:
+        result["errors"].append(str(exc))
+    if result["configSaved"]:
+        result["message"] = ("Boot mount configuration saved. " +
+                             ("Some runtime operations failed; the valid configuration is retained. " if result["errors"] else "") +
+                             "Disabling never unmounts a filesystem. "
+                             "For hibernated/dirty NTFS, fully shut down Windows and disable Fast Startup; "
+                             "choose read-only if appropriate. No force, repair or hibernation-file removal is attempted.")
+    else:
+        result["message"] = "No fstab changes saved." if result["errors"] else "No changes requested."
+    print(json.dumps(result, ensure_ascii=True))
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

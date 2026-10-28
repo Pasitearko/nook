@@ -1,0 +1,771 @@
+#include "application.h"
+#include <QGuiApplication>
+#include <QImage>
+#include <QQmlComponent>
+#include <QQmlEngine>
+#include <QQuickItem>
+#include <QQuickWindow>
+#include <QSignalSpy>
+#include <QTemporaryDir>
+#include <QThreadPool>
+#include <QtTest>
+#include <QElapsedTimer>
+#include <memory>
+#include <sys/stat.h>
+
+namespace {
+// Popup and view delegates are not necessarily QObject children of Main.qml.
+QQuickItem *findVisual(QQuickItem *parent, const QString &name) {
+    if (!parent)
+        return nullptr;
+    if (parent->objectName() == name)
+        return parent;
+    for (auto *child : parent->childItems())
+        if (auto *match = findVisual(child, name))
+            return match;
+    return nullptr;
+}
+
+QList<QQuickItem *> visualItems(QQuickItem *parent, const QString &name) {
+    QList<QQuickItem *> result;
+    if (!parent)
+        return result;
+    if (parent->objectName() == name)
+        result.append(parent);
+    for (auto *child : parent->childItems())
+        result.append(visualItems(child, name));
+    return result;
+}
+
+QStringList placeUris(const QVariantList &places, bool disk) {
+    QStringList result;
+    for (const auto &place : places) {
+        const auto entry = place.toMap();
+        if (entry.value("disk").toBool() == disk)
+            result.append(entry.value("uri").toString());
+    }
+    return result;
+}
+
+int fileMode(const QString &path) {
+    struct stat info{};
+    return ::stat(QFile::encodeName(path).constData(), &info) == 0 ? int(info.st_mode & 0777) : -1;
+}
+} // namespace
+
+class FollowupUiTest : public QObject {
+    Q_OBJECT
+  private:
+    // Declared in lifetime order: QML is destroyed before its controller and fixtures.
+    std::unique_ptr<QTemporaryDir> fixture;
+    std::unique_ptr<AppSettings> settings;
+    std::unique_ptr<SearchIndex> search;
+    std::unique_ptr<Operations> operations;
+    std::unique_ptr<Application> controller;
+    std::unique_ptr<QQmlEngine> engine;
+    std::unique_ptr<QObject> root;
+    QQuickWindow *window = nullptr;
+    QQuickItem *left = nullptr;
+
+    QQuickItem *item(const QString &name) const {
+        return findVisual(window->contentItem(), name);
+    }
+    QObject *object(const char *name) const {
+        return root->findChild<QObject *>(name);
+    }
+    QString uri(const QString &name) const {
+        return nook::normalizeUri(fixture->path() + "/" + name);
+    }
+    QQuickItem *entry(const QString &fileUri) const {
+        for (auto *row : visualItems(left, "fileEntry"))
+            if (row->property("fileUri").toString() == fileUri && row->isVisible())
+                return row;
+        return nullptr;
+    }
+    void click(QQuickItem *target, Qt::MouseButton button = Qt::LeftButton) {
+        QVERIFY(target);
+        QVERIFY(target->isVisible());
+        QVERIFY(target->isEnabled());
+        const auto point = target->mapToScene({target->width() / 2, target->height() / 2});
+        QVERIFY2(window->contentItem()->boundingRect().contains(point), "Click must be inside the scene");
+        QTest::mouseClick(window, button, Qt::NoModifier, point.toPoint());
+    }
+    void blankContext() {
+        auto *area = item("emptyAreaPointer");
+        QVERIFY(area);
+        // Below both fixture rows, away from scroll bars and the pane footer.
+        QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier,
+                          area->mapToScene({area->width() - 40, area->height() - 40}).toPoint());
+        auto *menu = object("blankContextMenu");
+        QVERIFY(menu);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        // opened is synchronous with disabled animations; popup layout and edge
+        // clamping still need a render/polish pass before pointer hit testing.
+        QTest::qWait(100);
+    }
+    void closeSettings() {
+        auto *panel = object("settingsDialog");
+        QVERIFY(panel);
+        auto *header = panel->property("header").value<QQuickItem *>();
+        QVERIFY(header);
+        QQuickItem *close = nullptr;
+        for (auto *child : header->childItems())
+            if (child->property("hint").toString() == QStringLiteral("关闭设置"))
+                close = child;
+        QVERIFY(close);
+        click(close);
+        QTRY_VERIFY(!panel->property("visible").toBool());
+    }
+    void checkPopupBounds(QObject *popup) {
+        QVERIFY(popup);
+        auto *content = popup->property("contentItem").value<QQuickItem *>();
+        QVERIFY(content);
+        auto *frame = content->parentItem();
+        QVERIFY(frame);
+        const auto rect = frame->mapRectToScene(frame->boundingRect());
+        QVERIFY2(rect.left() >= -1 && rect.top() >= -1 && rect.right() <= window->width() + 1 &&
+                     rect.bottom() <= window->height() + 1,
+                 qPrintable(QString("Popup outside %1x%2 scene: %3,%4 %5x%6")
+                                .arg(window->width())
+                                .arg(window->height())
+                                .arg(rect.x())
+                                .arg(rect.y())
+                                .arg(rect.width())
+                                .arg(rect.height())));
+    }
+
+  private Q_SLOTS:
+    void init() {
+        fixture = std::make_unique<QTemporaryDir>(QString(NOOK_BINARY_DIR) + "/followup-fixture-XXXXXX");
+        QVERIFY(fixture->isValid());
+        QFile sample(fixture->path() + "/sample.txt");
+        QVERIFY(sample.open(QIODevice::WriteOnly));
+        QCOMPARE(sample.write("Followup preview fixture\n"), qint64(25));
+        sample.close();
+        QVERIFY(QDir().mkdir(fixture->path() + "/folder"));
+        settings = std::make_unique<AppSettings>();
+        settings->store().clear();
+        settings->set("startFolder", fixture->path());
+        settings->set("roots", QStringList{fixture->path()});
+        settings->set("theme", "dark");
+        settings->set("animations", false);
+        settings->set("hoverPreview", false);
+        settings->set("uiScale", 1.0);
+        settings->set("quickAccess", QStringList{});
+        settings->set("quickAccessOrder", QStringList{});
+        search = std::make_unique<SearchIndex>();
+        operations = std::make_unique<Operations>();
+        controller = std::make_unique<Application>(search.get(), operations.get(), settings.get(), false);
+        controller->preview()->setWorkerExecutable(QCoreApplication::applicationDirPath() + "/nook");
+        engine = std::make_unique<QQmlEngine>();
+        engine->addImageProvider("thumb", new ThumbnailProvider);
+        QQmlComponent component(engine.get(),
+                                QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/Main.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        root.reset(
+            component.createWithInitialProperties({{"controller", QVariant::fromValue(controller.get())}}));
+        QVERIFY2(root, qPrintable(component.errorString()));
+        window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+        QTRY_VERIFY(!controller->left()->loading());
+        QCOMPARE(controller->left()->count(), 2);
+        left = item("leftPane");
+        QVERIFY(left);
+        QTRY_VERIFY(left->height() > 400);
+        QTRY_VERIFY(entry(uri("sample.txt")));
+    }
+
+    void cleanup() {
+        if (window)
+            window->close();
+        root.reset();
+        window = nullptr;
+        left = nullptr;
+        engine.reset();
+        controller.reset();
+        operations.reset();
+        search.reset();
+        settings.reset();
+        QThreadPool::globalInstance()->waitForDone();
+        fixture.reset();
+    }
+
+    void spaceAfterSaveAndToolbar() {
+        click(entry(uri("sample.txt")));
+        QCOMPARE(controller->left()->selectedUris(), QStringList{uri("sample.txt")});
+        QSignalSpy saved(left, SIGNAL(columnsSaved()));
+        QVERIFY(saved.isValid());
+        click(findVisual(left, "saveColumnWidthsButton"));
+        QCOMPARE(saved.count(), 1);
+        const auto widths = settings->values().value("columnWidths").toList();
+        QCOMPARE(widths.size(), 4);
+        // Clearing only the displayed toast makes an accidental second save observable.
+        root->setProperty("toastMessage", "");
+        QSignalSpy preferencesChanged(settings.get(), &AppSettings::changed);
+        for (int i = 0; i < 2; ++i) {
+            QTest::keyClick(window, Qt::Key_Space);
+            QTRY_VERIFY(controller->preview()->visible());
+            QTest::keyClick(window, Qt::Key_Space);
+            QTRY_VERIFY(!controller->preview()->visible());
+        }
+        QCOMPARE(saved.count(), 1);
+        QCOMPARE(preferencesChanged.count(), 0);
+        QVERIFY(root->property("toastMessage").toString().isEmpty());
+        QCOMPARE(settings->values().value("columnWidths").toList(), widths);
+
+        // A harmless toolbar button must not trap Space as a button activation.
+        click(item("refreshButton"));
+        QTRY_VERIFY(!controller->left()->loading());
+        QCOMPARE(controller->left()->selectedUris(), QStringList{uri("sample.txt")});
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(controller->preview()->visible());
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(!controller->preview()->visible());
+        QCOMPARE(saved.count(), 1);
+        QVERIFY(root->property("toastMessage").toString().isEmpty());
+    }
+
+    void spaceWhileEditing() {
+        click(entry(uri("sample.txt")));
+        QSignalSpy visibility(controller->preview(), &Preview::changed);
+        QTest::keyClick(window, Qt::Key_L, Qt::ControlModifier);
+        auto *address = item("addressField");
+        QVERIFY(address);
+        QTRY_VERIFY(address->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Space);
+        QCOMPARE(address->property("text").toString(), QStringLiteral(" "));
+        QVERIFY(!controller->preview()->visible());
+
+        click(item("searchField"));
+        QTRY_VERIFY(item("searchField")->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Space);
+        QCOMPARE(item("searchField")->property("text").toString(), QStringLiteral(" "));
+        QVERIFY(!controller->preview()->visible());
+        // Whitespace does not switch Main to the search results model.
+        QVERIFY(!root->property("searching").toBool());
+        click(item("settingsButton"));
+        auto *panel = object("settingsDialog");
+        QVERIFY(panel);
+        QTRY_VERIFY(panel->property("opened").toBool());
+        click(item("settingsCategory2"));
+        QTRY_COMPARE(panel->property("category").toInt(), 2);
+        QTest::qWait(100); // Allow the newly visible card's layout to settle before hit testing.
+        auto *roots = item("rootsInput");
+        QVERIFY(roots);
+        QTRY_VERIFY(roots->isVisible());
+        click(roots);
+        QTRY_VERIFY(roots->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_A, Qt::ControlModifier);
+        QTest::keyClick(window, Qt::Key_Space);
+        QCOMPARE(roots->property("text").toString(), QStringLiteral(" "));
+        QTest::qWait(300); // Include the search debounce and shortcut delivery.
+        QCOMPARE(visibility.count(), 0);
+        QVERIFY(!controller->preview()->visible());
+        closeSettings();
+    }
+
+    void blankMenuCreatesEmptyTextFile() {
+        blankContext();
+        auto *menu = object("blankContextMenu");
+        auto *submenu = object("createSubmenu");
+        QVERIFY(submenu);
+        QVERIFY(!object("fileContextMenu")->property("visible").toBool());
+        checkPopupBounds(menu);
+        // Point at the submenu's real MenuItem so hover cannot close it while keyboard
+        // navigation is in progress. Qt creates this item, so it has no objectName.
+        QQuickItem *submenuItem = nullptr;
+        for (auto *candidate : visualItems(window->contentItem(), QString{}))
+            if (candidate->property("subMenu").value<QObject *>() == submenu)
+                submenuItem = candidate;
+        QVERIFY(submenuItem);
+        // Click directly: moving and then clicking can race the submenu's hover timer.
+        click(submenuItem);
+        QTRY_VERIFY(submenu->property("opened").toBool());
+        QTest::qWait(100); // Polish submenu delegate positions while pointer stays on its parent item.
+        QTRY_VERIFY(item("newTextMenuItem"));
+        auto *create = item("newTextMenuItem");
+        QTest::mouseMove(window, create->mapToScene({40, create->height() / 2}).toPoint());
+        click(create);
+        QTRY_VERIFY(item("nameInput"));
+        auto *name = item("nameInput");
+        QVERIFY(name);
+        QTRY_VERIFY(name->hasActiveFocus());
+        QCOMPARE(root->property("inputKind").toString(), QStringLiteral("touch"));
+        QTest::qWait(260); // Capture the settled dialog, not its enter transition.
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-name-dialog.png"));
+        QTest::keyClick(window, Qt::Key_A, Qt::ControlModifier);
+        for (char character : QByteArray("created by UI.txt"))
+            QTest::keyClick(window, character);
+        QSignalSpy finished(operations.get(), &Operations::finished);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 10000);
+        QTRY_VERIFY(!operations->busy());
+        QVERIFY2(operations->errors().isEmpty(), qPrintable(operations->errors().join('\n')));
+        const QFileInfo created(fixture->path() + "/created by UI.txt");
+        QVERIFY(created.isFile());
+        QCOMPARE(created.size(), qint64(0));
+        QTRY_VERIFY(!controller->left()->loading());
+        QTRY_COMPARE(controller->left()->count(), 3);
+        QVERIFY(!menu->property("visible").toBool());
+    }
+
+    void mountSettingsRequireConfirmation() {
+        QTRY_VERIFY(!controller->diskMounts()->busy());
+        click(item("settingsButton"));
+        auto *panel = object("settingsDialog");
+        QVERIFY(panel);
+        QTRY_VERIFY(panel->property("opened").toBool());
+        click(item("settingsCategory4"));
+        QTRY_COMPARE(panel->property("category").toInt(), 4);
+        QTRY_VERIFY(!controller->diskMounts()->busy());
+        QTest::qWait(100);
+        auto *apply = item("applyMountsButton");
+        QVERIFY(apply);
+        QVERIFY(!apply->isEnabled());
+        // Exercise the confirmation UI with an in-memory choice only. Never click
+        // authorization and never send any request to pkexec or the real helper.
+        const QVariantMap disk{{"uuid", "0123456789ABCDEF"}, {"autoMount", false}, {"readOnly", false}};
+        QVERIFY(QMetaObject::invokeMethod(panel, "changeMount", Q_ARG(QVariant, disk),
+                                         Q_ARG(QVariant, true), Q_ARG(QVariant, true)));
+        QTRY_VERIFY(apply->isEnabled());
+        QSignalSpy backendState(controller->diskMounts(), &DiskMounts::changed);
+        click(apply);
+        auto *confirm = panel->findChild<QObject *>("mountConfirmDialog");
+        QVERIFY(confirm);
+        QTRY_VERIFY(confirm->property("opened").toBool());
+        checkPopupBounds(confirm);
+        QVERIFY(!controller->diskMounts()->busy());
+        click(item("cancelMountApplyButton"));
+        QTRY_VERIFY(!confirm->property("visible").toBool());
+        QCOMPARE(backendState.count(), 0);
+        closeSettings();
+    }
+
+    void propertiesApplyRealPermissions() {
+        const auto path = fixture->path() + "/sample.txt";
+        QCOMPARE(::chmod(QFile::encodeName(path).constData(), 0600), 0);
+        click(entry(uri("sample.txt")), Qt::RightButton);
+        auto *menu = object("fileContextMenu");
+        QVERIFY(menu);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        click(item("filePropertiesMenuItem"));
+        auto *dialog = object("propertiesDialog");
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QTRY_VERIFY(!controller->properties()->busy());
+        const auto details = controller->properties()->details();
+        QCOMPARE(details.value("name").toString(), QStringLiteral("sample.txt"));
+        QCOMPARE(details.value("permissions").toInt(), 0600);
+        QVERIFY2(details.value("editable").toBool(),
+                 qPrintable(details.value("permissionsError").toString()));
+        // Drag-selecting text in the dialog selects text: it must neither start a file drag in
+        // the pane underneath nor drag the scrollable page itself around.
+        QQuickItem *nameText = nullptr;
+        for (auto *candidate : dialog->findChildren<QQuickItem *>())
+            if (QString(candidate->metaObject()->className()).startsWith("QQuickTextEdit") &&
+                candidate->property("text").toString() == "sample.txt")
+                nameText = candidate;
+        QVERIFY(nameText);
+        // A short window makes the dialog page scrollable, which is when a drag used to move it.
+        const auto fullSize = window->size();
+        window->resize(fullSize.width(), 480);
+        QTest::qWait(150); // let the rows re-lay out after the details arrived
+        const auto handlers = window->findChildren<QObject *>();
+        auto fileDragActive = [&] {
+            for (auto *handler : handlers)
+                if (QString(handler->metaObject()->className()) == "QQuickDragHandler" &&
+                    handler->property("active").toBool())
+                    return true;
+            return false;
+        };
+        bool fileDrag = false;
+        const auto from = nameText->mapToScene({2, nameText->height() / 2}).toPoint();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, from);
+        for (int i = 1; i <= 8; ++i) {
+            QTest::mouseMove(window, from + QPoint(i * 8, i * 6), 15);
+            fileDrag = fileDrag || fileDragActive();
+        }
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, from + QPoint(64, 48));
+        auto *page = dialog->property("contentItem").value<QQuickItem *>()->property("contentItem").value<QQuickItem *>();
+        QVERIFY(page);
+        QVERIFY(page->property("contentHeight").toReal() > page->height());
+        QCOMPARE(page->property("contentY").toReal(), 0.0);
+        // Starting the drag just beside the text (on the label) must not drag the page either.
+        const auto label = nameText->mapToScene({-30, nameText->height() / 2}).toPoint();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, label);
+        for (int i = 1; i <= 8; ++i)
+            QTest::mouseMove(window, label + QPoint(i * 4, -i * 12), 15);
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, label + QPoint(32, -96));
+        QTest::qWait(50);
+        QCOMPARE(page->property("contentY").toReal(), 0.0);
+        QVERIFY2(!fileDrag, "text selection in the properties dialog started a file drag");
+        QVERIFY(!nameText->property("selectedText").toString().isEmpty());
+        window->resize(fullSize);
+        QTest::qWait(100);
+        auto *grid = item("permissionGrid");
+        QVERIFY(grid);
+        QVERIFY(grid->isVisible());
+        // Permission grid index 5 is group-read (0040); exercise its actual checkbox.
+        auto *groupRead = item("permissionBit5");
+        QVERIFY(groupRead);
+        QVERIFY(!groupRead->property("checked").toBool());
+        // Extra metadata rows (e.g. Hidden) can put the permission grid below the viewport.
+        // Scroll it into view instead of clicking a clipped checkbox through the footer.
+        page->setProperty("contentY", qMax(0.0, page->property("contentHeight").toReal() - page->height()));
+        QTest::qWait(100);
+        click(groupRead);
+        QTRY_COMPARE(dialog->property("draftMode").toInt(), 0640);
+        QCOMPARE(fileMode(path), 0600); // A draft must not mutate the file.
+        auto *apply = item("applyPermissionsButton");
+        QVERIFY(apply);
+        QTRY_VERIFY(apply->isEnabled());
+        QSignalSpy applied(controller->properties(), &FileProperties::permissionsApplied);
+        click(apply);
+        QTRY_COMPARE_WITH_TIMEOUT(applied.count(), 1, 10000);
+        QTRY_VERIFY(!controller->properties()->busy());
+        QCOMPARE(fileMode(path), 0640);
+        QCOMPARE(controller->properties()->details().value("permissions").toInt(), 0640);
+        QTRY_VERIFY(!apply->isEnabled());
+        click(item("closePropertiesButton"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+    }
+
+    void scaledWorkspaceAndPopups_data() {
+        QTest::addColumn<double>("scale");
+        QTest::newRow("125-percent") << 1.25;
+        QTest::newRow("75-percent") << 0.75;
+    }
+
+    void scaledWorkspaceAndPopups() {
+        QFETCH(double, scale);
+        settings->set("uiScale", scale);
+        auto *workspace = item("scaledWorkspace");
+        QVERIFY(workspace);
+        QTRY_COMPARE(workspace->scale(), scale);
+        QTRY_VERIFY(qAbs(workspace->width() * scale - window->width()) < 1);
+        QTRY_VERIFY(qAbs(workspace->height() * scale - window->height()) < 1);
+        const auto scene = workspace->mapRectToScene(workspace->boundingRect());
+        QVERIFY(qAbs(scene.width() - window->width()) < 1);
+        QVERIFY(qAbs(scene.height() - window->height()) < 1);
+        QTest::qWait(100); // QtQuick layouts polish asynchronously after a scale change.
+        for (int i = 0; i < 2; ++i) {
+            click(item("settingsButton"));
+            auto *panel = object("settingsDialog");
+            QVERIFY(panel);
+            QTRY_VERIFY(panel->property("opened").toBool());
+            auto *content = panel->property("contentItem").value<QQuickItem *>();
+            QVERIFY(content);
+            const auto mapped = content->mapRectToScene(content->boundingRect());
+            QVERIFY(qAbs(mapped.width() / content->width() - scale) < 0.01);
+            QVERIFY(qAbs(mapped.height() / content->height() - scale) < 0.01);
+            checkPopupBounds(panel);
+            closeSettings(); // Uses scene-mapped pointer coordinates at each scale.
+        }
+        blankContext(); // Near the bottom-right; must clamp in logical, not physical pixels.
+        checkPopupBounds(object("blankContextMenu"));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!object("blankContextMenu")->property("visible").toBool());
+        click(entry(uri("sample.txt")), Qt::RightButton);
+        QTRY_VERIFY(object("fileContextMenu")->property("opened").toBool());
+        checkPopupBounds(object("fileContextMenu"));
+        QTest::keyClick(window, Qt::Key_Escape);
+    }
+
+    void middleClickClosesTab() {
+        controller->addTab(uri("folder"));
+        QTRY_COMPARE(controller->tabs().size(), 2);
+        QTest::qWait(50);
+        const auto cards = visualItems(window->contentItem(), "tabCard");
+        QCOMPARE(cards.size(), 2);
+        QQuickItem *second = cards[0]->mapToScene({0, 0}).x() > cards[1]->mapToScene({0, 0}).x() ? cards[0] : cards[1];
+        // Away from the close button at the right end of the tab.
+        QTest::mouseClick(window, Qt::MiddleButton, Qt::NoModifier, second->mapToScene({30, second->height() / 2}).toPoint());
+        QTRY_COMPARE(controller->tabs().size(), 1);
+    }
+
+    void keyboardNeverSavesColumns() {
+        // Saving column widths is only ever a deliberate click; keys used to browse folders
+        // (Enter, Backspace, Space) must never reach that button.
+        auto *save = item("saveColumnWidthsButton");
+        QVERIFY(save);
+        QSignalSpy saved(left, SIGNAL(columnsSaved()));
+        click(save);
+        QCOMPARE(saved.count(), 1);
+        root->setProperty("toastMessage", "");
+        // Even if Tab once reached the header, clicking a row gives the keys back to the list.
+        click(entry(uri("folder")));
+        for (int i = 0; i < 40 && window->activeFocusItem() != save; ++i)
+            QTest::keyClick(window, Qt::Key_Tab);
+        for (int round = 0; round < 2; ++round) {
+            click(entry(uri("folder")));
+            QCOMPARE(controller->left()->selectedUris(), QStringList{uri("folder")});
+            QTest::keyClick(window, Qt::Key_Return);
+            QTRY_COMPARE(controller->left()->uri(), uri("folder"));
+            QTRY_VERIFY(!controller->left()->loading());
+            QTest::keyClick(window, Qt::Key_Backspace);
+            QTRY_COMPARE(controller->left()->uri(), nook::normalizeUri(fixture->path()));
+            QTRY_VERIFY(!controller->left()->loading());
+            QTRY_VERIFY(entry(uri("folder")));
+        }
+        QTest::keyClick(window, Qt::Key_Space);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTest::qWait(50);
+        QCOMPARE(saved.count(), 1);
+        QVERIFY2(root->property("toastMessage").toString().isEmpty(), qPrintable(root->property("toastMessage").toString()));
+    }
+
+    void backspaceGoesUp() {
+        const auto top = controller->left()->uri();
+        controller->left()->navigate(uri("folder"));
+        QTRY_VERIFY(!controller->left()->loading());
+        QCOMPARE(controller->left()->uri(), uri("folder"));
+        // Typing in a field: Backspace edits the text and must not navigate.
+        auto *address = item("addressField");
+        QVERIFY(address);
+        address->forceActiveFocus();
+        QTRY_VERIFY(address->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_End);
+        QTest::keyClick(window, Qt::Key_Backspace);
+        QTest::qWait(50);
+        QCOMPARE(controller->left()->uri(), uri("folder"));
+        QTest::keyClick(window, Qt::Key_Escape);
+        // With the file area focused it goes up one level.
+        click(item("emptyAreaPointer"));
+        QTest::keyClick(window, Qt::Key_Backspace);
+        QTRY_COMPARE(controller->left()->uri(), top);
+    }
+
+    void textContextMenuIsThemed_data() {
+        QTest::addColumn<QString>("field");
+        QTest::newRow("search") << "searchField";
+        QTest::newRow("address") << "addressField";
+    }
+
+    void textContextMenuIsThemed() {
+        QFETCH(QString, field);
+        auto *address = item(field);
+        QVERIFY(address);
+        if (address->property("text").toString().isEmpty())
+            address->setProperty("text", "nook"); // an empty field has nothing to select
+        address->forceActiveFocus();
+        QMetaObject::invokeMethod(address, "selectAll");
+        click(address, Qt::RightButton);
+        auto *menu = qobject_cast<QObject *>(address->findChild<QObject *>("textContextMenu"));
+        QVERIFY(menu);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QTest::qWait(100);
+        checkPopupBounds(menu);
+        // Opens beside the pointer, not somewhere else on screen.
+        auto *frame = menu->property("contentItem").value<QQuickItem *>()->parentItem();
+        const auto pointer = address->mapToScene({address->width() / 2, address->height() / 2});
+        const auto rect = frame->mapRectToScene(frame->boundingRect());
+        // (It may be pushed left to stay inside the window, but still covers the pointer.)
+        QVERIFY2(pointer.x() >= rect.left() - 2 && pointer.x() <= rect.right() && qAbs(rect.top() - pointer.y()) < 40,
+                 qPrintable(QString("menu at %1,%2; pointer %3,%4").arg(rect.left()).arg(rect.top()).arg(pointer.x()).arg(pointer.y())));
+        // Right-clicking keeps the selection, so Copy is available.
+        auto *copy = item("textMenuCopy");
+        QVERIFY(copy);
+        QVERIFY(copy->isEnabled());
+        auto *selectAll = item("textMenuSelectAll");
+        QVERIFY(selectAll);
+        QCOMPARE(selectAll->property("text").toString(), QStringLiteral("全选"));
+        click(selectAll);
+        QTRY_VERIFY(!menu->property("visible").toBool());
+        QCOMPARE(address->property("selectedText").toString(), address->property("text").toString());
+        QTest::keyClick(window, Qt::Key_Escape);
+        if (field == "searchField")
+            address->setProperty("text", "");
+    }
+
+    void staticHoverEligibility() {
+        QVERIFY(!controller->preview()->hoverEligible(
+            {{"fileUri", uri("folder")}, {"folder", true}, {"fileName", "folder"}, {"iconName", "folder"}}));
+        QVERIFY(!controller->preview()->hoverEligible({{"fileUri", uri("movie.mp4")},
+                                                       {"folder", false},
+                                                       {"fileName", "movie.mp4"},
+                                                       {"iconName", "video"}}));
+        // MIME metadata must still exclude video disguised with a static extension.
+        QVERIFY(!controller->preview()->hoverEligible({{"fileUri", uri("movie.txt")},
+                                                       {"folder", false},
+                                                       {"fileName", "movie.txt"},
+                                                       {"mimeType", "video/mp4"}}));
+    }
+
+    void selectAllFrames() {
+        if (qEnvironmentVariableIsEmpty("NOOK_FRAME_DUMP"))
+            QSKIP("diagnostic only");
+        settings->set("animations", true);
+        settings->set("theme", qEnvironmentVariable("NOOK_FRAME_THEME", "light"));
+        for (int i = 0; i < 8; ++i) {
+            QFile file(fixture->path() + QStringLiteral("/frame-%1.txt").arg(i));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+        }
+        controller->left()->refresh();
+        QTRY_VERIFY(!controller->left()->loading());
+        QTest::qWait(500);
+        click(entry(uri("frame-0.txt")));
+        QTest::qWait(400);
+        const QString out = qEnvironmentVariable("NOOK_FRAME_DUMP");
+        window->grabWindow().save(out + "/f-before.png");
+        QTest::keyClick(window, Qt::Key_A, Qt::ControlModifier);
+        QElapsedTimer t; t.start();
+        for (int i = 0; i < 12; ++i) {
+            window->grabWindow().save(out + QStringLiteral("/f-%1-%2ms.png").arg(i, 2, 10, QChar('0')).arg(t.elapsed()));
+            QTest::qWait(16);
+        }
+        settings->set("animations", false);
+    }
+    void rubberBandSelection() {
+        auto *list = item("fileList");
+        QVERIFY(list);
+        const QPoint start = list->mapToScene({300, list->height() - 40}).toPoint();
+        const QPoint end = list->mapToScene({140, 8}).toPoint();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start);
+        for (int i = 1; i <= 10; ++i)
+            QTest::mouseMove(window, start + (end - start) * i / 10);
+        QTRY_VERIFY(item("selectionBand") && item("selectionBand")->isVisible());
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, end);
+        QTRY_COMPARE(controller->left()->selectedCount(), 2);
+        QVERIFY(!item("selectionBand")->isVisible());
+        // A band that only reaches the second row selects just that row.
+        const QPoint second = list->mapToScene({140, 43 + 20}).toPoint();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start);
+        for (int i = 1; i <= 10; ++i)
+            QTest::mouseMove(window, start + (second - start) * i / 10);
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, second);
+        QTRY_COMPARE(controller->left()->selectedCount(), 1);
+        QCOMPARE(controller->left()->selectedUris(), QStringList{uri("sample.txt")});
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, start);
+        QTRY_COMPARE(controller->left()->selectedCount(), 0);
+    }
+    void rowTransitionsSettle() {
+        // With motion on, in-place refreshes animate rows in and out; pooled delegates must
+        // never be left faded or shrunk once the transitions finish.
+        settings->set("animations", true);
+        for (int round = 0; round < 3; ++round) {
+            for (int i = 0; i < 6; ++i) {
+                QFile file(fixture->path() + QStringLiteral("/row-%1-%2.txt").arg(round).arg(i));
+                QVERIFY(file.open(QIODevice::WriteOnly));
+            }
+            if (round > 0)
+                for (int i = 0; i < 6; i += 2)
+                    QVERIFY(QFile::remove(fixture->path() + QStringLiteral("/row-%1-%2.txt").arg(round - 1).arg(i)));
+            controller->left()->refresh();
+            QTRY_VERIFY(!controller->left()->loading());
+            QTest::qWait(450);
+        }
+        QCOMPARE(controller->left()->count(), 2 + 6 + 3 + 3);
+        auto *list = item("fileList");
+        QVERIFY(list);
+        int checked = 0;
+        for (int i = 0; i < controller->left()->count(); ++i) {
+            QQuickItem *row = nullptr;
+            QVERIFY(QMetaObject::invokeMethod(list, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row), Q_ARG(int, i)));
+            if (!row)
+                continue; // outside the instantiated window
+            ++checked;
+            QVERIFY2(qFuzzyCompare(row->opacity(), 1.0), qPrintable(row->property("fileName").toString()));
+            QCOMPARE(row->scale(), 1.0);
+        }
+        QVERIFY(checked >= 10);
+        settings->set("animations", false);
+    }
+    void sidebarDragPersistsQuickOrder() {
+        for (const auto &name : {"folder/alpha", "folder/beta"})
+            QVERIFY(QDir().mkdir(fixture->path() + "/" + name));
+        const QStringList quick{uri("folder/alpha"), uri("folder/beta")};
+        settings->set("quickAccess", quick);
+        // Put the test targets at the top irrespective of the user's standard folders.
+        settings->set("quickAccessOrder", quick);
+        auto *sidebar = item("sidebar");
+        QVERIFY(sidebar);
+        auto quickRow = [&](const QString &fileUri) -> QQuickItem * {
+            for (auto *row : visualItems(sidebar, "quickPlace"))
+                if (row->property("entry").toMap().value("uri").toString() == fileUri)
+                    return row;
+            return nullptr;
+        };
+        QTRY_VERIFY(quickRow(quick[0]) && quickRow(quick[1]));
+        // Wait for read-only disk discovery, without mounting or activating any disk.
+        QTRY_VERIFY(controller->findChildren<QProcess *>().isEmpty());
+        const auto disks = placeUris(controller->places(), true);
+        QVERIFY(!disks.isEmpty());
+        QCOMPARE(visualItems(sidebar, "diskPlace").size(), disks.size());
+        for (auto *row : visualItems(sidebar, "quickPlace"))
+            QVERIFY(!row->property("entry").toMap().value("disk").toBool());
+        for (auto *row : visualItems(sidebar, "diskPlace"))
+            QVERIFY(row->property("entry").toMap().value("disk").toBool());
+        auto *source = quickRow(quick[1]);
+        auto *target = quickRow(quick[0]);
+        const auto start = source->mapToScene({source->width() / 2, source->height() / 2}).toPoint();
+        const auto end = target->mapToScene({target->width() / 2, target->height() / 2}).toPoint();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start);
+        for (int step = 1; step <= 8; ++step)
+            QTest::mouseMove(window, start + (end - start) * step / 8, 25);
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, end);
+        QTRY_VERIFY(settings->values().value("quickAccessOrder").toStringList().indexOf(quick[1]) <
+                    settings->values().value("quickAccessOrder").toStringList().indexOf(quick[0]));
+        const auto order = placeUris(controller->places(), false);
+        QCOMPARE(order.mid(0, 2), (QStringList{quick[1], quick[0]}));
+        QCOMPARE(settings->values().value("quickAccess").toStringList(), quick);
+        // Reordering refreshes places and starts asynchronous, read-only disk discovery again.
+        QTRY_COMPARE(placeUris(controller->places(), true), disks);
+        AppSettings reloaded;
+        QCOMPARE(reloaded.values().value("quickAccessOrder").toStringList(), order);
+        controller->refreshPlaces();
+        QTRY_VERIFY(controller->findChildren<QProcess *>().isEmpty());
+        QCOMPARE(placeUris(controller->places(), false), order);
+        QCOMPARE(placeUris(controller->places(), true), disks);
+    }
+
+    void thumbnailFallbacks() {
+        QFile malformed(fixture->path() + "/malformed.png");
+        QVERIFY(malformed.open(QIODevice::WriteOnly));
+        malformed.write("not a PNG\n");
+        malformed.close();
+        QImage transparent(32, 32, QImage::Format_ARGB32);
+        transparent.fill(Qt::transparent);
+        QVERIFY(transparent.save(fixture->path() + "/transparent.png"));
+        controller->left()->refresh();
+        QTRY_VERIFY(!controller->left()->loading());
+        QTRY_COMPARE(controller->left()->count(), 4);
+        controller->setGrid(true);
+        QTRY_VERIFY(entry(uri("malformed.png")) && entry(uri("transparent.png")));
+        for (const auto &name : {"malformed.png", "transparent.png"}) {
+            auto *row = entry(uri(name));
+            auto *fallback = findVisual(row, "gridFallbackIcon");
+            auto *thumbnail = findVisual(row, "gridThumbnail");
+            QVERIFY(fallback && thumbnail);
+            QTRY_VERIFY(fallback->isVisible());
+            QVERIFY(fallback->width() > 0 && fallback->height() > 0);
+            QVERIFY(fallback->opacity() > 0);
+            QVERIFY(!thumbnail->property("source").toUrl().isEmpty());
+            // QtQuick Image.Loading == 2. Either decoded image or provider failure is allowed.
+            QTRY_VERIFY_WITH_TIMEOUT(thumbnail->property("status").toInt() != 2, 15000);
+            QVERIFY(fallback->isVisible());
+        }
+    }
+};
+
+int main(int argc, char **argv) {
+    // Must precede QGuiApplication/QSettings: never read or overwrite personal preferences.
+    QTemporaryDir env(QString(NOOK_BINARY_DIR) + "/followup-env-XXXXXX");
+    if (!env.isValid())
+        return 1;
+    qputenv("XDG_CONFIG_HOME", QFile::encodeName(env.path() + "/config"));
+    qputenv("XDG_DATA_HOME", QFile::encodeName(env.path() + "/data"));
+    qputenv("XDG_CACHE_HOME", QFile::encodeName(env.path() + "/cache"));
+    qputenv("GIO_USE_VFS", "local");
+    // Do not inherit a portal platform theme that starts desktop services in the test session.
+    if (qEnvironmentVariableIsEmpty("NOOK_REAL_THEME")) qputenv("QT_QPA_PLATFORMTHEME", "generic");
+    QGuiApplication app(argc, argv);
+    app.setApplicationName("nook-followup-UI-test");
+    FollowupUiTest test;
+    const int result = QTest::qExec(&test, argc, argv);
+    QThreadPool::globalInstance()->waitForDone();
+    return result;
+}
+#include "followup_ui_test.moc"

@@ -1,0 +1,17 @@
+// Optional: merge into your own niri configuration after testing.
+// Installing nook never applies these rules automatically.
+// Nook paints its own translucent surface, so keep the window itself fully opaque:
+// a global "opacity 0.9" rule would also fade text and icons. The blur is clipped to the
+// app's 12 px corners instead of showing square edges behind them.
+window-rule {
+    match app-id="^local\.nook$"
+    opacity 1.0
+    geometry-corner-radius 12
+    clip-to-geometry true
+    background-effect {
+        blur true
+        xray false
+    }
+}
+// Optional bind; replace an existing Mod+E instead of defining it twice.
+// binds { Mod+E { spawn "nook" "--new-window"; } }

@@ -1,0 +1,129 @@
+#pragma once
+#include "files.h"
+#include <QAbstractListModel>
+#include <QFileSystemWatcher>
+#include <QSet>
+#include <QTimer>
+
+class DirectoryModel : public QAbstractListModel {
+    Q_OBJECT
+    Q_PROPERTY(QString uri READ uri NOTIFY locationChanged)
+    Q_PROPERTY(QString displayPath READ displayPath NOTIFY locationChanged)
+    Q_PROPERTY(QString title READ title NOTIFY locationChanged)
+    Q_PROPERTY(QVariantList breadcrumbs READ breadcrumbs NOTIFY locationChanged)
+    Q_PROPERTY(bool loading READ loading NOTIFY statusChanged)
+    Q_PROPERTY(QString error READ error NOTIFY statusChanged)
+    Q_PROPERTY(int count READ count NOTIFY countChanged)
+    Q_PROPERTY(bool showHidden READ showHidden WRITE setShowHidden NOTIFY showHiddenChanged)
+    Q_PROPERTY(int selectedCount READ selectedCount NOTIFY selectionChanged)
+    Q_PROPERTY(QStringList selectedUris READ selectedUris NOTIFY selectionChanged)
+    Q_PROPERTY(bool canBack READ canBack NOTIFY locationChanged)
+    Q_PROPERTY(bool canForward READ canForward NOTIFY locationChanged)
+  public:
+    enum Role {
+        NameRole = Qt::UserRole + 1,
+        UriRole,
+        FolderRole,
+        LinkRole,
+        SizeRole,
+        ModifiedRole,
+        KindRole,
+        IconRole,
+        SelectedRole,
+        FullPathRole,
+        BytesRole,
+        OriginalRole,
+        HiddenRole
+    };
+    explicit DirectoryModel(QObject *parent = nullptr);
+    ~DirectoryModel() override;
+    int rowCount(const QModelIndex &parent = {}) const override;
+    QVariant data(const QModelIndex &index, int role) const override;
+    QHash<int, QByteArray> roleNames() const override;
+    QString uri() const {
+        return m_uri;
+    }
+    QString title() const {
+        return nook::displayName(m_uri);
+    }
+    QVariantList breadcrumbs() const;
+    QString displayPath() const {
+        return m_uri.startsWith("trash:") ? QStringLiteral("回收站") : nook::localPath(m_uri);
+    }
+    bool loading() const {
+        return m_loading;
+    }
+    QString error() const {
+        return m_error;
+    }
+    int count() const {
+        return m_entries.size();
+    }
+    bool showHidden() const {
+        return m_hidden;
+    }
+    int selectedCount() const {
+        return m_selected.size();
+    }
+    QStringList selectedUris() const;
+    bool canBack() const {
+        return m_historyAt > 0;
+    }
+    bool canForward() const {
+        return m_historyAt + 1 < m_history.size();
+    }
+    void setShowHidden(bool value);
+    Q_INVOKABLE void navigate(const QString &input);
+    Q_INVOKABLE void refresh();
+    Q_INVOKABLE void back();
+    Q_INVOKABLE void forward();
+    Q_INVOKABLE void up();
+    Q_INVOKABLE QVariantMap entry(int row) const;
+    // First selected entry in view order; one map instead of building every row in QML.
+    Q_INVOKABLE QVariantMap firstSelected() const;
+    Q_INVOKABLE void select(int row, int modifiers = 0);
+    Q_INVOKABLE void selectAll();
+    Q_INVOKABLE void clearSelection();
+    Q_INVOKABLE void selectUri(const QString &uri);
+    // Rubber-band selection: exactly base plus these rows (signals only rows that flip).
+    Q_INVOKABLE void selectRows(const QList<int> &rows, const QStringList &base = {});
+    Q_INVOKABLE void sortBy(const QString &key, bool descending = false);
+    void replaceEntries(QList<nook::Entry> entries);
+    void appendEntries(QList<nook::Entry> entries);
+    void setBusy(bool value, QString error = {});
+    // One step of an incremental refresh, replayed on the GUI thread as row signals.
+    struct Change {
+        enum Kind { Remove, Insert, Move, Update } kind;
+        int at = 0, count = 0, from = 0;
+        QList<nook::Entry> entries;
+    };
+    // Turns old into next with removes/inserts/moves/updates; false when a reset is cheaper.
+    static bool diff(QList<nook::Entry> old, const QList<nook::Entry> &next, QList<Change> *changes);
+
+  Q_SIGNALS:
+    void locationChanged();
+    void statusChanged();
+    void countChanged();
+    void showHiddenChanged();
+    void selectionChanged();
+    void firstBatch(qint64 milliseconds);
+
+  private:
+    // keep: refresh in place (diffed, scroll and selection kept) instead of clearing first.
+    void load(bool keep = false);
+    void apply(const QList<Change> &changes);
+    void notifySelection(const QSet<QString> &previous);
+    void notifySelection();
+    QString m_uri, m_error, m_sort = "name", m_pendingSelection;
+    QStringList m_history;
+    int m_historyAt = -1, m_anchor = -1;
+    quint64 m_generation = 0;
+    bool m_loading = false, m_hidden = false, m_descending = false;
+    QList<nook::Entry> m_entries;
+    QSet<QString> m_selected;
+    mutable QStringList m_selectedCache;
+    mutable bool m_selectedDirty = true;
+    nook::Cancel m_cancel;
+    QFileSystemWatcher m_watcher;
+    QTimer m_refreshTimer;
+};

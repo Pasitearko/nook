@@ -1,0 +1,367 @@
+#include "application.h"
+#include "storage.h"
+#include <QDir>
+#include <QCommandLineParser>
+#include <QElapsedTimer>
+#include <QFileInfo>
+#include <QGuiApplication>
+#include <QImageReader>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QLockFile>
+#include <QQmlApplicationEngine>
+#include <QQuickWindow>
+#include <QSaveFile>
+#include <QStandardPaths>
+#include <QTextStream>
+#include <QTimer>
+#include <sys/resource.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    auto launchClock = std::make_shared<QElapsedTimer>();
+    launchClock->start();
+    const bool worker = argc > 1 && (QByteArray(argv[1]) == "--preview-worker" ||
+                                     QByteArray(argv[1]) == "--thumbnail-worker");
+    if (worker)
+        ::setpgid(0, 0);
+    if (worker)
+        qputenv("QT_QPA_PLATFORM", "offscreen");
+    QGuiApplication app(argc, argv);
+    app.setApplicationName("nook");
+    app.setOrganizationName("nook");
+    app.setApplicationVersion("0.1");
+    app.setDesktopFileName("local.nook");
+    QImageReader::setAllocationLimit(96);
+    if (worker) {
+        struct rlimit cpu{12, 12};
+        setrlimit(RLIMIT_CPU, &cpu);
+        struct rlimit fileSize{32 * 1024 * 1024, 32 * 1024 * 1024};
+        setrlimit(RLIMIT_FSIZE, &fileSize);
+        bool thumb = QByteArray(argv[1]) == "--thumbnail-worker";
+        auto result = makePreview(argc > 2 ? QString::fromLocal8Bit(argv[2]) : QString(),
+                                  argc > 3 ? QByteArray(argv[3]).toInt() : 1, thumb);
+        QTextStream(stdout) << QJsonDocument::fromVariant(result).toJson(QJsonDocument::Compact) << Qt::endl;
+        return 0;
+    }
+    QCommandLineParser parser;
+    parser.setApplicationDescription("适用于 Wayland 的轻量文件管理器");
+    parser.addHelpOption();
+    parser.addVersionOption();
+    parser.addPositionalArgument("paths", "目录、文件或 file:// URI", "[paths…]");
+    parser.addOption({"new-window", "打开独立窗口"});
+    parser.addOption({"select", "打开所在目录并选中文件", "path"});
+    parser.addOption({"no-index", "本次不启动后台索引"});
+    parser.addOption({"background", "后台常驻维护文件名索引，不打开窗口（开机自启使用）"});
+    parser.addOption({"isolated", "独立实例，不转发给已运行窗口"});
+    parser.addOption({"profile-dir", "仅隔离 nook 的配置、索引和缓存，保留系统输入法主题（开发验证）", "path"});
+    parser.addOption({"capture", "保存本窗口截图（开发验证）", "path"});
+    parser.addOption({"metrics", "记录首次内容渲染时间（开发验证）", "path"});
+    parser.addOption({"quit-after", "指定毫秒后退出（开发验证）", "milliseconds"});
+    parser.addOption({"benchmark-directory", "仅测量隔离目录读取时间，不显示窗口", "path"});
+    parser.addOption({"benchmark-query", "仅测量已有索引查询，不扫描文件", "query"});
+    parser.process(app);
+    nook::initializeProfile(parser.isSet("profile-dir") ? parser.value("profile-dir")
+                                                      : qEnvironmentVariable("NOOK_PROFILE_DIR"));
+    const bool profile = nook::customProfile();
+    const bool isolated = profile || parser.isSet("isolated");
+    if (parser.isSet("benchmark-query")) {
+        SearchIndex index;
+        QElapsedTimer elapsed;
+        elapsed.start();
+        QObject::connect(index.model(), &DirectoryModel::statusChanged, &app, [&] {
+            if (index.model()->loading())
+                return;
+            QTextStream(stdout) << QJsonDocument(QJsonObject{{"returned", index.model()->count()},
+                                                             {"more", index.hasMore()},
+                                                             {"milliseconds", elapsed.elapsed()},
+                                                             {"error", index.model()->error()}})
+                                       .toJson(QJsonDocument::Compact)
+                                << Qt::endl;
+            app.quit();
+        });
+        index.query(parser.value("benchmark-query"));
+        int rc = app.exec();
+        QThreadPool::globalInstance()->waitForDone();
+        return rc;
+    }
+    if (parser.isSet("benchmark-directory")) {
+        DirectoryModel model;
+        QElapsedTimer timer;
+        timer.start();
+        qint64 first = -1;
+        QObject::connect(&model, &DirectoryModel::firstBatch, &app, [&](qint64 ms) { first = ms; });
+        QObject::connect(&model, &DirectoryModel::statusChanged, &app, [&] {
+            if (model.loading())
+                return;
+            QTextStream(stdout) << QJsonDocument(QJsonObject{{"entries", model.count()},
+                                                             {"firstBatchMs", first},
+                                                             {"completeMs", timer.elapsed()},
+                                                             {"error", model.error()}})
+                                       .toJson(QJsonDocument::Compact)
+                                << Qt::endl;
+            app.quit();
+        });
+        model.setShowHidden(true);
+        model.navigate(parser.value("benchmark-directory"));
+        int rc = app.exec();
+        QThreadPool::globalInstance()->waitForDone();
+        return rc;
+    }
+    QStringList paths;
+    for (const auto &path : parser.positionalArguments())
+        paths.append(nook::normalizeUri(path));
+    QJsonObject request{
+        {"paths", QJsonArray::fromStringList(paths)},
+        {"select", parser.isSet("select") ? nook::normalizeUri(parser.value("select")) : QString()},
+        {"newWindow", parser.isSet("new-window")}};
+    QString socketPath = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation) + "/nook-" +
+                         QString::number(getuid()) + ".sock";
+    QLocalServer server;
+    QLockFile instanceLock(socketPath + ".lock");
+    instanceLock.setStaleLockTime(0);
+    const bool background = parser.isSet("background");
+    if (!isolated) {
+        if (!instanceLock.tryLock(0)) {
+            // The resident instance already maintains the index; autostart has nothing to add.
+            if (background)
+                return 0;
+            QLocalSocket socket;
+            bool connected = false;
+            for (int i = 0; i < 5 && !connected; ++i) {
+                socket.abort();
+                socket.connectToServer(socketPath);
+                connected = socket.waitForConnected(200);
+            }
+            if (!connected) {
+                QTextStream(stderr) << "已有实例正在启动或无响应，请稍后重试。" << Qt::endl;
+                return 1;
+            }
+            socket.write(QJsonDocument(request).toJson(QJsonDocument::Compact) + '\n');
+            socket.flush();
+            socket.waitForBytesWritten(500);
+            return 0;
+        }
+        QLocalServer::removeServer(socketPath);
+        server.setSocketOptions(QLocalServer::UserAccessOption);
+        if (!server.listen(socketPath)) {
+            QTextStream(stderr) << "无法建立单实例连接：" << server.errorString() << Qt::endl;
+            return 1;
+        }
+    }
+    AppSettings settings;
+    const auto residentEnabled = [&settings, profile] {
+        return !profile && settings.values()["backgroundIndex"].toBool();
+    };
+    if (background && !residentEnabled())
+        return 0;
+    // Resident mode: closing the last window keeps the process (and its index watchers) alive,
+    // so the next window opens instantly without re-scanning the disk.
+    app.setQuitOnLastWindowClosed(!residentEnabled());
+    if (!isolated)
+        nook::syncAutostart(residentEnabled());
+    QObject::connect(&settings, &AppSettings::changed, &app,
+                     [&, previous = residentEnabled()]() mutable {
+                         const bool current = residentEnabled();
+                         if (current == previous)
+                             return;
+                         previous = current;
+                         app.setQuitOnLastWindowClosed(!current);
+                         if (!isolated)
+                             nook::syncAutostart(current);
+                     });
+    SearchIndex index;
+    Operations operations;
+    index.setRoots(settings.values()["roots"].toStringList());
+    index.setExclusions(settings.values()["exclusions"].toStringList());
+    index.setNtfsJournal(settings.values()["ntfsJournal"].toBool());
+    QObject::connect(&settings, &AppSettings::changed, &index, [&] {
+        index.setRoots(settings.values()["roots"].toStringList());
+        index.setExclusions(settings.values()["exclusions"].toStringList());
+        const bool ntfs = settings.values()["ntfsJournal"].toBool();
+        if (ntfs == index.ntfsJournal())
+            return;
+        // Switching sources is a full pass: the running one is stopped first.
+        index.setNtfsJournal(ntfs);
+        index.stop();
+        auto *restart = new QTimer(&index);
+        restart->setInterval(100);
+        QObject::connect(restart, &QTimer::timeout, &index, [&index, restart] {
+            if (index.scanning())
+                return;
+            restart->deleteLater();
+            index.start();
+        });
+        restart->start();
+    });
+    std::vector<std::unique_ptr<Application>> controllers;
+    QQmlApplicationEngine engine;
+    engine.addImageProvider("thumb", new ThumbnailProvider);
+    std::function<void(const QJsonObject &, bool)> createWindow;
+    auto handlePaths = [](Application *controller, const QJsonObject &req) {
+        for (const auto &value : req["paths"].toArray()) {
+            QString uri = nook::normalizeUri(value.toString());
+            QFileInfo info(nook::localPath(uri));
+            if (info.isFile() || info.isSymLink())
+                controller->reveal(uri);
+            else
+                controller->navigate(uri);
+        }
+        if (!req["select"].toString().isEmpty())
+            controller->reveal(nook::normalizeUri(req["select"].toString()));
+    };
+    createWindow = [&](const QJsonObject &req, bool restore) {
+        auto controller = std::make_unique<Application>(&index, &operations, &settings, restore);
+        auto *ptr = controller.get();
+        controllers.push_back(std::move(controller));
+        QObject::connect(ptr, &Application::windowRequested, &app, [&] { createWindow({}, false); });
+        engine.setInitialProperties({{"controller", QVariant::fromValue(ptr)}});
+        engine.loadFromModule("Nook", "Main");
+        if (!engine.rootObjects().isEmpty()) {
+            auto *root = engine.rootObjects().last();
+            if (auto *window = qobject_cast<QQuickWindow *>(root)) {
+                QObject::connect(window, &QWindow::visibleChanged, window, [window](bool visible) {
+                    if (!visible)
+                        window->deleteLater();
+                });
+                QObject::connect(window, &QObject::destroyed, &app, [&, ptr] {
+                    std::erase_if(controllers, [ptr](const auto &item) { return item.get() == ptr; });
+                });
+                if (parser.isSet("metrics")) {
+                    auto ready = std::make_shared<std::atomic_bool>(false),
+                         written = std::make_shared<std::atomic_bool>(false);
+                    QObject::connect(ptr->left(), &DirectoryModel::firstBatch, window,
+                                     [ready](qint64) { *ready = true; });
+                    const QString report = parser.value("metrics");
+                    QObject::connect(
+                        window, &QQuickWindow::afterRendering, window,
+                        [ready, written, launchClock, report] {
+                            if (!ready->load() || written->exchange(true))
+                                return;
+                            const qint64 ms = launchClock->elapsed();
+                            QMetaObject::invokeMethod(
+                                qApp,
+                                [ms, report] {
+                                    QSaveFile file(report);
+                                    if (file.open(QIODevice::WriteOnly)) {
+                                        file.write(
+                                            QJsonDocument(QJsonObject{{"firstContentFrameMs", ms}}).toJson());
+                                        file.commit();
+                                    }
+                                },
+                                Qt::QueuedConnection);
+                        },
+                        Qt::DirectConnection);
+                }
+            }
+        }
+        handlePaths(ptr, req);
+    };
+    if (!background) {
+        createWindow(request, !isolated && parser.positionalArguments().isEmpty() &&
+                                  !parser.isSet("select"));
+        if (engine.rootObjects().isEmpty())
+            return 1;
+    }
+    QObject::connect(&server, &QLocalServer::newConnection, &app, [&] {
+        while (auto *socket = server.nextPendingConnection()) {
+            auto buffer = std::make_shared<QByteArray>();
+            auto *timeout = new QTimer(socket);
+            timeout->setSingleShot(true);
+            timeout->start(2000);
+            QObject::connect(timeout, &QTimer::timeout, socket, &QLocalSocket::disconnectFromServer);
+            auto consume = [&, socket, buffer] {
+                *buffer += socket->readAll();
+                if (buffer->size() > 65536) {
+                    socket->disconnectFromServer();
+                    return;
+                }
+                if (!buffer->contains('\n'))
+                    return;
+                auto req = QJsonDocument::fromJson(buffer->split('\n').first()).object();
+                const auto roots = engine.rootObjects();
+                QObject *root = nullptr;
+                for (auto it = roots.crbegin(); it != roots.crend(); ++it)
+                    if (auto *candidate = qobject_cast<QQuickWindow *>(*it); candidate && candidate->isVisible()) {
+                        root = *it;
+                        break;
+                    }
+                if (req["newWindow"].toBool())
+                    createWindow(req, false);
+                else if (!root) {
+                    // First window after all were closed (or of a background start): restore the session.
+                    createWindow(req, req["paths"].toArray().isEmpty() && req["select"].toString().isEmpty() &&
+                                          controllers.empty());
+                    socket->disconnectFromServer();
+                    return;
+                } else {
+                    auto *controller = root->property("controller").value<Application *>();
+                    if (controller)
+                        handlePaths(controller, req);
+                    if (auto *window = qobject_cast<QQuickWindow *>(root)) {
+                        window->show();
+                        window->requestActivate();
+                        // A second launch is an explicit user activation. niri's
+                        // IPC fallback focuses only this process's own window;
+                        // no session-wide focus policy is changed.
+                        if (qEnvironmentVariable("XDG_CURRENT_DESKTOP").contains("niri")) {
+                            auto *query = new QProcess(&app);
+                            const QString title = window->title();
+                            QObject::connect(
+                                query, &QProcess::finished, &app,
+                                [query, title](int code, QProcess::ExitStatus) {
+                                    if (code == 0) {
+                                        auto windows =
+                                            QJsonDocument::fromJson(query->readAllStandardOutput()).array();
+                                        for (const auto &value : windows) {
+                                            auto item = value.toObject();
+                                            if (item["pid"].toInteger() !=
+                                                    QCoreApplication::applicationPid() ||
+                                                item["title"].toString() != title)
+                                                continue;
+                                            QProcess::startDetached(
+                                                "niri", {"msg", "action", "focus-window", "--id",
+                                                         QString::number(item["id"].toInteger())});
+                                            break;
+                                        }
+                                    }
+                                    query->deleteLater();
+                                });
+                            query->start("niri", {"msg", "--json", "windows"});
+                            QTimer::singleShot(1000, query, [query] {
+                                if (query->state() != QProcess::NotRunning)
+                                    query->kill();
+                            });
+                        }
+                    }
+                }
+                socket->disconnectFromServer();
+            };
+            QObject::connect(socket, &QLocalSocket::readyRead, &app, consume);
+            if (socket->bytesAvailable())
+                consume();
+            QObject::connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+        }
+    });
+    // At login, give the session a moment to settle before the low-priority scan.
+    if (!parser.isSet("no-index"))
+        QTimer::singleShot(background ? 8000 : 1500, &index, &SearchIndex::start);
+    if (parser.isSet("capture"))
+        QTimer::singleShot(2000, &app, [&] {
+            if (auto *window = engine.rootObjects().isEmpty() ? nullptr : qobject_cast<QQuickWindow *>(engine.rootObjects().first()))
+                window->grabWindow().save(parser.value("capture"));
+        });
+    if (parser.isSet("quit-after"))
+        QTimer::singleShot(parser.value("quit-after").toInt(), &app, &QCoreApplication::quit);
+    int code = app.exec();
+    index.stop();
+    for (auto &controller : controllers) {
+        controller->preview()->close();
+        controller->saveSession();
+    }
+    operations.cancel();
+    return code;
+}

@@ -1,0 +1,117 @@
+#!/usr/bin/python3 -I
+"""Install or remove the polkit rule that lets one user's active local session use
+nook-volume-helper without a password.
+
+Invoked only as: pkexec /usr/lib/nook/nook-volume-setup enable|disable
+The rule names the calling user (PKEXEC_UID) and the single read-only volume action; nothing else
+is granted. Importing has no side effects.
+"""
+import os
+import pwd
+import re
+import stat
+import sys
+import tempfile
+
+HELPER = "/usr/lib/nook/nook-volume-setup"
+RULES = "/etc/polkit-1/rules.d"
+RULE = RULES + "/49-nook-volume.rules"
+MARK = "// nook:volume-rule v1"
+USER_RE = re.compile(r"[a-z_][a-z0-9_.-]{0,31}\Z")
+
+
+class Rejected(Exception):
+    pass
+
+
+def require_trusted(st, directory=False):
+    valid_kind = stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode)
+    if not valid_kind or st.st_uid != 0 or st.st_mode & 0o022:
+        raise Rejected("Expected a root-owned, non-writable trusted " + ("directory." if directory else "file."))
+
+
+def caller_name():
+    raw = os.environ.get("PKEXEC_UID", "")
+    if not re.fullmatch(r"[1-9][0-9]{0,9}", raw):
+        raise Rejected("Missing or invalid polkit caller identity.")
+    try:
+        name = pwd.getpwuid(int(raw)).pw_name
+    except (KeyError, OverflowError) as exc:
+        raise Rejected("Polkit caller does not exist.") from exc
+    if not USER_RE.match(name):
+        raise Rejected("Unsupported user name.")
+    return name
+
+
+def check_installation(argv):
+    if os.getuid() != 0 or os.geteuid() != 0:
+        raise Rejected("This helper must be invoked as root by pkexec.")
+    if len(argv) != 2 or os.path.abspath(argv[0]) != HELPER or argv[1] not in ("enable", "disable"):
+        raise Rejected("Usage: nook-volume-setup enable|disable")
+    for path in ("/", "/usr", "/usr/lib", "/usr/lib/nook"):
+        require_trusted(os.lstat(path), directory=True)
+    require_trusted(os.lstat(HELPER))
+    return argv[1], caller_name()
+
+
+def render_rule(user):
+    if not USER_RE.match(user):
+        raise Rejected("Unsupported user name.")
+    return (MARK + "\n"
+            "// Written by nook: lets " + user + "'s active local session open NTFS partitions\n"
+            "// read-only for the file-name index without a password. Turn it off in nook\n"
+            "// (Settings > Search & index) or run: pkexec " + HELPER + " disable\n"
+            "polkit.addRule(function(action, subject) {\n"
+            "    if (action.id == \"local.nook.readvolume\" && subject.user == \"" + user + "\" &&\n"
+            "        subject.local && subject.active) {\n"
+            "        return polkit.Result.YES;\n"
+            "    }\n"
+            "});\n")
+
+
+def install(user, rules=RULES, rule=RULE):
+    if rules == RULES:
+        require_trusted(os.lstat(rules), directory=True)
+    data = render_rule(user).encode("utf-8")
+    fd, temp = tempfile.mkstemp(prefix=".nook-", dir=rules)
+    try:
+        os.fchmod(fd, 0o644)
+        os.write(fd, data)
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        os.replace(temp, rule)
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        if os.path.exists(temp):
+            os.unlink(temp)
+        raise
+
+
+def remove(rule=RULE):
+    try:
+        with open(rule, "r", encoding="utf-8") as existing:
+            if not existing.read(len(MARK)) == MARK:
+                raise Rejected("Refusing to remove a rule nook did not write.")
+    except FileNotFoundError:
+        return
+    os.unlink(rule)
+
+
+def main(argv):
+    os.umask(0o022)
+    try:
+        mode, user = check_installation(argv)
+        if mode == "enable":
+            install(user)
+        else:
+            remove()
+        return 0
+    except (Rejected, OSError, ValueError) as exc:
+        print("nook-volume-setup: " + str(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

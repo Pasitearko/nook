@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Name=nook
+Name[zh_CN]=星择（nook）
+Comment=Browse, find and preview your local files
+Comment[zh_CN]=浏览、搜索和预览本地文件
+Exec=nook %U
+Icon=nook
+Terminal=false
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;
+StartupNotify=true
+StartupWMClass=local.nook
+Actions=NewWindow;
+
+[Desktop Action NewWindow]
+Name=New Window
+Name[zh_CN]=新建窗口
+Exec=nook --new-window

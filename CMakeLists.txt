@@ -1,0 +1,109 @@
+cmake_minimum_required(VERSION 3.25)
+project(nook VERSION 0.1 LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Concurrent Network Test ShaderTools)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
+pkg_check_modules(ICU REQUIRED IMPORTED_TARGET icu-i18n icu-uc)
+find_package(SQLite3 REQUIRED)
+qt_standard_project_setup(REQUIRES 6.8)
+add_library(nook_core STATIC
+    src/files.cpp src/files.h src/storage.cpp src/storage.h
+    src/directorymodel.cpp src/directorymodel.h
+    src/operations.cpp src/operations.h src/searchindex.cpp src/searchindex.h
+    src/preview.cpp src/preview.h src/application.cpp src/application.h
+    src/fileproperties.cpp src/fileproperties.h
+    src/diskmounts.cpp src/diskmounts.h src/ntfs.cpp src/ntfs.h)
+target_link_libraries(nook_core PUBLIC Qt6::Core Qt6::Gui Qt6::Quick Qt6::Concurrent Qt6::Network
+    PkgConfig::GIO PkgConfig::ICU SQLite3::SQLite3)
+target_include_directories(nook_core PUBLIC src)
+target_compile_definitions(nook_core PUBLIC QT_NO_KEYWORDS)
+target_compile_options(nook_core PRIVATE -Wall -Wextra -Wpedantic)
+qt_add_executable(nook src/main.cpp)
+qt_add_qml_module(nook URI Nook VERSION 1.0
+    QML_FILES qml/Main.qml qml/FilePane.qml qml/ActionButton.qml qml/Icon.qml
+        qml/NookMenu.qml qml/NookMenuItem.qml qml/SettingsPanel.qml
+        qml/NookToolTip.qml qml/NookComboBox.qml qml/Sidebar.qml qml/PropertiesDialog.qml
+        qml/Spotlight.qml
+        qml/Theme.qml qml/palette.js qml/DatePicker.qml qml/TextMenu.qml qml/TextMenuArea.qml
+    RESOURCES qml/icons/folder.svg qml/icons/file.svg qml/icons/image.svg
+    qml/icons/code.svg qml/icons/document.svg qml/icons/video.svg qml/icons/music.svg
+    qml/icons/home.svg qml/icons/download.svg qml/icons/drive.svg qml/icons/trash.svg
+    qml/icons/search.svg qml/icons/settings.svg
+    qml/icons/add.svg
+    qml/icons/close.svg
+    qml/icons/back.svg
+    qml/icons/forward.svg
+    qml/icons/up.svg
+    qml/icons/refresh.svg
+    qml/icons/cut.svg
+    qml/icons/copy.svg
+    qml/icons/paste.svg
+    qml/icons/rename.svg
+    qml/icons/list.svg
+    qml/icons/grid.svg
+    qml/icons/split.svg
+    qml/icons/terminal.svg
+    qml/icons/hidden.svg
+    qml/icons/filter.svg
+    qml/icons/calendar.svg
+    qml/icons/undo.svg
+    qml/icons/redo.svg
+    qml/icons/select-all.svg
+    qml/icons/sun.svg
+    qml/icons/moon.svg
+)
+# GLSL sources are compiled to portable .qsb (Vulkan/GL/Metal) at build time.
+qt_add_shaders(nook "nook-shaders"
+    PREFIX "/qt/qml/Nook"
+    FILES qml/shaders/spotlight.frag qml/shaders/tint.frag)
+target_link_libraries(nook PRIVATE nook_core Qt6::QuickControls2)
+# Development probe for NTFS volumes (read-only); built, never installed.
+add_executable(nook-ntfs-probe tools/ntfs_probe.cpp)
+target_link_libraries(nook-ntfs-probe PRIVATE nook_core)
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME mount-helper COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/mount_helper_test.py)
+    add_test(NAME volume-helper COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/volume_helper_test.py)
+    qt_add_executable(nook-tests tests/core_test.cpp)
+    target_link_libraries(nook-tests PRIVATE nook_core Qt6::Test)
+    add_test(NAME core COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/run-core.sh $<TARGET_FILE:nook-tests>)
+    set_tests_properties(core PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    qt_add_executable(nook-ntfs-tests tests/ntfs_test.cpp tests/ntfs_image.h)
+    target_link_libraries(nook-ntfs-tests PRIVATE nook_core Qt6::Test)
+    add_test(NAME ntfs COMMAND nook-ntfs-tests)
+    qt_add_executable(nook-properties-tests tests/properties_test.cpp)
+    target_link_libraries(nook-properties-tests PRIVATE nook_core Qt6::Test)
+    add_test(NAME properties COMMAND nook-properties-tests)
+    set_tests_properties(properties PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    qt_add_executable(nook-thumbnail-tests tests/thumbnail_test.cpp)
+    target_link_libraries(nook-thumbnail-tests PRIVATE nook_core Qt6::Test)
+    add_test(NAME thumbnails COMMAND nook-thumbnail-tests)
+    set_tests_properties(thumbnails PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+    qt_add_executable(nook-followup-ui-tests tests/followup_ui_test.cpp)
+    target_link_libraries(nook-followup-ui-tests PRIVATE nook_core Qt6::Test Qt6::QuickControls2)
+    target_compile_definitions(nook-followup-ui-tests PRIVATE NOOK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" NOOK_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+    add_test(NAME followup-ui COMMAND nook-followup-ui-tests)
+    set_tests_properties(followup-ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+    qt_add_executable(nook-ui-tests tests/ui_test.cpp)
+    target_link_libraries(nook-ui-tests PRIVATE nook_core Qt6::Test Qt6::QuickControls2)
+    target_compile_definitions(nook-ui-tests PRIVATE NOOK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" NOOK_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+    add_test(NAME ui COMMAND nook-ui-tests)
+    set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+endif()
+include(GNUInstallDirs)
+install(TARGETS nook RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES packaging/local.nook.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+# The pkexec policy intentionally names an absolute, root-owned installed helper.
+install(PROGRAMS packaging/nook-mount-helper DESTINATION lib/nook)
+install(PROGRAMS packaging/nook-volume-helper packaging/nook-volume-setup DESTINATION lib/nook)
+install(FILES packaging/local.nook.mount.policy packaging/local.nook.volume.policy
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/polkit-1/actions)
+install(FILES qml/icons/folder.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps RENAME nook.svg)
+install(FILES LICENSE THIRD_PARTY.md DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/nook)
+install(FILES README.md LICENSE THIRD_PARTY.md packaging/niri.example.kdl DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook)
+install(FILES docs/VALIDATION.md docs/AUTOMOUNT-DESIGN.md docs/INPUT-METHOD.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook/docs)
+install(DIRECTORY docs/screenshots DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook/docs)

@@ -1,0 +1,23 @@
+pkgname=nook
+pkgver=0.1
+pkgrel=1
+pkgdesc='A native Wayland file manager with local filename search and on-demand previews'
+arch=('x86_64')
+url='https://github.com/Pasitearko/nook'
+license=('Apache-2.0')
+depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-imageformats' 'glib2' 'sqlite' 'icu' 'polkit' 'python' 'util-linux' 'systemd')
+makedepends=('cmake' 'ninja' 'pkgconf' 'qt6-shadertools')
+optdepends=('poppler: PDF preview' 'ffmpeg: audio/video metadata and video cover' 'kitty: open a terminal' 'gvfs: desktop trash integration' 'udisks2: mount local data partitions on click')
+source=("nook-${pkgver}.tar.gz")
+sha256sums=('REPLACED_BY_PACKAGE_SCRIPT')
+build() {
+    cmake -S "nook-${pkgver}" -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=ON
+    cmake --build build
+}
+check() {
+    QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
+}
+package() {
+    DESTDIR="$pkgdir" cmake --install build
+}
