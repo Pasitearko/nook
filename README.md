@@ -12,6 +12,7 @@
 - **快速预览**：空格打开／关闭预览；可开启静态文件悬停预览，预览窗口支持调整大小。
 - **简洁的右键菜单**：保留常用操作，支持新建文件、打开方式、快速访问、属性和权限设置。
 - **按习惯调整**：深浅主题、界面缩放、列宽保存、快速访问排序，以及数据盘自动挂载设置。
+- **替代系统文件管理器**：提供 `org.freedesktop.FileManager1`（其他应用的“在文件夹中显示”会打开 nook），并自带与 nook 同风格的“打开／保存”文件选择器（xdg-desktop-portal 后端）。
 
 ## 实机截图
 
@@ -37,6 +38,20 @@ nook
 ```bash
 sudo pacman -S --needed poppler ffmpeg
 ```
+
+### 设为默认文件管理器与文件选择器（可选）
+
+```bash
+# 打开文件夹默认用 nook
+xdg-mime default local.nook.desktop inode/directory
+# 其他应用“在文件夹中显示”交给 nook（覆盖 Nautilus 等的同名服务）
+mkdir -p ~/.local/share/dbus-1/services
+printf '[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=/usr/bin/nook --service\n' > ~/.local/share/dbus-1/services/org.freedesktop.FileManager1.service
+```
+
+文件选择器：在 `~/.config/xdg-desktop-portal/niri-portals.conf`（或当前桌面对应的 `*-portals.conf`）的 `[preferred]` 中写入
+`org.freedesktop.impl.portal.FileChooser=nook;gnome;gtk;`，然后 `systemctl --user restart xdg-desktop-portal`。
+niri 下让选择器浮动打开的窗口规则见 `/usr/share/doc/nook/niri.example.kdl`。
 
 卸载：`sudo pacman -R nook`。个人配置和索引会保留。
 

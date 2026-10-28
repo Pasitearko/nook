@@ -2,6 +2,7 @@
 #include "files.h"
 #include <QCoreApplication>
 #include <QUuid>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -23,6 +24,12 @@ QString fileLabel(GFile *file) {
     g_free(name);
     return result;
 }
+// A byte callback can finish before the temporary copy is committed (or its
+// source removed). Reserve 1% for finalization so even a rounded percentage
+// cannot show 100 before the final task notification.
+double activeProgress(int completed, int total, double fraction = 0) {
+    return total > 0 ? std::clamp((completed + fraction) / total, 0.0, 0.99) : -1;
+}
 bool descendant(GFile *source, GFile *destination) {
     char *a = g_file_get_path(source), *b = g_file_get_path(destination);
     char *ra = a ? realpath(a, nullptr) : nullptr;
@@ -41,6 +48,9 @@ bool descendant(GFile *source, GFile *destination) {
 } // namespace
 Operations::Operations(QObject *parent) : QObject(parent) {
     m_cancel = g_cancellable_new();
+    m_errorNotifyTimer.setSingleShot(true);
+    m_errorNotifyTimer.setInterval(100);
+    connect(&m_errorNotifyTimer, &QTimer::timeout, this, &Operations::errorsChanged);
 }
 Operations::~Operations() {
     cancel();
@@ -62,15 +72,16 @@ void Operations::resolveConflict(int choice) {
     Q_EMIT conflictChanged();
     m_condition.notify_all();
 }
-void Operations::report(QString message) {
+void Operations::report(QString message, double progress, bool force) {
     auto now = std::chrono::steady_clock::now();
-    if (now - m_lastReport < std::chrono::milliseconds(100))
+    if (!force && now - m_lastReport < std::chrono::milliseconds(100))
         return;
     m_lastReport = now;
     QMetaObject::invokeMethod(
         this,
-        [this, message] {
+        [this, message, progress] {
             m_status = message;
+            m_progress = progress;
             Q_EMIT changed();
         },
         Qt::QueuedConnection);
@@ -125,7 +136,8 @@ bool Operations::removeTree(GFile *file, GError **error) {
     }
     return g_file_delete(file, m_cancel, error);
 }
-bool Operations::transfer(GFile *source, GFile *destination, bool move, GError **error) {
+bool Operations::transfer(GFile *source, GFile *destination, bool move, GError **error,
+                          const TransferProgress *progress) {
     if (m_cancelled)
         return false;
     if (g_file_equal(source, destination)) {
@@ -182,10 +194,29 @@ bool Operations::transfer(GFile *source, GFile *destination, bool move, GError *
     }
     auto flags =
         static_cast<GFileCopyFlags>(G_FILE_COPY_NOFOLLOW_SYMLINKS | (overwrite ? G_FILE_COPY_OVERWRITE : 0));
+    // Nested files have no known weight within their selected directory. Do
+    // not turn their per-file byte counts into an invented directory total.
+    struct CallbackContext {
+        Operations *self;
+        const TransferProgress *progress;
+        bool reportedBytes = false;
+    } context{this, directory ? nullptr : progress};
+    auto callback = +[](goffset current, goffset total, gpointer data) {
+        auto &context = *static_cast<CallbackContext *>(data);
+        double value = -1;
+        if (context.progress && total > 0)
+            value = activeProgress(context.progress->completed, context.progress->total,
+                                   std::clamp(double(current) / double(total), 0.0, 1.0));
+        context.self->report(
+            QStringLiteral("正在复制 · %1 / %2").arg(nook::formatSize(current), nook::formatSize(total)),
+            value, value >= 0 && !context.reportedBytes);
+        if (value >= 0)
+            context.reportedBytes = true;
+    };
     if (move) {
         GError *moveError = nullptr;
         if (g_file_move(source, target, static_cast<GFileCopyFlags>(flags | G_FILE_COPY_NO_FALLBACK_FOR_MOVE),
-                        m_cancel, nullptr, nullptr, &moveError))
+                        m_cancel, callback, &context, &moveError))
             return true;
         if (!g_error_matches(moveError, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED) &&
             !g_error_matches(moveError, G_IO_ERROR, G_IO_ERROR_WOULD_RECURSE)) {
@@ -232,14 +263,8 @@ bool Operations::transfer(GFile *source, GFile *destination, bool move, GError *
     auto temporary = QByteArray(".nook-copy-") + QUuid::createUuid().toByteArray(QUuid::Id128) + ".part";
     FileRef temp(g_file_get_child(parent, temporary.constData()));
     report(QStringLiteral("正在处理 %1").arg(fileLabel(source)));
-    bool success = g_file_copy(
-        source, temp, G_FILE_COPY_NOFOLLOW_SYMLINKS, m_cancel,
-        [](goffset current, goffset total, gpointer context) {
-            auto *self = static_cast<Operations *>(context);
-            self->report(QStringLiteral("正在复制 · %1 / %2")
-                             .arg(nook::formatSize(current), nook::formatSize(total)));
-        },
-        this, error);
+    bool success =
+        g_file_copy(source, temp, G_FILE_COPY_NOFOLLOW_SYMLINKS, m_cancel, callback, &context, error);
     if (success)
         success =
             g_file_move(temp, target, static_cast<GFileCopyFlags>(flags | G_FILE_COPY_NO_FALLBACK_FOR_MOVE),
@@ -257,6 +282,7 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
         return;
     if ((kind == "mkdir" || kind == "touch" || kind == "rename") && !nook::validName(name)) {
         m_errors = {QStringLiteral("名称无效：不能包含 /、空字符，或超过文件系统名称长度")};
+        Q_EMIT errorsChanged();
         Q_EMIT changed();
         return;
     }
@@ -265,16 +291,34 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
     m_busy = true;
     m_cancelled = false;
     g_cancellable_reset(m_cancel);
+    m_errorNotifyTimer.stop();
     m_errors.clear();
+    Q_EMIT errorsChanged();
     m_status = QStringLiteral("正在准备…");
+    m_kind = kind;
+    m_completedItems = 0;
+    m_totalItems = kind == "mkdir" || kind == "touch" ? 1 : int(uris.size());
+    m_progress = -1;
+    m_lastReport = {};
     Q_EMIT changed();
-    m_thread = std::thread([this, kind, uris, destination, name] {
+    m_thread = std::thread([this, kind, uris, destination, name, total = m_totalItems] {
         QStringList failures;
         int completed = 0, skipped = 0;
         auto record = [&](const QString &uri, GError *error) {
             if (error) {
-                failures.append(nook::localPath(uri) + ": " + QString::fromUtf8(error->message));
+                const auto failure = nook::localPath(uri) + ": " + QString::fromUtf8(error->message);
+                failures.append(failure);
                 g_error_free(error);
+                // Queue only the new error, never a growing implicitly-shared list.
+                // The first error is immediate; later UI rebuilds are coalesced.
+                QMetaObject::invokeMethod(this, [this, failure] {
+                    const bool first = m_errors.isEmpty();
+                    m_errors.append(failure);
+                    if (first)
+                        Q_EMIT errorsChanged();
+                    else if (!m_errorNotifyTimer.isActive())
+                        m_errorNotifyTimer.start();
+                }, Qt::QueuedConnection);
             }
         };
         if (kind == "mkdir" || kind == "touch") {
@@ -298,6 +342,15 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
                 FileRef source(g_file_new_for_uri(uri.toUtf8().constData()));
                 GError *error = nullptr;
                 bool ok = false;
+                const TransferProgress progress{completed, total};
+                // Reset at every selected item, even if status reporting is throttled.
+                QMetaObject::invokeMethod(
+                    this,
+                    [this] {
+                        m_progress = -1;
+                        Q_EMIT changed();
+                    },
+                    Qt::QueuedConnection);
                 report(QStringLiteral("正在处理 %1").arg(fileLabel(source)));
                 if (kind == "trash")
                     ok = g_file_trash(source, m_cancel, &error);
@@ -310,7 +363,7 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
                         const char *path = g_file_info_get_attribute_byte_string(info, "trash::orig-path");
                         if (path) {
                             FileRef target(g_file_new_for_path(path));
-                            ok = transfer(source, target, true, &error);
+                            ok = transfer(source, target, true, &error, &progress);
                         } else
                             g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                                                 "无法确定回收站项目的原始位置");
@@ -323,21 +376,33 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
                     QByteArray raw = kind == "rename" ? name.toUtf8() : QByteArray(base);
                     FileRef target(g_file_get_child(parent, raw.constData()));
                     g_free(base);
-                    ok = transfer(source, target, kind == "move" || kind == "rename", &error);
+                    ok = transfer(source, target, kind == "move" || kind == "rename", &error, &progress);
                 }
-                if (ok)
+                if (ok) {
                     ++completed;
-                else if (!error && !m_cancelled)
+                    QMetaObject::invokeMethod(
+                        this,
+                        [this, completed, total] {
+                            m_completedItems = completed;
+                            m_progress = activeProgress(completed, total);
+                            Q_EMIT changed();
+                        },
+                        Qt::QueuedConnection);
+                } else if (!error && !m_cancelled)
                     ++skipped;
                 record(uri, error);
             }
         bool cancelled = m_cancelled;
         QMetaObject::invokeMethod(
             this,
-            [this, failures, completed, skipped, cancelled] {
+            [this, failures, completed, skipped, cancelled, total] {
                 m_busy = false;
                 m_waiting = false;
+                m_errorNotifyTimer.stop();
                 m_errors = failures;
+                Q_EMIT errorsChanged();
+                m_completedItems = completed;
+                m_progress = total > 0 ? double(completed) / total : 0;
                 m_status = QStringLiteral("%1 · 完成 %2 项，跳过 %3 项，错误 %4 项")
                                .arg(cancelled ? "已取消" : "任务结束")
                                .arg(completed)

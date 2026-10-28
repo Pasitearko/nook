@@ -71,8 +71,21 @@ QString displayName(const QString &uri) {
         return QStringLiteral("文件系统");
     return QFileInfo(path).fileName();
 }
+// KB/MB/GB in steps of 1024, as Windows shows them (not KiB/MiB).
 QString formatSize(qint64 bytes) {
-    return QLocale().formattedDataSize(bytes, 1);
+    if (bytes < 1024)
+        return QStringLiteral("%1 字节").arg(qMax<qint64>(0, bytes));
+    static const char *const units[] = {"KB", "MB", "GB", "TB", "PB"};
+    double value = double(bytes) / 1024;
+    int unit = 0;
+    while (value >= 1024 && unit < 4) {
+        value /= 1024;
+        ++unit;
+    }
+    QString number = QString::number(value, 'f', 1);
+    if (number.endsWith(QLatin1String(".0")))
+        number.chop(2);
+    return number + ' ' + QLatin1String(units[unit]);
 }
 QString iconFor(const QString &name, bool directory) {
     if (directory)

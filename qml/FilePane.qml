@@ -12,7 +12,12 @@ Rectangle {
     property bool dark: true
     property bool dense: false
     property bool thumbnails: true
+    property bool showHeader: true // folder title, column-width button and item count
     readonly property var theme: ApplicationWindow.window.theme
+    readonly property var host: ApplicationWindow.window
+    // Selection mode (toolbar): a click toggles an item, a drag from anywhere draws a band,
+    // and nothing can be dragged away.
+    readonly property bool pickMode: !!host && host.selectionMode === true
     // While a dialog or the preview covers the pane, nothing in it may start a file drag:
     // selecting text in the Properties dialog must never drag the row underneath out as an icon.
     readonly property bool covered: {
@@ -26,6 +31,7 @@ Rectangle {
     onCurrentRowChanged: { list.currentIndex = currentRow; grid.currentIndex = currentRow }
     readonly property bool animated: controller.settings.values.animations
     property int dropRow: -1
+    property int springRow: -1 // the folder that will open if the drag keeps hovering over it
     // Row transitions only for in-place refreshes; a freshly entered folder fades in as a whole.
     property bool populating: false
     readonly property bool rowAnimations: animated && !populating
@@ -60,7 +66,8 @@ Rectangle {
     }
     property bool descending: false
     property int sortColumn: -1
-    readonly property var savedWidths: controller.settings.values.columnWidths || []
+    property bool useSavedWidths: true // false: columns fit this pane (the file chooser)
+    readonly property var savedWidths: useSavedWidths ? controller.settings.values.columnWidths || [] : []
     readonly property string savedSignature: JSON.stringify(savedWidths)
     onSavedSignatureChanged: localWidths = []
     readonly property real columnsWidth: columnWidth(0) + columnWidth(1) + columnWidth(2) + columnWidth(3)
@@ -95,6 +102,7 @@ Rectangle {
     signal blankContextRequested(var model, real x, real y)
     signal focused()
     signal hovered(var entry)
+    signal springRequested(string uri)
     color: theme.pane
     radius: 10
     border.width: 1
@@ -106,6 +114,12 @@ Rectangle {
         currentRow = index
         pane.focused()
         directoryModel.select(index, ((modifiers & Qt.ControlModifier) ? 1 : 0) | ((modifiers & Qt.ShiftModifier) ? 2 : 0))
+        pane.focusFiles()
+    }
+    function toggleRow(index, modifiers) {
+        currentRow = index
+        pane.focused()
+        directoryModel.select(index, 1 | ((modifiers & Qt.ShiftModifier) ? 2 : 0))
         pane.focusFiles()
     }
     function currentEntry() { return directoryModel.firstSelected() }
@@ -153,6 +167,7 @@ Rectangle {
             anchors.margins: 1
             spacing: 0
             Rectangle {
+                visible: pane.showHeader
                 Layout.fillWidth: true; Layout.preferredHeight: 45
                 color: "transparent"
                 RowLayout {
@@ -170,7 +185,12 @@ Rectangle {
                         hint: "将当前列宽设为默认，下次继续使用"
                         onClicked: { pane.saveColumns(); pane.focusFiles() }
                     }
-                    Text { visible: pane.width > 460; text: directoryModel.count.toLocaleString() + " 项"; color: pane.muted; font.pixelSize: 13 }
+                    Text {
+                        objectName: "paneCount"
+                        visible: pane.width > 460
+                        text: (pane.pickMode ? "已选 " + directoryModel.selectedCount.toLocaleString() + " / " : "") + directoryModel.count.toLocaleString() + " 项"
+                        color: pane.pickMode ? pane.theme.accentText : pane.muted; font.pixelSize: 13
+                    }
                     BusyIndicator { running: directoryModel.loading; visible: running; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                 }
             }
@@ -313,6 +333,9 @@ Rectangle {
                 }
                 // Blank-space pointer: click clears, right-click opens the blank menu, and a left
                 // drag draws a Windows-style selection band (Ctrl adds to the current selection).
+                // In the list view the date/type/size cells start a band too (only the name drags
+                // files, as in Explorer's details view); in selection mode every press does, bands
+                // flip what they cover, and clicks toggle items instead of replacing the selection.
                 MouseArea {
                     id: band
                     objectName: "emptyAreaPointer"
@@ -324,27 +347,47 @@ Rectangle {
                     property point origin: Qt.point(0, 0)   // view content coordinates
                     property point pointer: Qt.point(0, 0)  // local coordinates
                     property var base: []
+                    property int pressRow: -1
                     readonly property var view: pane.gridMode ? grid : list
                     function contentPoint(x, y) {
                         const p = mapToItem(view, x, y)
                         return Qt.point(p.x + view.contentX - view.originX, p.y + view.contentY - view.originY)
                     }
-                    function emptyAt(x, y) {
+                    function onScrollbar(x, y) {
                         const p = mapToItem(view, x, y)
-                        if (p.x >= view.width - 16 || p.y >= view.height - 16) return false // scrollbars
+                        return p.x >= view.width - 16 || p.y >= view.height - 16
+                    }
+                    function rowAt(x, y) {
+                        const p = mapToItem(view, x, y)
+                        return view.indexAt(p.x + view.contentX, p.y + view.contentY)
+                    }
+                    function emptyAt(x, y) {
+                        if (onScrollbar(x, y)) return false
+                        const p = mapToItem(view, x, y)
                         if (!pane.gridMode && p.x + view.contentX > pane.columnsWidth + 18) return true
-                        return view.indexAt(p.x + view.contentX, p.y + view.contentY) < 0
+                        return rowAt(x, y) < 0
+                    }
+                    function bandAt(x, y) {
+                        if (onScrollbar(x, y)) return false
+                        if (pane.pickMode || emptyAt(x, y)) return true
+                        if (pane.gridMode) return false
+                        return mapToItem(view, x, y).x + view.contentX > 9 + pane.columnWidth(0)
                     }
                     function refreshBand() {
                         const c = contentPoint(pointer.x, pointer.y)
                         directoryModel.selectRows(pane.rowsIn(Math.min(origin.x, c.x), Math.min(origin.y, c.y),
-                                                              Math.max(origin.x, c.x), Math.max(origin.y, c.y)), base)
+                                                              Math.max(origin.x, c.x), Math.max(origin.y, c.y)), base, pane.pickMode)
                     }
                     onPressed: event => {
-                        if (!emptyAt(event.x, event.y)) { event.accepted = false; return }
+                        // Right presses on an item belong to it (its context menu).
+                        const mine = event.button === Qt.RightButton ? emptyAt(event.x, event.y) : bandAt(event.x, event.y)
+                        if (!mine) { event.accepted = false; return }
                         selecting = false; dragged = false
+                        pressRow = emptyAt(event.x, event.y) ? -1 : rowAt(event.x, event.y)
                         origin = contentPoint(event.x, event.y); pointer = Qt.point(event.x, event.y)
-                        base = (event.modifiers & Qt.ControlModifier) ? directoryModel.selectedUris.slice() : []
+                        // Selection mode bands flip what they cover (picked items are let go), keeping
+                        // everything outside the band as it was.
+                        base = pane.pickMode || (event.modifiers & Qt.ControlModifier) ? directoryModel.selectedUris.slice() : []
                         pane.focused(); pane.focusFiles()
                     }
                     onPositionChanged: event => {
@@ -359,9 +402,23 @@ Rectangle {
                     }
                     onReleased: selecting = false
                     onCanceled: selecting = false
+                    // The second click of a quick pair: toggles again in selection mode, opens otherwise.
+                    onDoubleClicked: event => {
+                        if (event.button !== Qt.LeftButton || pressRow < 0) return
+                        if (pane.pickMode) pane.toggleRow(pressRow, event.modifiers)
+                        else pane.activated(directoryModel.entry(pressRow))
+                    }
                     onClicked: event => {
                         if (dragged) return
-                        if (!(event.modifiers & Qt.ControlModifier) || event.button === Qt.RightButton) directoryModel.clearSelection()
+                        if (event.button === Qt.LeftButton && pressRow >= 0) {
+                            if (pane.pickMode) pane.toggleRow(pressRow, event.modifiers)
+                            else pane.selectRow(pressRow, event.modifiers)
+                            return
+                        }
+                        // Blank space clears; in selection mode a right click there keeps the picks.
+                        if (pane.pickMode ? event.button === Qt.LeftButton
+                                          : !(event.modifiers & Qt.ControlModifier) || event.button === Qt.RightButton)
+                            directoryModel.clearSelection()
                         pane.focused(); pane.focusFiles()
                         if (event.button === Qt.RightButton) {
                             const p = mapToItem(pane, event.x, event.y)
@@ -414,13 +471,19 @@ Rectangle {
                     property bool allowed: false
                     property string action: ""
                     property int modifiers: -1
+                    property real pointerX: 0
                     property real pointerY: 0
-                    function locate(drag) {
+                    property string springUri: ""
+                    // After a folder opens under a resting pointer, the next one opens only once the
+                    // pointer moves again, so a drag never keeps descending on its own.
+                    property bool springArmed: true
+                    property point restAt: Qt.point(0, 0)
+                    function locate(x, y) {
                         const view = pane.gridMode ? grid : list
-                        const p = mapToItem(view, drag.x, drag.y)
+                        const p = mapToItem(view, x, y)
                         const row = view.indexAt(p.x + view.contentX, p.y + view.contentY)
                         const e = row >= 0 ? directoryModel.entry(row) : null
-                        pointerY = drag.y
+                        pointerX = x; pointerY = y
                         // A folder under the pointer is the target, unless it is one of the dragged items.
                         let uri = "", name = ""
                         if (e && e.folder && urls.indexOf(e.fileUri) < 0) { uri = e.fileUri; name = e.fileName; pane.dropRow = row }
@@ -431,19 +494,34 @@ Rectangle {
                             allowed = uri !== "" && controller.canDrop(urls, uri)
                             action = allowed ? controller.dropAction(urls, uri) : ""
                         }
+                        armSpring()
                     }
-                    function reset() { pane.dropRow = -1; targetUri = ""; allowed = false; action = ""; modifiers = -1; urls = [] }
+                    // Hovering a folder opens it after a moment, whether or not the items could be
+                    // dropped there, so any folder can be reached in the middle of a drag.
+                    function armSpring() {
+                        const uri = springArmed && pane.dropRow >= 0 ? targetUri : ""
+                        if (uri === springUri) return
+                        springUri = uri
+                        pane.springRow = uri ? pane.dropRow : -1
+                        if (uri) springTimer.restart(); else springTimer.stop()
+                    }
+                    function reset() {
+                        springTimer.stop(); springUri = ""; pane.springRow = -1
+                        pane.dropRow = -1; targetUri = ""; allowed = false; action = ""; modifiers = -1; urls = []
+                    }
                     onEntered: drag => {
-                        if (!drag.hasUrls) { drag.accepted = false; return }
-                        let values = []
-                        for (let u of drag.urls) if (String(u).startsWith("file:") || String(u).startsWith("trash:")) values.push(String(u))
-                        urls = values
-                        locate(drag)
+                        urls = pane.host.dragUris(drag)
+                        if (!urls.length) { drag.accepted = false; return }
+                        springArmed = true
+                        locate(drag.x, drag.y)
                     }
-                    onPositionChanged: drag => locate(drag)
+                    onPositionChanged: drag => {
+                        if (!springArmed && (Math.abs(drag.x - restAt.x) > 4 || Math.abs(drag.y - restAt.y) > 4)) springArmed = true
+                        locate(drag.x, drag.y)
+                    }
                     onExited: reset()
                     onDropped: drop => {
-                        locate(drop)
+                        locate(drop.x, drop.y)
                         const uri = targetUri, ok = allowed, values = urls
                         reset()
                         if (!ok) return
@@ -466,6 +544,27 @@ Rectangle {
                             id: hintLabel; anchors.centerIn: parent
                             text: ({move: "移动到 ", copy: "复制到 ", trash: "移入 "})[dropZone.action] + "“" + dropZone.targetName + "”"
                             color: pane.ink; font.pixelSize: 13
+                        }
+                    }
+                    Timer {
+                        id: springTimer
+                        interval: pane.host ? pane.host.springDelay : 700
+                        onTriggered: {
+                            const uri = dropZone.springUri
+                            dropZone.springArmed = false
+                            dropZone.restAt = Qt.point(dropZone.pointerX, dropZone.pointerY)
+                            dropZone.springUri = ""; pane.springRow = -1
+                            if (uri) pane.springRequested(uri)
+                        }
+                    }
+                    // The listing under a resting pointer changes when a folder opens or loads.
+                    Connections {
+                        target: pane.directoryModel
+                        function onCountChanged() { if (dropZone.containsDrag) dropZone.locate(dropZone.pointerX, dropZone.pointerY) }
+                        function onLocationChanged() {
+                            if (!dropZone.containsDrag) return
+                            dropZone.targetUri = ""
+                            dropZone.locate(dropZone.pointerX, dropZone.pointerY)
                         }
                     }
                     // Scroll while hovering near the edges so lower folders stay reachable.
@@ -536,17 +635,14 @@ Rectangle {
             objectName: "fileEntry"
             width: pane.gridMode ? 176 : list.contentWidth
             height: pane.gridMode ? 180 : pane.searchMode ? 62 : (pane.dense ? 36 : 43)
-            Drag.dragType: Drag.Automatic
-            Drag.supportedActions: Qt.CopyAction | Qt.MoveAction
-            Drag.proposedAction: Qt.CopyAction
-            Drag.imageSource: "icons/" + item.iconName + ".svg"
-            // Build the uri list once when a drag starts, not in every delegate on every click.
+            // The platform drag runs from a window-level item, not this row: hovering may open
+            // other folders mid-drag, which recycles or destroys the row that started it.
             DragHandler {
                 id: dragHandler; target: null; acceptedButtons: Qt.LeftButton
-                enabled: !pane.covered
+                enabled: !pane.covered && !pane.pickMode
                 onActiveChanged: {
-                    if (active) item.Drag.mimeData = {"text/uri-list": directoryModel.selectedUris.join("\r\n")}
-                    item.Drag.active = active
+                    if (active && pane.host)
+                        Qt.callLater(pane.host.startFileDrag, directoryModel.selectedUris.slice(), item.iconName)
                 }
             }
             // Pooled rows may come back mid-fade from a remove transition, and must take their
@@ -579,6 +675,7 @@ Rectangle {
                     anchors.fill: parent; radius: 6
                     visible: item.dropTarget
                     color: pane.theme.dropFill; border.width: 1; border.color: pane.theme.accent
+                    SpringProgress { running: pane.springRow === item.index; color: pane.theme.accent; duration: springTimer.interval }
                 }
             }
             Spotlight {
@@ -625,12 +722,25 @@ Rectangle {
                 }
                 Text { width: parent.width; height: 40; text: item.fileName; color: pane.ink; opacity: item.hiddenItem ? 0.62 : 1; font.pixelSize: 13; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter }
             }
+            // Selection mode marker: a check circle on the icon.
+            Rectangle {
+                objectName: "pickMark"
+                visible: pane.pickMode
+                width: pane.gridMode ? 22 : 14; height: width; radius: width / 2
+                x: pane.gridMode ? 14 : 9 + 7 + 23 - width + 4
+                y: pane.gridMode ? 14 : item.height / 2 + 11.5 - width + 4
+                color: item.selected ? pane.theme.accent : pane.theme.pane
+                border.width: 1.5; border.color: item.selected ? pane.theme.accent : pane.theme.lineStrong
+                Text { anchors.centerIn: parent; visible: item.selected; text: "✓"; color: pane.theme.accentInk; font.pixelSize: parent.width * 0.68; font.bold: true }
+            }
             MouseArea {
                 id: mouse
                 anchors.fill: parent; hoverEnabled: true
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 onPressed: event => {
                     if (event.button === Qt.RightButton && item.selected) { pane.focused(); pane.focusFiles(); return }
+                    // Selection mode only ever adds: the menu then acts on all picks.
+                    if (event.button === Qt.RightButton && pane.pickMode) { pane.toggleRow(item.index, 0); return }
                     if (!item.selected || (event.modifiers & (Qt.ControlModifier | Qt.ShiftModifier))) pane.selectRow(item.index, event.modifiers)
                     else { pane.focused(); pane.currentRow = item.index; pane.focusFiles() }
                 }

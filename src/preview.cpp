@@ -406,7 +406,7 @@ QVariantMap makePreview(const QString &uri, int page, bool thumbnail) {
                     result["text"] = text;
                 }
                 if (truncated)
-                    result["notice"] = QStringLiteral("仅显示前 256 KiB，完整文件可用系统应用打开");
+                    result["notice"] = QStringLiteral("仅显示前 256 KB，完整文件可用系统应用打开");
             }
         }
     }

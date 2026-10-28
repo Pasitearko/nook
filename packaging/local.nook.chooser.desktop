@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=nook File Chooser
+Name[zh_CN]=nook 文件选择器
+Comment=Open and Save dialogs for other applications
+Comment[zh_CN]=其他应用的“打开/保存”对话框
+Exec=nook --file-chooser
+Icon=nook
+Terminal=false
+NoDisplay=true
+StartupWMClass=local.nook.chooser

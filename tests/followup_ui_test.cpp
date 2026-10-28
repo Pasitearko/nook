@@ -3,6 +3,8 @@
 #include <QImage>
 #include <QQmlComponent>
 #include <QQmlEngine>
+#include <QQmlExpression>
+#include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QSignalSpy>
@@ -90,6 +92,17 @@ class FollowupUiTest : public QObject {
         QVERIFY2(window->contentItem()->boundingRect().contains(point), "Click must be inside the scene");
         QTest::mouseClick(window, button, Qt::NoModifier, point.toPoint());
     }
+    void revealSetting(QQuickItem *target) {
+        QVERIFY(target);
+        auto *scroll = item("settingsScroll");
+        QVERIFY(scroll);
+        auto *page = scroll->property("contentItem").value<QQuickItem *>();
+        QVERIFY(page);
+        const auto offset = target->mapToItem(page, {0, 0}).y();
+        page->setProperty("contentY", qBound(0.0, page->property("contentY").toReal() + offset - 30,
+                                            qMax(0.0, page->property("contentHeight").toReal() - page->height())));
+        QTest::qWait(100);
+    }
     void blankContext() {
         auto *area = item("emptyAreaPointer");
         QVERIFY(area);
@@ -132,6 +145,34 @@ class FollowupUiTest : public QObject {
                                 .arg(rect.y())
                                 .arg(rect.width())
                                 .arg(rect.height())));
+    }
+
+    // Stand-in for a file drag. The platform drag cannot be driven offscreen, but Qt Quick's
+    // internal drags reach the same DropAreas; the source names the uris (see dragUris).
+    QQuickItem *dragProbe(const QStringList &uris) {
+        QQmlComponent component(engine.get());
+        component.setData("import QtQuick\nItem { property var fileUris: []; width: 1; height: 1;"
+                          " Drag.dragType: Drag.Internal; function begin() { Drag.active = true }"
+                          " function release() { return Drag.drop() } function abandon() { Drag.cancel() } }",
+                          QUrl());
+        auto *probe = qobject_cast<QQuickItem *>(component.create());
+        if (!probe)
+            return nullptr;
+        probe->setParent(root.get());
+        probe->setParentItem(window->contentItem());
+        probe->setProperty("fileUris", uris);
+        QMetaObject::invokeMethod(probe, "begin");
+        return probe;
+    }
+    void hoverAt(QQuickItem *probe, QQuickItem *target, QPointF offset = {}) {
+        QVERIFY(probe && target);
+        probe->setPosition(target->mapToScene(QPointF(target->width() / 2, target->height() / 2) + offset));
+    }
+    QQuickItem *crumb(const QString &title) const {
+        for (auto *button : visualItems(window->contentItem(), "crumbButton"))
+            if (button->property("text").toString() == title && button->isVisible())
+                return button;
+        return nullptr;
     }
 
   private Q_SLOTS:
@@ -191,6 +232,139 @@ class FollowupUiTest : public QObject {
         settings.reset();
         QThreadPool::globalInstance()->waitForDone();
         fixture.reset();
+    }
+
+    void recentLocationsAndTaskCard() {
+        auto *card = item("recentActivity");
+        QVERIFY(card);
+        QVERIFY(!card->isVisible());
+        controller->navigate(uri("folder"));
+        QTRY_VERIFY(!controller->left()->loading());
+        QTRY_VERIFY(card->isVisible());
+        QCOMPARE(controller->recentLocations().size(), 1);
+        controller->navigate(uri(""));
+        QTRY_VERIFY(!controller->left()->loading());
+        QTRY_COMPARE(visualItems(window->contentItem(), "recentLocationRow").size(), 2);
+        controller->setDual(true);
+        QTRY_VERIFY(!controller->right()->loading());
+        controller->setActiveSide(1);
+        const auto leftUri = controller->left()->uri();
+        QQuickItem *folder = nullptr;
+        for (auto *row : visualItems(window->contentItem(), "recentLocationRow"))
+            if (row->property("modelData").toMap()["uri"].toString() == uri("folder")) folder = row;
+        QVERIFY(folder);
+        QTest::qWait(100);
+        click(folder);
+        QTRY_VERIFY(!controller->right()->loading());
+        QCOMPARE(controller->right()->uri(), uri("folder"));
+        QCOMPARE(controller->left()->uri(), leftUri);
+        QVERIFY(QFile::copy(fixture->path() + "/sample.txt", fixture->path() + "/folder/sample.txt"));
+        operations->run("copy", {uri("sample.txt")}, uri("folder"));
+        QTRY_VERIFY(operations->waitingConflict());
+        QTRY_VERIFY(card->property("taskActive").toBool());
+        QTRY_VERIFY(item("sidebarTaskProgress")->isVisible());
+        QTRY_COMPARE(visualItems(window->contentItem(), "recentLocationRow").size(), 0);
+        QCOMPARE(operations->totalItems(), 1);
+        QCOMPARE(operations->completedItems(), 0);
+        auto *conflict = object("conflictDialog");
+        QVERIFY(conflict);
+        QVERIFY(QMetaObject::invokeMethod(conflict, "close"));
+        QTRY_VERIFY(!conflict->property("visible").toBool());
+        QTest::qWait(100);
+        click(item("sidebarCancelTaskButton"));
+        QTRY_VERIFY(!operations->busy());
+        QTRY_VERIFY(!card->property("taskActive").toBool());
+        QTRY_COMPARE(visualItems(window->contentItem(), "recentLocationRow").size(), 2);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-recent-locations.png"));
+        click(item("clearRecentLocationsButton"));
+        QTRY_VERIFY(!card->isVisible());
+        QVERIFY(controller->recentLocations().isEmpty());
+    }
+
+    void recentLocationsAtSmallWindowAndHighScale() {
+        for (int i = 0; i < 5; ++i) {
+            QVERIFY(QDir().mkdir(fixture->path() + "/recent" + QString::number(i)));
+            controller->navigate(uri("recent" + QString::number(i)));
+            QTRY_VERIFY(!controller->left()->loading());
+        }
+        settings->set("uiScale", 1.5);
+        window->resize(920, 640);
+        QTest::qWait(150);
+        auto *card = item("recentActivity");
+        auto *sidebar = item("sidebar");
+        auto *scroll = item("recentLocationsScroll");
+        QVERIFY(card && sidebar && scroll);
+        QVERIFY(sidebar->height() >= 100);
+        QVERIFY(card->height() <= 110);
+        QVERIFY(scroll->property("clip").toBool());
+        auto *page = scroll->property("contentItem").value<QQuickItem *>();
+        QVERIFY(page);
+        QVERIFY(page->property("contentHeight").toReal() > page->height());
+        page->setProperty("contentY", page->property("contentHeight").toReal() - page->height());
+        QTest::qWait(100);
+        QQuickItem *last = nullptr;
+        for (auto *row : visualItems(window->contentItem(), "recentLocationRow"))
+            if (row->property("modelData").toMap()["uri"].toString() == uri("recent0")) last = row;
+        QVERIFY(last);
+        const auto center = last->mapToItem(scroll, {last->width() / 2, last->height() / 2});
+        QVERIFY(scroll->boundingRect().contains(center));
+        click(last);
+        QTRY_VERIFY(!controller->left()->loading());
+        QCOMPARE(controller->left()->uri(), uri("recent0"));
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-recent-small.png"));
+    }
+    void taskErrorsVisibleBeforeCompletion() {
+        QVERIFY(QFile::copy(fixture->path() + "/sample.txt", fixture->path() + "/folder/sample.txt"));
+        operations->run("copy", {uri("missing"), uri("sample.txt")}, uri("folder"));
+        QTRY_VERIFY(operations->waitingConflict());
+        QVERIFY(operations->busy());
+        QCOMPARE(operations->errors().size(), 1);
+        QTRY_VERIFY(item("sidebarTaskErrorsButton")->isVisible());
+        auto *conflict = object("conflictDialog");
+        QVERIFY(QMetaObject::invokeMethod(conflict, "close"));
+        QTest::qWait(100);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-task-progress.png"));
+        click(item("sidebarTaskErrorsButton"));
+        auto *errors = object("errorsDialog");
+        QVERIFY(errors);
+        QTRY_VERIFY(errors->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(errors, "close"));
+        operations->cancel();
+        QTRY_VERIFY(!operations->busy());
+    }
+    void indexInformationLivesInSettings() {
+        click(item("settingsButton"));
+        auto *panel = object("settingsDialog");
+        QTRY_VERIFY(panel->property("opened").toBool());
+        click(item("settingsCategory2"));
+        QTest::qWait(100);
+        auto *count = item("indexedCountLabel");
+        QVERIFY(count);
+        QVERIFY(count->isVisible());
+        QCOMPARE(count->property("text").toString(), QLocale().toString(controller->search()->indexed()) + QStringLiteral(" 个项目"));
+        // QML's default general format switches to exponent notation at this size.
+        QQmlExpression formatted(engine->rootContext(), root.get(), "Number(1938171).toLocaleString(Qt.locale(), 'f', 0)");
+        const auto million = formatted.evaluate().toString();
+        QVERIFY(!formatted.hasError());
+        QVERIFY(!million.contains("e", Qt::CaseInsensitive));
+        QString digits;
+        for (const auto ch : million) if (ch.isDigit()) digits += ch;
+        QCOMPARE(digits, QStringLiteral("1938171"));
+        QVERIFY(item("updateIndexButton")->isVisible());
+        QVERIFY(item("indexStatusLabel")->isVisible());
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-index-settings.png"));
+        click(item("settingsCategory1"));
+        QTest::qWait(100);
+        auto *toggle = item("rememberRecentLocationsToggle");
+        QVERIFY(toggle);
+        revealSetting(toggle);
+        // ToggleRow owns the actual Switch; exercise the exposed toggled signal.
+        QVERIFY(QMetaObject::invokeMethod(toggle, "toggled", Q_ARG(bool, false)));
+        QVERIFY(!settings->values()["rememberRecentLocations"].toBool());
+        controller->navigate(uri("folder"));
+        QTRY_VERIFY(!controller->left()->loading());
+        QVERIFY(controller->recentLocations().isEmpty());
+        closeSettings();
     }
 
     void spaceAfterSaveAndToolbar() {
@@ -256,6 +430,7 @@ class FollowupUiTest : public QObject {
         auto *roots = item("rootsInput");
         QVERIFY(roots);
         QTRY_VERIFY(roots->isVisible());
+        revealSetting(roots);
         click(roots);
         QTRY_VERIFY(roots->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_A, Qt::ControlModifier);
@@ -484,6 +659,179 @@ class FollowupUiTest : public QObject {
         // Away from the close button at the right end of the tab.
         QTest::mouseClick(window, Qt::MiddleButton, Qt::NoModifier, second->mapToScene({30, second->height() / 2}).toPoint());
         QTRY_COMPARE(controller->tabs().size(), 1);
+    }
+
+    void selectionMode() {
+        auto *folderRow = entry(uri("folder"));
+        auto *sampleRow = entry(uri("sample.txt"));
+        QVERIFY(folderRow && sampleRow);
+        click(item("selectionModeButton"));
+        QTRY_VERIFY(root->property("selectionMode").toBool());
+        QTRY_VERIFY(item("pickMark") && item("pickMark")->isVisible());
+        auto *model = controller->left();
+        // A click toggles one item and keeps the others.
+        click(sampleRow);
+        QTRY_COMPARE(model->selectedCount(), 1);
+        click(folderRow);
+        QTRY_COMPARE(model->selectedCount(), 2);
+        click(sampleRow);
+        QTRY_COMPARE(model->selectedUris(), QStringList{uri("folder")});
+        QVERIFY(item("paneCount")->property("text").toString().startsWith(QStringLiteral("已选 1 /")));
+        auto *area = item("emptyAreaPointer");
+        const QPoint blank = area->mapToScene({area->width() - 40, area->height() - 40}).toPoint();
+        // A drag that starts on an item draws a band (no file drag); it flips what it covers.
+        auto band = [&](QPoint from, QPoint to) {
+            QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, from);
+            for (int i = 1; i <= 8; ++i)
+                QTest::mouseMove(window, from + (to - from) * i / 8);
+            QTRY_VERIFY(item("selectionBand")->isVisible());
+            QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, to);
+            QTRY_VERIFY(!item("selectionBand")->isVisible());
+        };
+        const QPoint onSample = sampleRow->mapToScene({60, sampleRow->height() / 2}).toPoint();
+        const QPoint onFolder = folderRow->mapToScene({60, folderRow->height() / 2}).toPoint();
+        band(onSample, onSample + QPoint(30, 4)); // sample was not picked: now it is
+        QTRY_COMPARE(model->selectedCount(), 2);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-selection-mode.png"));
+        band(onSample, onFolder + QPoint(30, 0)); // both were picked: both let go
+        QTRY_COMPARE(model->selectedCount(), 0);
+        band(onFolder, onFolder + QPoint(30, 4));
+        QTRY_COMPARE(model->selectedUris(), QStringList{uri("folder")});
+        // A left click on blank space clears the picks.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, blank);
+        QTRY_COMPARE(model->selectedCount(), 0);
+        // Esc leaves the mode and keeps the selection.
+        click(sampleRow);
+        click(folderRow);
+        QTRY_COMPARE(model->selectedCount(), 2);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!root->property("selectionMode").toBool());
+        QCOMPARE(model->selectedCount(), 2);
+        QVERIFY(!item("pickMark") || !item("pickMark")->isVisible());
+        // Ordinary clicks again: blank space clears.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, blank);
+        QTRY_COMPARE(model->selectedCount(), 0);
+    }
+
+    void detailColumnsStartBand() {
+        // In the list view only the name drags files; the other cells start a band, as in Explorer.
+        auto *sampleRow = entry(uri("sample.txt"));
+        QVERIFY(sampleRow);
+        const qreal dateX = 9 + left->property("columnsWidth").toReal() - 150;
+        const QPoint start = sampleRow->mapToScene({dateX, sampleRow->height() / 2}).toPoint();
+        const QPoint end = start - QPoint(0, int(sampleRow->height()));
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start);
+        for (int i = 1; i <= 8; ++i)
+            QTest::mouseMove(window, start + (end - start) * i / 8);
+        QTRY_VERIFY(item("selectionBand")->isVisible());
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, end);
+        QTRY_COMPARE(controller->left()->selectedCount(), 2);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, start); // a click there still selects the row
+        QTRY_COMPARE(controller->left()->selectedUris(), QStringList{uri("sample.txt")});
+    }
+
+    void dropOnPathSegment() {
+        QVERIFY(QDir().mkpath(fixture->path() + "/folder/inner"));
+        for (const auto &name : {"one.txt", "two.txt"}) {
+            QFile file(fixture->path() + "/folder/inner/" + name);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+        }
+        controller->navigate(uri("folder/inner"));
+        QTRY_VERIFY(!controller->left()->loading());
+        QTRY_VERIFY(crumb("folder"));
+        const QString rootTitle = QFileInfo(fixture->path()).fileName();
+        QTRY_VERIFY(crumb(rootTitle));
+        // Dropped promptly on a segment further up: moved there, and the view stays put.
+        auto *probe = dragProbe({uri("folder/inner/one.txt")});
+        QVERIFY(probe);
+        hoverAt(probe, crumb(rootTitle));
+        QTRY_VERIFY(root->property("dropHintText").toString().startsWith(QStringLiteral("移动到")));
+        QVERIFY(QMetaObject::invokeMethod(probe, "release"));
+        QTRY_VERIFY(QFile::exists(fixture->path() + "/one.txt"));
+        QVERIFY(!QFile::exists(fixture->path() + "/folder/inner/one.txt"));
+        QCOMPARE(controller->activePane()->uri(), uri("folder/inner"));
+        QCOMPARE(root->property("dropHintText").toString(), QString());
+        delete probe;
+        // Resting on a segment opens it; the trail holds still meanwhile (the deeper segment
+        // stays), and dropping there then moves into it.
+        probe = dragProbe({uri("folder/inner/two.txt")});
+        hoverAt(probe, crumb("folder"));
+        QTRY_COMPARE(controller->activePane()->uri(), uri("folder"));
+        QVERIFY(crumb("inner"));
+        QVERIFY(QMetaObject::invokeMethod(probe, "release"));
+        QTRY_VERIFY(QFile::exists(fixture->path() + "/folder/two.txt"));
+        QTRY_VERIFY(!crumb("inner")); // released: the trail follows the location again
+        delete probe;
+    }
+
+    void fileDragRunsToTheEnd() {
+        // The drag starts a moment after it is requested (the offscreen platform then ends it at
+        // once): requesting it must not cancel it, and its end must come back without a script error.
+        QSignalSpy warnings(engine.get(), &QQmlEngine::warnings);
+        root->setProperty("springMoved", true);
+        QVERIFY(QMetaObject::invokeMethod(root.get(), "startFileDrag", Q_ARG(QVariant, QStringList{uri("sample.txt")}),
+                                          Q_ARG(QVariant, QStringLiteral("file"))));
+        auto *source = item("fileDragSource");
+        QVERIFY(source);
+        QCOMPARE(root->property("springOrigin").toMap().value("uri").toString(), controller->activePane()->uri());
+        QTRY_VERIFY(root->property("springOrigin").isNull() || !root->property("springOrigin").isValid());
+        QVERIFY(!QQmlProperty::read(source, "Drag.active", qmlContext(source)).toBool());
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.isEmpty() ? QString() : warnings.first().first().value<QList<QQmlError>>().first().toString()));
+    }
+
+    void restingOnEllipsisClimbs() {
+        QVERIFY(QDir().mkpath(fixture->path() + "/folder/inner"));
+        controller->navigate(uri("folder/inner"));
+        QTRY_VERIFY(!controller->left()->loading());
+        const auto trail = controller->activePane()->breadcrumbs();
+        QVERIFY(trail.size() > 2 && trail[1].toMap()["title"].toString() == QStringLiteral("…"));
+        const QString first = trail[1].toMap()["uri"].toString();
+        QTRY_VERIFY(crumb(QStringLiteral("…")));
+        auto *probe = dragProbe({uri("sample.txt")});
+        QVERIFY(probe);
+        hoverAt(probe, crumb(QStringLiteral("…")));
+        QTRY_COMPARE(controller->activePane()->uri(), first);
+        QTRY_VERIFY(first.startsWith(controller->activePane()->uri()) && controller->activePane()->uri() != first);
+        QVERIFY(QMetaObject::invokeMethod(probe, "abandon")); // never drop outside the fixture
+        delete probe;
+    }
+
+    void hoverOpensFoldersAndPlaces() {
+        QVERIFY(QDir().mkpath(fixture->path() + "/folder/deeper/deepest"));
+        settings->set("quickAccess", QStringList{uri("folder/deeper")});
+        settings->set("quickAccessOrder", QStringList{uri("folder/deeper")});
+        auto *probe = dragProbe({uri("sample.txt")});
+        QVERIFY(probe);
+        // A folder in the list opens after a moment.
+        hoverAt(probe, entry(uri("folder")), {-200, 0});
+        QTRY_COMPARE(controller->activePane()->uri(), uri("folder"));
+        QTRY_VERIFY(entry(uri("folder/deeper")));
+        // The pointer now rests on "deeper" in the new listing: nothing opens until it moves.
+        hoverAt(probe, entry(uri("folder/deeper")), {-200, 0});
+        QTest::qWait(1200);
+        QCOMPARE(controller->activePane()->uri(), uri("folder"));
+        hoverAt(probe, entry(uri("folder/deeper")), {-180, 2});
+        QTRY_COMPARE(controller->activePane()->uri(), uri("folder/deeper"));
+        // A quick-access place opens the same way (here: back to the start, then the place).
+        controller->navigate(fixture->path());
+        QTRY_VERIFY(!controller->left()->loading());
+        QQuickItem *place = nullptr;
+        QTRY_VERIFY([&] {
+            for (auto *row : visualItems(item("sidebar"), "quickPlace"))
+                if (row->property("entry").toMap().value("uri").toString() == uri("folder/deeper"))
+                    place = row;
+            return place != nullptr;
+        }());
+        hoverAt(probe, place, {0, 1});
+        QTRY_COMPARE(controller->activePane()->uri(), uri("folder/deeper"));
+        QVERIFY(QMetaObject::invokeMethod(probe, "release")); // dropped on the place itself
+        QTRY_VERIFY(QFile::exists(fixture->path() + "/folder/deeper/sample.txt"));
+        delete probe;
+        // A cancelled drag goes back to where it started.
+        root->setProperty("springOrigin", QVariantMap{{"tab", 0}, {"side", 0}, {"uri", uri("folder")}});
+        root->setProperty("springMoved", true);
+        QVERIFY(QMetaObject::invokeMethod(root.get(), "fileDragFinished", Q_ARG(QVariant, int(Qt::IgnoreAction))));
+        QTRY_COMPARE(controller->activePane()->uri(), uri("folder"));
     }
 
     void keyboardNeverSavesColumns() {

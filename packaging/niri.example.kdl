@@ -4,7 +4,7 @@
 // a global "opacity 0.9" rule would also fade text and icons. The blur is clipped to the
 // app's 12 px corners instead of showing square edges behind them.
 window-rule {
-    match app-id="^local\.nook$"
+    match app-id="^local\.nook(\.chooser)?$"
     opacity 1.0
     geometry-corner-radius 12
     clip-to-geometry true
@@ -12,6 +12,13 @@ window-rule {
         blur true
         xray false
     }
+}
+// The Open/Save dialogs other applications show through the portal: a floating window.
+window-rule {
+    match app-id="^local\.nook\.chooser$"
+    open-floating true
+    default-column-width { fixed 860; }
+    default-window-height { fixed 600; }
 }
 // Optional bind; replace an existing Mod+E instead of defining it twice.
 // binds { Mod+E { spawn "nook" "--new-window"; } }

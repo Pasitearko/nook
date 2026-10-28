@@ -227,7 +227,7 @@ Result inspectFile(const QString &input, GCancellable *cancel) {
                       : type == G_FILE_TYPE_DIRECTORY ? "directory"
                                                       : "other";
     details["size"] = size;
-    details["sizeText"] = QLocale().formattedDataSize(size, 1);
+    details["sizeText"] = nook::formatSize(size);
     details["permissions"] = int(mode & 0777);
     details["owner"] = textAttribute(info.get(), G_FILE_ATTRIBUTE_OWNER_USER);
     details["group"] = textAttribute(info.get(), G_FILE_ATTRIBUTE_OWNER_GROUP);

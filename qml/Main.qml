@@ -36,6 +36,19 @@ ApplicationWindow {
     property var hoveredEntry: ({})
     property string suppressedHoverUri: ""
     property string toastMessage: ""
+    // Selection mode: clicks toggle items and any drag draws a band (see FilePane).
+    property bool selectionMode: false
+    onSelectionModeChanged: if (selectionMode) toast("选择模式：单击逐个勾选，任意处拖动框选 · Esc 退出")
+    // Spring-loading: hovering a drag over a place, path segment, tab or folder opens it.
+    readonly property int springDelay: 700
+    property var springOrigin: null
+    property bool springMoved: false
+    property string dropHintText: ""
+    property real dropHintX: 0
+    property real dropHintY: 0
+    property string hintUri: ""
+    property int hintModifiers: -1
+    property string hintAction: ""
     width: 1280; height: 820
     minimumWidth: 920; minimumHeight: 640
     visible: true
@@ -61,6 +74,63 @@ ApplicationWindow {
         toastLeave.stop()
         toastMessage = message; toastTimer.restart()
         if (prefs.animations) toastEnter.restart()
+    }
+    // File uris carried by a drag: from the platform drag, or from an in-window drag source
+    // that lists them itself (Qt Quick's internal drags carry no mime data).
+    function dragUris(drag) {
+        let values = []
+        if (drag.hasUrls) {
+            for (let u of drag.urls) {
+                const uri = String(u)
+                if (uri.startsWith("file:") || uri.startsWith("trash:")) values.push(uri)
+            }
+        } else if (drag.source && drag.source.fileUris)
+            values = drag.source.fileUris.slice()
+        return values
+    }
+    function dropLabel(action, name) { return ({move: "移动到 ", copy: "复制到 ", trash: "移入 "})[action] + "“" + name + "”" }
+    // The bubble beside the pointer over targets outside the file list (path, places, tabs).
+    // Returns whether the items can be dropped there; the action is re-checked only when the
+    // target or the modifier keys change.
+    function dropHint(source, x, y, urls, uri, name) {
+        const mods = app.modifiers()
+        if (uri !== hintUri || mods !== hintModifiers) {
+            hintUri = uri; hintModifiers = mods
+            hintAction = uri && urls.length && app.canDrop(urls, uri) ? app.dropAction(urls, uri) : ""
+        }
+        const p = source.mapToItem(workspace, x, y)
+        dropHintX = p.x; dropHintY = p.y
+        dropHintText = hintAction ? dropLabel(hintAction, name) : "停留片刻打开“" + name + "”"
+        return hintAction !== ""
+    }
+    function clearDropHint() { dropHintText = ""; hintUri = ""; hintModifiers = -1; hintAction = "" }
+    function springLoad(open) {
+        springMoved = true
+        searchBox.clear()
+        open()
+    }
+    // Starts the platform drag of the selected items. Qt begins an automatic drag on its own a
+    // moment after `active` is set and ends it with dragFinished, so nothing here may reset it.
+    function startFileDrag(uris, icon) {
+        if (!uris.length || fileDrag.Drag.active) return
+        fileDrag.fileUris = uris
+        fileDrag.iconName = icon || "file"
+        fileDrag.Drag.mimeData = {"text/uri-list": uris.join("\r\n")}
+        springOrigin = {tab: app.activeTab, side: app.activeSide, uri: app.activePane.uri}
+        springMoved = false
+        fileDrag.Drag.active = true
+    }
+    // A cancelled drag (Esc, or released where nothing accepts it) returns to where it began;
+    // after a drop the view stays at the destination.
+    function fileDragFinished(action) {
+        const origin = springOrigin
+        springOrigin = null
+        clearDropHint()
+        if (action !== Qt.IgnoreAction || !springMoved || !origin) return
+        springMoved = false
+        if (origin.tab < app.tabs.length) app.activeTab = origin.tab
+        app.activeSide = origin.side
+        if (app.activePane.uri !== origin.uri) app.navigate(origin.uri)
     }
     function focusActivePane() { if (app.activeSide === 1 && rightPane.visible) rightPane.focusFiles(); else leftPane.focusFiles() }
     function openInput(kind) {
@@ -252,7 +322,7 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+H"; onActivated: app.activePane.showHidden = !app.activePane.showHidden }
     Shortcut { sequence: "Ctrl+1"; onActivated: app.dual = false }
     Shortcut { sequence: "Ctrl+2"; onActivated: app.dual = true }
-    Shortcut { sequence: "Escape"; onActivated: { if (app.preview.visible) app.preview.close(); else if (address.activeFocus) { address.text = app.activePane.displayPath; window.focusActivePane() } else if (searching) searchBox.clear(); else currentModel().clearSelection() } }
+    Shortcut { sequence: "Escape"; onActivated: { if (app.preview.visible) app.preview.close(); else if (address.activeFocus) { address.text = app.activePane.displayPath; window.focusActivePane() } else if (selectionMode) selectionMode = false; else if (searching) searchBox.clear(); else currentModel().clearSelection() } }
 
     // Keep geometry, text, icons and popup hit targets in the same logical coordinate system.
     Binding { target: window.Overlay.overlay; property: "scale"; value: window.uiScale }
@@ -274,7 +344,45 @@ ApplicationWindow {
             Rectangle {
                 Layout.fillWidth: true; Layout.preferredHeight: 48
                 color: theme.chrome
+                // Dragging files over a tab switches to it after a moment; dropping puts them in its folder.
+                DropArea {
+                    id: tabDrop
+                    objectName: "tabDropArea"
+                    x: tabBar.x + tabsList.x; y: tabBar.y + tabsList.y
+                    width: tabsList.width; height: tabsList.height
+                    property var urls: []
+                    property int index: -1
+                    property bool allowed: false
+                    function locate(px, py) {
+                        const i = tabsList.indexAt(px + tabsList.contentX, py)
+                        if (i !== index) {
+                            index = i
+                            if (i >= 0 && i !== app.activeTab) tabSpring.restart(); else tabSpring.stop()
+                        }
+                        if (i >= 0) allowed = window.dropHint(tabDrop, px, py, urls, app.tabs[i].uri, app.tabs[i].title)
+                        else { allowed = false; window.clearDropHint() }
+                    }
+                    function reset() { tabSpring.stop(); index = -1; urls = []; allowed = false; window.clearDropHint() }
+                    onEntered: drag => {
+                        urls = window.dragUris(drag)
+                        if (!urls.length) { drag.accepted = false; return }
+                        index = -1
+                        locate(drag.x, drag.y)
+                    }
+                    onPositionChanged: drag => locate(drag.x, drag.y)
+                    onExited: reset()
+                    onDropped: drop => {
+                        locate(drop.x, drop.y)
+                        const i = index, ok = allowed, values = urls
+                        reset()
+                        if (!ok) return
+                        app.dragDrop(values, app.tabs[i].uri)
+                        drop.accept(Qt.CopyAction)
+                    }
+                    Timer { id: tabSpring; interval: window.springDelay; onTriggered: { const i = tabDrop.index; if (i >= 0 && i < app.tabs.length) window.springLoad(() => app.activeTab = i) } }
+                }
                 RowLayout {
+                    id: tabBar
                     anchors.fill: parent; anchors.leftMargin: 18; anchors.rightMargin: 14; spacing: 12
                     Rectangle {
                         width: 26; height: 26; radius: 8; color: theme.accentSoft
@@ -298,8 +406,10 @@ ApplicationWindow {
                                 width: parent.width; height: 36
                                 anchors.verticalCenter: parent.verticalCenter
                                 radius: 7
-                                color: app.activeTab === index ? theme.tab : tabMouse.containsMouse ? theme.hover : "transparent"
-                                border.width: app.activeTab === index ? 1 : 0; border.color: theme.line
+                                readonly property bool dropTarget: tabDrop.index === index
+                                color: dropTarget ? theme.dropFill : app.activeTab === index ? theme.tab : tabMouse.containsMouse ? theme.hover : "transparent"
+                                border.width: dropTarget || app.activeTab === index ? 1 : 0; border.color: dropTarget ? accent : theme.line
+                                SpringProgress { running: parent.dropTarget && tabSpring.running; color: accent; duration: window.springDelay }
                                 MouseArea {
                                     id: tabMouse; anchors.fill: parent; hoverEnabled: true
                                     // Middle-click closes the tab, as in browsers and other file managers.
@@ -347,8 +457,14 @@ ApplicationWindow {
                         id: crumbs
                         anchors.fill: parent; anchors.leftMargin: 7; anchors.rightMargin: 7
                         visible: !address.activeFocus
+                        objectName: "crumbTrail"
                         clip: true; contentWidth: crumbRow.width; contentHeight: height
                         boundsBehavior: Flickable.StopAtBounds
+                        // A long path keeps its last segments (the current folder and its nearest
+                        // parents) in view; while a drag hovers the trail it stays where it is.
+                        function showEnd() { if (!crumbDrop.containsDrag) contentX = Math.max(0, contentWidth - width) }
+                        onContentWidthChanged: showEnd()
+                        onWidthChanged: showEnd()
                         // Clicking beside the breadcrumbs switches to the full, pre-selected path.
                         MouseArea {
                             objectName: "addressEditArea"
@@ -367,14 +483,92 @@ ApplicationWindow {
                         Row {
                             id: crumbRow; height: parent.height; spacing: 1
                             Repeater {
-                                model: app.activePane.breadcrumbs
+                                model: crumbDrop.trail || app.activePane.breadcrumbs
                                 Row {
                                     required property var modelData
                                     required property int index
+                                    readonly property int crumbIndex: index
                                     height: crumbRow.height
                                     Text { visible: index > 0; text: "›"; color: muted; height: parent.height; verticalAlignment: Text.AlignVCenter; font.pixelSize: 15; width: index > 0 ? 12 : 0 }
-                                    ActionButton { height: parent.height; text: modelData.title; foreground: ink; hint: modelData.title; onClicked: { searchBox.clear(); app.navigate(modelData.uri) } }
+                                    ActionButton {
+                                        objectName: "crumbButton"
+                                        height: parent.height; text: modelData.title; foreground: ink; hint: modelData.title
+                                        active: crumbDrop.index === index
+                                        onClicked: { searchBox.clear(); app.navigate(modelData.uri) }
+                                        SpringProgress { running: parent.active && crumbSpring.running; color: accent; duration: window.springDelay }
+                                    }
                                 }
+                            }
+                        }
+                    }
+                    // Files dragged onto a path segment move there (Ctrl copies, Shift moves); resting on
+                    // one opens it, so any folder up the path is one hover away.
+                    DropArea {
+                        id: crumbDrop
+                        objectName: "crumbDropArea"
+                        anchors.fill: crumbs
+                        enabled: crumbs.visible
+                        property var urls: []
+                        property int index: -1
+                        property bool allowed: false
+                        // The trail is held while a drag is over it: opening a parent must not shift
+                        // the segments under the pointer, and the deeper ones stay reachable.
+                        property var trail: null
+                        readonly property var segments: trail || app.activePane.breadcrumbs
+                        function crumbAt(px, py) {
+                            const p = mapToItem(crumbRow, px, py)
+                            const child = crumbRow.childAt(p.x, p.y)
+                            return child && child.crumbIndex !== undefined ? child.crumbIndex : -1
+                        }
+                        function locate(px, py) {
+                            const i = crumbAt(px, py)
+                            const crumb = i >= 0 ? segments[i] : null
+                            if (i !== index) {
+                                index = i
+                                if (crumb && crumb.uri !== app.activePane.uri) crumbSpring.restart(); else crumbSpring.stop()
+                            }
+                            if (crumb) allowed = window.dropHint(crumbDrop, px, py, urls, crumb.uri, crumb.title)
+                            else { allowed = false; window.clearDropHint() }
+                        }
+                        function reset() { crumbSpring.stop(); index = -1; urls = []; allowed = false; trail = null; window.clearDropHint() }
+                        onEntered: drag => {
+                            urls = window.dragUris(drag)
+                            if (!urls.length) { drag.accepted = false; return }
+                            trail = app.activePane.breadcrumbs
+                            index = -1
+                            locate(drag.x, drag.y)
+                        }
+                        onPositionChanged: drag => locate(drag.x, drag.y)
+                        onExited: reset()
+                        onDropped: drop => {
+                            locate(drop.x, drop.y)
+                            const crumb = index >= 0 ? segments[index] : null
+                            const ok = allowed, values = urls
+                            reset()
+                            if (!ok || !crumb) return
+                            app.dragDrop(values, crumb.uri)
+                            drop.accept(Qt.CopyAction)
+                        }
+                        Timer {
+                            id: crumbSpring; interval: window.springDelay
+                            onTriggered: {
+                                const crumb = crumbDrop.segments[crumbDrop.index]
+                                if (!crumb) return
+                                window.springLoad(() => app.navigate(crumb.uri))
+                                // "…" stands for the folders in between: resting on it keeps climbing.
+                                if (crumb.title !== "…") return
+                                crumbDrop.trail = app.activePane.breadcrumbs
+                                const next = crumbDrop.segments[crumbDrop.index]
+                                if (next && next.title === "…" && next.uri !== app.activePane.uri) crumbSpring.restart()
+                            }
+                        }
+                        // Long paths: resting near either end scrolls the hidden segments into reach.
+                        Timer {
+                            interval: 16; repeat: true
+                            running: crumbDrop.containsDrag && (crumbDrop.drag.x < 28 || crumbDrop.drag.x > crumbDrop.width - 28)
+                            onTriggered: {
+                                const step = crumbDrop.drag.x < 28 ? -8 : 8
+                                crumbs.contentX = Math.max(0, Math.min(crumbs.contentX + step, crumbs.contentWidth - crumbs.width))
                             }
                         }
                     }
@@ -411,6 +605,13 @@ ApplicationWindow {
                 NookComboBox { id: sortBox; Layout.preferredWidth: 108; Layout.preferredHeight: 36; font.pixelSize: 13; model: ["名称排序", "大小排序", "日期排序", "类型排序"]; enabled: !searching; onActivated: app.activePane.sortBy(["name", "size", "date", "type"][currentIndex], currentIndex === 2) }
                 ActionButton { text: window.layoutWidth < 1100 ? "" : "隐藏文件"; iconName: "hidden"; hint: "显示/隐藏点文件 · Ctrl+H"; foreground: ink; active: app.activePane.showHidden; onClicked: app.activePane.showHidden = !app.activePane.showHidden }
                 ActionButton { text: window.layoutWidth < 1050 ? "" : "筛选"; iconName: "filter"; hint: "搜索筛选"; foreground: ink; active: filtersVisible; onClicked: filtersVisible = !filtersVisible }
+                ActionButton {
+                    objectName: "selectionModeButton"
+                    text: window.layoutWidth < 1050 ? "" : "选择"; iconName: "select"; foreground: ink
+                    hint: selectionMode ? "退出选择模式 · Esc（保留已选项目）" : "选择模式：单击逐个勾选，任意处拖动框选"
+                    active: selectionMode
+                    onClicked: { selectionMode = !selectionMode; window.focusActivePane() }
+                }
                 Item { Layout.fillWidth: true }
                 ActionButton { iconName: "list"; hint: "列表视图"; active: !app.grid; foreground: ink; onClicked: app.grid = false }
                 ActionButton { iconName: "grid"; hint: "网格视图"; active: app.grid; foreground: ink; onClicked: app.grid = true }
@@ -422,6 +623,7 @@ ApplicationWindow {
                 Layout.fillWidth: true; Layout.fillHeight: true
                 Layout.leftMargin: 10; Layout.rightMargin: 14; Layout.bottomMargin: 10; spacing: 12
                 ColumnLayout {
+                    id: sidebarColumn
                     Layout.preferredWidth: window.layoutWidth < 1000 ? 202 : 224; Layout.minimumWidth: window.layoutWidth < 1000 ? 202 : 224; Layout.maximumWidth: window.layoutWidth < 1000 ? 202 : 224; Layout.fillHeight: true
                     spacing: 10
                     Sidebar {
@@ -438,22 +640,14 @@ ApplicationWindow {
                             quickAccessMenu.open()
                         }
                     }
-                    Rectangle {
-                        Layout.fillWidth: true; Layout.preferredHeight: 132
-                        radius: 10; color: theme.sunken; border.color: theme.line
-                        ColumnLayout {
-                            anchors.fill: parent; anchors.margins: 12; spacing: 6
-                            RowLayout {
-                                Icon { name: "search"; width: 14; height: 14 }
-                                Text { text: "本地文件索引"; color: ink; font.pixelSize: 13; Layout.fillWidth: true }
-                                BusyIndicator { running: app.search.scanning; visible: running; Layout.preferredWidth: 17; Layout.preferredHeight: 17 }
-                            }
-                            Text { text: app.search.indexed.toLocaleString() + " 个项目"; Layout.fillWidth: true; elide: Text.ElideRight; color: accent; font.pixelSize: 21; font.weight: Font.Medium }
-                            RowLayout {
-                                Text { text: app.search.scanning ? "正在后台更新" : prefs.backgroundIndex ? "开机后台常驻 · 实时更新" : "随应用启动与停止"; color: muted; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
-                                ActionButton { text: app.search.scanning ? "暂停" : "更新"; implicitHeight: 30; foreground: muted; onClicked: { if (app.search.scanning) app.search.stop(); else app.search.start() } }
-                            }
-                        }
+                    RecentActivity {
+                        controller: app; host: window
+                        maximumRecentHeight: Math.max(100, sidebarColumn.height * 0.45)
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: implicitHeight
+                        Layout.maximumHeight: implicitHeight
+                        onActivate: uri => { searchBox.clear(); app.navigate(uri) }
+                        onShowErrors: errorsDialog.open()
                     }
                 }
                 ColumnLayout {
@@ -488,9 +682,9 @@ ApplicationWindow {
                             }
                             FilterGroup {
                                 title: "大小"
-                                FilterField { id: minSize; width: 92; placeholderText: "最小"; suffix: "MiB"; validator: DoubleValidator { bottom: 0; notation: DoubleValidator.StandardNotation } }
+                                FilterField { id: minSize; width: 92; placeholderText: "最小"; suffix: "MB"; validator: DoubleValidator { bottom: 0; notation: DoubleValidator.StandardNotation } }
                                 Text { text: "–"; color: muted; font.pixelSize: 13; height: 34; verticalAlignment: Text.AlignVCenter }
-                                FilterField { id: maxSize; width: 92; placeholderText: "最大"; suffix: "MiB"; validator: DoubleValidator { bottom: 0; notation: DoubleValidator.StandardNotation } }
+                                FilterField { id: maxSize; width: 92; placeholderText: "最大"; suffix: "MB"; validator: DoubleValidator { bottom: 0; notation: DoubleValidator.StandardNotation } }
                             }
                             FilterGroup {
                                 title: "修改日期"
@@ -523,6 +717,7 @@ ApplicationWindow {
                             onContextRequested: (model, x, y) => window.showContext(model, leftPane, x, y)
                             onBlankContextRequested: (model, x, y) => window.showBlankContext(model, leftPane, x, y)
                             onHovered: entry => window.hoverEntry(entry)
+                            onSpringRequested: uri => window.springLoad(() => { app.activeSide = 0; app.navigate(uri) })
                         }
                         FilePane {
                             id: rightPane; objectName: "rightPane"
@@ -536,6 +731,7 @@ ApplicationWindow {
                             onContextRequested: (model, x, y) => window.showContext(model, rightPane, x, y)
                             onBlankContextRequested: (model, x, y) => window.showBlankContext(model, rightPane, x, y)
                             onHovered: entry => window.hoverEntry(entry)
+                            onSpringRequested: uri => window.springLoad(() => { app.activeSide = 1; app.navigate(uri) })
                         }
                     }
                     ActionButton { visible: searching && app.search.hasMore; text: "加载更多结果"; foreground: ink; Layout.alignment: Qt.AlignHCenter; onClicked: app.search.nextPage() }
@@ -547,7 +743,7 @@ ApplicationWindow {
                 RowLayout {
                     anchors.fill: parent; anchors.leftMargin: 18; anchors.rightMargin: 18; spacing: 12
                     Rectangle { width: 5; height: 5; radius: 3; color: app.search.scanning ? theme.warning : theme.success }
-                    Text { text: app.operations.busy || app.operations.errors.length ? app.operations.status : currentModel().count.toLocaleString() + " 个项目" + (currentModel().selectedCount ? " · 选中 " + currentModel().selectedCount + " 项" : ""); color: muted; font.pixelSize: 12; elide: Text.ElideMiddle; Layout.fillWidth: true }
+                    Text { text: app.operations.busy || app.operations.errors.length ? app.operations.status : currentModel().count.toLocaleString(Qt.locale(), 'f', 0) + " 个项目" + (currentModel().selectedCount ? " · 选中 " + currentModel().selectedCount + " 项" : ""); color: muted; font.pixelSize: 12; elide: Text.ElideMiddle; Layout.fillWidth: true }
                     ActionButton { visible: app.operations.errors.length > 0; text: "查看错误"; foreground: theme.warning; implicitHeight: 25; onClicked: errorsDialog.open() }
                     ActionButton { visible: app.operations.busy; text: "取消任务"; foreground: theme.warning; implicitHeight: 25; onClicked: app.operations.cancel() }
                     Text { visible: !app.operations.busy; text: searching ? app.search.status : "CachyOS  /  Wayland"; color: muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.maximumWidth: 350 }
@@ -768,7 +964,7 @@ ApplicationWindow {
         }
     }
     Dialog {
-        id: conflictDialog; anchors.centerIn: parent; width: 480; modal: true; closePolicy: Popup.NoAutoClose
+        id: conflictDialog; objectName: "conflictDialog"; anchors.centerIn: parent; width: 480; modal: true; closePolicy: Popup.NoAutoClose
         title: "目标位置已存在同名项目"
         contentItem: ColumnLayout {
             spacing: 16
@@ -796,7 +992,7 @@ ApplicationWindow {
         }
     }
     Dialog {
-        id: errorsDialog; anchors.centerIn: parent; width: 600; height: Math.min(440, window.layoutHeight - 60); modal: true
+        id: errorsDialog; objectName: "errorsDialog"; anchors.centerIn: parent; width: 600; height: Math.min(440, window.layoutHeight - 60); modal: true
         title: "任务错误 · 已完成的项目不会回滚"
         contentItem: ScrollView {
             TextArea {
@@ -1041,6 +1237,30 @@ ApplicationWindow {
                 }
             }
         }
+    }
+    // Source of every file drag (see startFileDrag): it outlives the rows and folders the drag
+    // passes through.
+    Item {
+        id: fileDrag
+        objectName: "fileDragSource"
+        property var fileUris: []
+        property string iconName: "file"
+        width: 1; height: 1; visible: false
+        Drag.dragType: Drag.Automatic
+        Drag.supportedActions: Qt.CopyAction | Qt.MoveAction
+        Drag.proposedAction: Qt.CopyAction
+        Drag.imageSource: "icons/" + iconName + ".svg"
+        Drag.onDragFinished: action => window.fileDragFinished(action)
+    }
+    Rectangle {
+        objectName: "windowDropHint"
+        visible: dropHintText !== ""
+        z: 90
+        x: Math.min(window.layoutWidth - width - 8, Math.max(8, dropHintX + 18))
+        y: Math.min(window.layoutHeight - height - 8, Math.max(8, dropHintY + 20))
+        width: windowHintLabel.implicitWidth + 22; height: 28; radius: 8
+        color: theme.raised; border.color: theme.lineStrong
+        Text { id: windowHintLabel; anchors.centerIn: parent; text: dropHintText; color: ink; font.pixelSize: 13 }
     }
     Rectangle {
         anchors.horizontalCenter: parent.horizontalCenter; anchors.bottom: parent.bottom; anchors.bottomMargin: 45

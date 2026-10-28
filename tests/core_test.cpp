@@ -125,6 +125,15 @@ class CoreTest : public QObject {
         QVERIFY(nook::sidebarDataPartition("ntfs", basic, "Benefits"));
         QVERIFY(!nook::sidebarDataPartition("vfat", "", ""));
     }
+    void sizesUseWindowsUnits() {
+        // KB/MB/GB in steps of 1024, as on Windows; never KiB/MiB.
+        QVERIFY2(nook::formatSize(1536).endsWith(QStringLiteral("KB")), qPrintable(nook::formatSize(1536)));
+        QVERIFY(nook::formatSize(1536).startsWith(QStringLiteral("1.5")));
+        QVERIFY(nook::formatSize(3 * 1048576).endsWith(QStringLiteral("MB")));
+        QVERIFY(nook::formatSize(5ll << 30).endsWith(QStringLiteral("GB")));
+        QCOMPARE(nook::formatSize(5ll << 30), QStringLiteral("5 GB"));
+        QCOMPARE(nook::formatSize(25), QStringLiteral("25 字节"));
+    }
     void preferencesKeepTheirTypes() {
         // Values read back from the INI file are text; "false" must not become truthy in QML.
         AppSettings settings;
@@ -169,6 +178,113 @@ class CoreTest : public QObject {
         settings.set("scrollSpeed", 0);
         QCOMPARE(settings.values()["scrollSpeed"].toInt(), 1);
         settings.set("scrollSpeed", 3);
+    }
+    void recentLocationsFollowSuccessfulNavigation() {
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        for (int i = 0; i < 7; ++i)
+            QVERIFY(QDir().mkdir(fixture.path() + "/folder" + QString::number(i)));
+        AppSettings settings;
+        settings.set("startFolder", fixture.path());
+        settings.set("rememberRecentLocations", true);
+        settings.store().remove("recentLocations");
+        SearchIndex search(fixture.path() + "/index.sqlite");
+        Operations operations;
+        Application app(&search, &operations, &settings, false);
+        QTRY_VERIFY(!app.left()->loading());
+        QVERIFY(app.recentLocations().isEmpty()); // initial/session locations are not new visits
+        for (int i = 0; i < 7; ++i) {
+            app.navigate(uri(fixture.path() + "/folder" + QString::number(i)));
+            QTRY_VERIFY(!app.activePane()->loading());
+        }
+        QCOMPARE(app.recentLocations().size(), 5);
+        QCOMPARE(app.recentLocations().first().toMap()["uri"].toString(), uri(fixture.path() + "/folder6"));
+        app.left()->back();
+        QTRY_VERIFY(!app.left()->loading());
+        QCOMPARE(app.recentLocations().first().toMap()["uri"].toString(), uri(fixture.path() + "/folder5"));
+        app.left()->forward();
+        QTRY_VERIFY(!app.left()->loading());
+        QCOMPARE(app.recentLocations().first().toMap()["uri"].toString(), uri(fixture.path() + "/folder6"));
+        app.setDual(true);
+        QTRY_VERIFY(!app.right()->loading());
+        app.setActiveSide(1);
+        const auto leftUri = app.left()->uri();
+        app.navigate(uri(fixture.path() + "/folder0"));
+        QTRY_VERIFY(!app.right()->loading());
+        QCOMPARE(app.left()->uri(), leftUri);
+        QCOMPARE(app.recentLocations().first().toMap()["uri"].toString(), app.right()->uri());
+        const auto beforeFailure = app.recentLocations();
+        app.navigate(uri(fixture.path() + "/missing"));
+        QTRY_VERIFY(!app.right()->loading());
+        QVERIFY(!app.right()->error().isEmpty());
+        QCOMPARE(app.recentLocations(), beforeFailure);
+        app.navigate(uri(fixture.path() + "/folder1"));
+        QTRY_VERIFY(!app.right()->loading());
+        const auto saved = app.recentLocations();
+        app.right()->refresh();
+        QTRY_VERIFY(!app.right()->loading());
+        QCOMPARE(app.recentLocations(), saved);
+        {
+            AppSettings reloaded;
+            Application restored(&search, &operations, &reloaded, true);
+            QTRY_VERIFY(!restored.left()->loading());
+            QCOMPARE(restored.recentLocations(), saved);
+        }
+        app.clearRecentLocations();
+        app.right()->refresh();
+        QTRY_VERIFY(!app.right()->loading());
+        QVERIFY(app.recentLocations().isEmpty());
+        QVERIFY(!settings.store().contains("recentLocations"));
+        app.navigate(uri(fixture.path() + "/folder2"));
+        QTRY_VERIFY(!app.right()->loading());
+        QCOMPARE(app.recentLocations().size(), 1);
+        settings.set("rememberRecentLocations", false);
+        QVERIFY(app.recentLocations().isEmpty());
+        app.navigate(uri(fixture.path() + "/folder3"));
+        QTRY_VERIFY(!app.right()->loading());
+        QVERIFY(app.recentLocations().isEmpty());
+        QVERIFY(!settings.store().contains("recentLocations"));
+        // Turning recording off also discards a navigation still in flight.
+        settings.set("rememberRecentLocations", true);
+        app.navigate(uri(fixture.path() + "/folder4"));
+        settings.set("rememberRecentLocations", false);
+        settings.set("rememberRecentLocations", true);
+        QTRY_VERIFY(!app.right()->loading());
+        QVERIFY(app.recentLocations().isEmpty());
+    }
+    void recentLocationsSynchronizeAcrossWindows() {
+        QTemporaryDir fixture;
+        QVERIFY(fixture.isValid());
+        for (const auto &name : {"one", "two", "three"})
+            QVERIFY(QDir().mkdir(fixture.path() + "/" + name));
+        AppSettings settings;
+        settings.set("startFolder", fixture.path());
+        settings.set("rememberRecentLocations", true);
+        settings.store().remove("recentLocations");
+        SearchIndex search(fixture.path() + "/index.sqlite");
+        Operations operations;
+        Application first(&search, &operations, &settings, false);
+        Application second(&search, &operations, &settings, false);
+        QTRY_VERIFY(!first.left()->loading() && !second.left()->loading());
+        first.navigate(uri(fixture.path() + "/one"));
+        QTRY_VERIFY(!first.left()->loading());
+        QCOMPARE(first.recentLocations(), second.recentLocations());
+        QCOMPARE(second.recentLocations().size(), 1);
+        second.navigate(uri(fixture.path() + "/two"));
+        first.clearRecentLocations();
+        QTRY_VERIFY(!second.left()->loading());
+        QVERIFY(first.recentLocations().isEmpty());
+        QVERIFY(second.recentLocations().isEmpty());
+        second.navigate(uri(fixture.path() + "/three"));
+        QTRY_VERIFY(!second.left()->loading());
+        QCOMPARE(first.recentLocations(), second.recentLocations());
+        QCOMPARE(first.recentLocations().size(), 1);
+        QCOMPARE(settings.store().value("recentLocations").toStringList(),
+                 QStringList{uri(fixture.path() + "/three")});
+        settings.set("rememberRecentLocations", false);
+        QVERIFY(first.recentLocations().isEmpty());
+        QVERIFY(second.recentLocations().isEmpty());
+        QVERIFY(!settings.store().contains("recentLocations"));
     }
     void openWithUriApplications() {
         // Desktop metadata and MIME associations live exclusively in the test's isolated XDG homes.

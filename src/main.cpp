@@ -1,4 +1,7 @@
+#include <algorithm>
 #include "application.h"
+#include "filechooser.h"
+#include "filemanager1.h"
 #include "storage.h"
 #include <QDir>
 #include <QCommandLineParser>
@@ -30,6 +33,11 @@ int main(int argc, char **argv) {
         ::setpgid(0, 0);
     if (worker)
         qputenv("QT_QPA_PLATFORM", "offscreen");
+    // xdg-desktop-portal starts the file chooser and waits for it: a platform theme asking that
+    // same portal for its settings while Qt starts would hang both until the portal gives up.
+    const bool chooser = std::any_of(argv + 1, argv + argc, [](const char *arg) { return qstrcmp(arg, "--file-chooser") == 0; });
+    if (chooser && qgetenv("QT_QPA_PLATFORMTHEME").contains("portal"))
+        qputenv("QT_QPA_PLATFORMTHEME", "generic");
     QGuiApplication app(argc, argv);
     app.setApplicationName("nook");
     app.setOrganizationName("nook");
@@ -56,6 +64,8 @@ int main(int argc, char **argv) {
     parser.addOption({"select", "打开所在目录并选中文件", "path"});
     parser.addOption({"no-index", "本次不启动后台索引"});
     parser.addOption({"background", "后台常驻维护文件名索引，不打开窗口（开机自启使用）"});
+    parser.addOption({"file-chooser", "作为桌面门户的文件选择器后端运行（D-Bus 激活使用）"});
+    parser.addOption({"service", "作为 org.freedesktop.FileManager1 服务启动，不打开窗口（D-Bus 激活使用）"});
     parser.addOption({"isolated", "独立实例，不转发给已运行窗口"});
     parser.addOption({"profile-dir", "仅隔离 nook 的配置、索引和缓存，保留系统输入法主题（开发验证）", "path"});
     parser.addOption({"capture", "保存本窗口截图（开发验证）", "path"});
@@ -68,6 +78,62 @@ int main(int argc, char **argv) {
                                                       : qEnvironmentVariable("NOOK_PROFILE_DIR"));
     const bool profile = nook::customProfile();
     const bool isolated = profile || parser.isSet("isolated");
+    if (parser.isSet("file-chooser")) {
+        // Other applications' Open/Save dialogs (xdg-desktop-portal). A process of its own, so a
+        // dialog never waits on the file manager; it ends after a while without dialogs.
+        app.setDesktopFileName("local.nook.chooser");
+        app.setQuitOnLastWindowClosed(false);
+        AppSettings settings;
+        SearchIndex index; // queries the shared index; scanning stays with the file manager
+        Operations operations;
+        QQmlApplicationEngine engine;
+        engine.addImageProvider("thumb", new ThumbnailProvider);
+        QTimer idle;
+        idle.setSingleShot(true);
+        idle.setInterval(10 * 60 * 1000);
+        QObject::connect(&idle, &QTimer::timeout, &app, &QCoreApplication::quit);
+        int open = 0;
+        nook::portal::FileChooserPortal portal(
+            [&](nook::portal::ChooserRequest *request) {
+                ++open;
+                idle.stop();
+                auto *controller = new Application(&index, &operations, &settings, false, request);
+                controller->setRemembersSession(false);
+                engine.setInitialProperties({{"controller", QVariant::fromValue(controller)},
+                                             {"request", QVariant::fromValue(request)}});
+                const auto before = engine.rootObjects().size();
+                engine.loadFromModule("Nook", "FileChooser");
+                auto *window = engine.rootObjects().size() > before
+                                   ? qobject_cast<QQuickWindow *>(engine.rootObjects().last())
+                                   : nullptr;
+                auto release = [&, request] {
+                    request->deleteLater();
+                    if (--open == 0)
+                        idle.start();
+                };
+                if (!window) {
+                    request->abort();
+                    release();
+                    return;
+                }
+                // Closing the window is cancelling; the window goes once there is an answer.
+                QObject::connect(window, &QWindow::visibleChanged, request, [request](bool visible) {
+                    if (!visible)
+                        request->cancel();
+                });
+                QObject::connect(request, &nook::portal::ChooserRequest::finished, window,
+                                 [window] { window->deleteLater(); });
+                QObject::connect(window, &QObject::destroyed, request, release);
+            },
+            [&] { return settings.store().value("chooserFolder").toString(); },
+            [&](const QString &uri) { settings.store().setValue("chooserFolder", uri); });
+        if (!portal.publish()) {
+            QTextStream(stderr) << "无法注册文件选择器门户（已有实例在运行？）" << Qt::endl;
+            return 1;
+        }
+        idle.start();
+        return app.exec();
+    }
     if (parser.isSet("benchmark-query")) {
         SearchIndex index;
         QElapsedTimer elapsed;
@@ -123,7 +189,9 @@ int main(int argc, char **argv) {
     QLocalServer server;
     QLockFile instanceLock(socketPath + ".lock");
     instanceLock.setStaleLockTime(0);
-    const bool background = parser.isSet("background");
+    // D-Bus activation starts nook like the login autostart does: no window until asked.
+    const bool service = parser.isSet("service");
+    const bool background = parser.isSet("background") || service;
     if (!isolated) {
         if (!instanceLock.tryLock(0)) {
             // The resident instance already maintains the index; autostart has nothing to add.
@@ -156,7 +224,7 @@ int main(int argc, char **argv) {
     const auto residentEnabled = [&settings, profile] {
         return !profile && settings.values()["backgroundIndex"].toBool();
     };
-    if (background && !residentEnabled())
+    if (parser.isSet("background") && !residentEnabled())
         return 0;
     // Resident mode: closing the last window keeps the process (and its index watchers) alive,
     // so the next window opens instantly without re-scanning the disk.
@@ -266,6 +334,65 @@ int main(int argc, char **argv) {
         if (engine.rootObjects().isEmpty())
             return 1;
     }
+    // A request from a second launch, or from another application over D-Bus.
+    auto dispatch = [&](const QJsonObject &req) {
+        const auto roots = engine.rootObjects();
+        QObject *root = nullptr;
+        for (auto it = roots.crbegin(); it != roots.crend(); ++it)
+            if (auto *candidate = qobject_cast<QQuickWindow *>(*it); candidate && candidate->isVisible()) {
+                root = *it;
+                break;
+            }
+        if (req["newWindow"].toBool())
+            createWindow(req, false);
+        else if (!root) {
+            // First window after all were closed (or of a background start): restore the session.
+            createWindow(req, req["paths"].toArray().isEmpty() && req["select"].toString().isEmpty() &&
+                                  controllers.empty());
+        } else {
+            auto *controller = root->property("controller").value<Application *>();
+            if (controller)
+                handlePaths(controller, req);
+            if (auto *window = qobject_cast<QQuickWindow *>(root)) {
+                window->show();
+                window->requestActivate();
+                // A second launch is an explicit user activation. niri's
+                // IPC fallback focuses only this process's own window;
+                // no session-wide focus policy is changed.
+                if (qEnvironmentVariable("XDG_CURRENT_DESKTOP").contains("niri")) {
+                    auto *query = new QProcess(&app);
+                    const QString title = window->title();
+                    QObject::connect(
+                        query, &QProcess::finished, &app,
+                        [query, title](int code, QProcess::ExitStatus) {
+                            if (code == 0) {
+                                auto windows =
+                                    QJsonDocument::fromJson(query->readAllStandardOutput()).array();
+                                for (const auto &value : windows) {
+                                    auto item = value.toObject();
+                                    if (item["pid"].toInteger() !=
+                                            QCoreApplication::applicationPid() ||
+                                        item["title"].toString() != title)
+                                        continue;
+                                    QProcess::startDetached(
+                                        "niri", {"msg", "action", "focus-window", "--id",
+                                                 QString::number(item["id"].toInteger())});
+                                    break;
+                                }
+                            }
+                            query->deleteLater();
+                        });
+                    query->start("niri", {"msg", "--json", "windows"});
+                    QTimer::singleShot(1000, query, [query] {
+                        if (query->state() != QProcess::NotRunning)
+                            query->kill();
+                    });
+                }
+            }
+        }
+    };
+    if (!isolated && !FileManager1::publish(&app, dispatch))
+        QTextStream(stderr) << "org.freedesktop.FileManager1 已被其他文件管理器占用" << Qt::endl;
     QObject::connect(&server, &QLocalServer::newConnection, &app, [&] {
         while (auto *socket = server.nextPendingConnection()) {
             auto buffer = std::make_shared<QByteArray>();
@@ -281,63 +408,7 @@ int main(int argc, char **argv) {
                 }
                 if (!buffer->contains('\n'))
                     return;
-                auto req = QJsonDocument::fromJson(buffer->split('\n').first()).object();
-                const auto roots = engine.rootObjects();
-                QObject *root = nullptr;
-                for (auto it = roots.crbegin(); it != roots.crend(); ++it)
-                    if (auto *candidate = qobject_cast<QQuickWindow *>(*it); candidate && candidate->isVisible()) {
-                        root = *it;
-                        break;
-                    }
-                if (req["newWindow"].toBool())
-                    createWindow(req, false);
-                else if (!root) {
-                    // First window after all were closed (or of a background start): restore the session.
-                    createWindow(req, req["paths"].toArray().isEmpty() && req["select"].toString().isEmpty() &&
-                                          controllers.empty());
-                    socket->disconnectFromServer();
-                    return;
-                } else {
-                    auto *controller = root->property("controller").value<Application *>();
-                    if (controller)
-                        handlePaths(controller, req);
-                    if (auto *window = qobject_cast<QQuickWindow *>(root)) {
-                        window->show();
-                        window->requestActivate();
-                        // A second launch is an explicit user activation. niri's
-                        // IPC fallback focuses only this process's own window;
-                        // no session-wide focus policy is changed.
-                        if (qEnvironmentVariable("XDG_CURRENT_DESKTOP").contains("niri")) {
-                            auto *query = new QProcess(&app);
-                            const QString title = window->title();
-                            QObject::connect(
-                                query, &QProcess::finished, &app,
-                                [query, title](int code, QProcess::ExitStatus) {
-                                    if (code == 0) {
-                                        auto windows =
-                                            QJsonDocument::fromJson(query->readAllStandardOutput()).array();
-                                        for (const auto &value : windows) {
-                                            auto item = value.toObject();
-                                            if (item["pid"].toInteger() !=
-                                                    QCoreApplication::applicationPid() ||
-                                                item["title"].toString() != title)
-                                                continue;
-                                            QProcess::startDetached(
-                                                "niri", {"msg", "action", "focus-window", "--id",
-                                                         QString::number(item["id"].toInteger())});
-                                            break;
-                                        }
-                                    }
-                                    query->deleteLater();
-                                });
-                            query->start("niri", {"msg", "--json", "windows"});
-                            QTimer::singleShot(1000, query, [query] {
-                                if (query->state() != QProcess::NotRunning)
-                                    query->kill();
-                            });
-                        }
-                    }
-                }
+                dispatch(QJsonDocument::fromJson(buffer->split('\n').first()).object());
                 socket->disconnectFromServer();
             };
             QObject::connect(socket, &QLocalSocket::readyRead, &app, consume);

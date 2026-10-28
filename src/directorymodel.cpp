@@ -2,6 +2,8 @@
 #include <QCollator>
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QMimeDatabase>
+#include <QRegularExpression>
 #include <QPointer>
 #include <QtConcurrent>
 
@@ -77,6 +79,14 @@ QVariantMap DirectoryModel::firstSelected() const {
             if (m_selected.contains(e.uri))
                 return nook::entryMap(e);
     return {};
+}
+QVariantList DirectoryModel::selectedEntries() const {
+    QVariantList result;
+    if (!m_selected.isEmpty())
+        for (const auto &e : m_entries)
+            if (m_selected.contains(e.uri))
+                result << nook::entryMap(e);
+    return result;
 }
 QVariantList DirectoryModel::breadcrumbs() const {
     QVariantList result;
@@ -158,6 +168,7 @@ void DirectoryModel::load(bool keep) {
     const auto generation = ++m_generation;
     const QString uri = m_uri, sort = m_sort;
     const bool hidden = m_hidden, descending = m_descending;
+    const auto filter = m_filter;
     if (!m_watcher.directories().isEmpty())
         m_watcher.removePaths(m_watcher.directories());
     const QString local = nook::localPath(uri);
@@ -175,12 +186,14 @@ void DirectoryModel::load(bool keep) {
     QPointer<DirectoryModel> guard(this);
     // Implicitly shared: the worker diffs against this snapshot without copying rows.
     const QList<nook::Entry> previous = keep ? m_entries : QList<nook::Entry>();
-    (void)QtConcurrent::run([guard, uri, sort, hidden, descending, cancel, generation, keep, previous] {
+    (void)QtConcurrent::run([guard, uri, sort, hidden, descending, cancel, generation, keep, previous, filter] {
         QElapsedTimer timer;
         timer.start();
         QList<nook::Entry> all, pending;
         QString error;
         nook::enumerate(uri, hidden, cancel, &error, [&](QList<nook::Entry> batch) {
+            if (filter)
+                batch.removeIf([&filter](const nook::Entry &entry) { return !filter->accepts(entry); });
             all.append(batch);
             // Fast folders arrive as one sorted set; only slow ones stream partial rows.
             // A refresh never streams: the current rows stay until the diff replaces them.
@@ -247,7 +260,52 @@ void DirectoryModel::load(bool keep) {
             Qt::QueuedConnection);
     });
 }
+bool nook::EntryFilter::accepts(const Entry &entry) const {
+    if (entry.directory)
+        return true;
+    if (foldersOnly)
+        return false;
+    if (globs.isEmpty() && mimeTypes.isEmpty())
+        return true;
+    for (const auto &glob : globs)
+        if (glob.match(entry.name).hasMatch())
+            return true;
+    if (mimeTypes.isEmpty())
+        return false;
+    static const QMimeDatabase database;
+    const auto mime = database.mimeTypeForFile(entry.name, QMimeDatabase::MatchExtension);
+    for (const auto &type : mimeTypes) {
+        if (type.endsWith(QLatin1String("/*")) ? mime.name().startsWith(type.chopped(1)) : mime.inherits(type))
+            return true;
+    }
+    return false;
+}
+void DirectoryModel::setFilter(const QVariantList &rules, bool foldersOnly) {
+    auto filter = std::make_shared<nook::EntryFilter>();
+    filter->foldersOnly = foldersOnly;
+    for (const auto &value : rules) {
+        const auto rule = value.toMap();
+        const QString pattern = rule.value("pattern").toString().trimmed();
+        if (pattern.isEmpty())
+            continue;
+        if (rule.value("type").toInt() == 1)
+            filter->mimeTypes.append(pattern);
+        else
+            filter->globs.append(QRegularExpression(
+                QRegularExpression::wildcardToRegularExpression(pattern, QRegularExpression::NonPathWildcardConversion),
+                QRegularExpression::CaseInsensitiveOption));
+    }
+    m_filter = std::move(filter);
+    refresh();
+}
+QList<nook::Entry> DirectoryModel::filtered(QList<nook::Entry> entries) const {
+    if (!m_filter)
+        return entries;
+    entries.removeIf([filter = m_filter.get()](const nook::Entry &entry) { return !filter->accepts(entry); });
+    return entries;
+}
 void DirectoryModel::appendEntries(QList<nook::Entry> entries) {
+    entries = filtered(std::move(entries));
     if (entries.isEmpty())
         return;
     int first = m_entries.size();
@@ -259,7 +317,7 @@ void DirectoryModel::appendEntries(QList<nook::Entry> entries) {
 }
 void DirectoryModel::replaceEntries(QList<nook::Entry> entries) {
     beginResetModel();
-    m_entries = std::move(entries);
+    m_entries = filtered(std::move(entries));
     m_anchor = -1;
     endResetModel();
     QSet<QString> present;
@@ -444,12 +502,18 @@ void DirectoryModel::selectUri(const QString &uri) {
             m_selected.insert(uri);
     notifySelection(previous);
 }
-void DirectoryModel::selectRows(const QList<int> &rows, const QStringList &base) {
+void DirectoryModel::selectRows(const QList<int> &rows, const QStringList &base, bool toggle) {
     const auto previous = m_selected;
-    m_selected = QSet<QString>(base.cbegin(), base.cend());
+    const QSet<QString> start(base.cbegin(), base.cend());
+    m_selected = start;
     for (const int row : rows)
-        if (row >= 0 && row < m_entries.size())
-            m_selected.insert(m_entries[row].uri);
+        if (row >= 0 && row < m_entries.size()) {
+            const auto &uri = m_entries[row].uri;
+            if (toggle && start.contains(uri))
+                m_selected.remove(uri);
+            else
+                m_selected.insert(uri);
+        }
     if (m_selected != previous)
         notifySelection(previous);
 }

@@ -7,13 +7,15 @@ Item {
     required property var controller
     required property var host
     property bool searching: false
+    // One line per place, no capacity meters and no trash: for the file chooser.
+    property bool compact: false
     signal activate(var place)
     signal removeRequested(string uri, real x, real y)
     readonly property bool dark: host.dark
     readonly property var theme: host.theme
     readonly property color ink: host.ink
     readonly property color muted: host.muted
-    readonly property var quickPlaces: controller.places.filter(p => !p.disk)
+    readonly property var quickPlaces: controller.places.filter(p => !p.disk && !(compact && String(p.uri).startsWith("trash:")))
     readonly property var disks: controller.places.filter(p => p.disk)
     readonly property var dragGhost: ghost
     component PlaceRow: Rectangle {
@@ -22,26 +24,28 @@ Item {
         property bool disk: false
         objectName: disk ? "diskPlace" : "quickPlace"
         Layout.fillWidth: true
-        implicitHeight: disk ? 61 : 38
+        readonly property bool meter: disk && !sidebar.compact
+        implicitHeight: meter ? 61 : sidebar.compact ? 32 : 38
         radius: 8
         readonly property bool current: controller.activePane.uri === entry.uri && !sidebar.searching
-        color: dragTarget.containsDrag ? sidebar.theme.dropFill : current ? sidebar.theme.activeFill : pointer.containsMouse ? sidebar.theme.hover : "transparent"
-        border.width: dragTarget.containsDrag ? 1 : 0; border.color: sidebar.theme.accent
+        readonly property bool dropTarget: dragTarget.containsDrag && (dragTarget.reorder || dragTarget.allowed)
+        color: dropTarget ? sidebar.theme.dropFill : current ? sidebar.theme.activeFill : pointer.containsMouse || dragTarget.containsDrag ? sidebar.theme.hover : "transparent"
+        border.width: dropTarget ? 1 : 0; border.color: sidebar.theme.accent
         // Current place: a short terracotta bar, echoing the file list's selection bar.
-        Rectangle { visible: row.current; width: 3; height: 18; radius: 2; anchors.left: parent.left; anchors.leftMargin: 3; anchors.verticalCenter: parent.verticalCenter; anchors.verticalCenterOffset: row.disk ? -10 : 0; color: sidebar.theme.accent }
+        Rectangle { visible: row.current; width: 3; height: 18; radius: 2; anchors.left: parent.left; anchors.leftMargin: 3; anchors.verticalCenter: parent.verticalCenter; anchors.verticalCenterOffset: row.meter ? -10 : 0; color: sidebar.theme.accent }
         ColumnLayout {
             anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 3
             RowLayout {
-                Layout.fillWidth: true; Layout.topMargin: row.disk ? 7 : 0; spacing: 10
+                Layout.fillWidth: true; Layout.topMargin: row.meter ? 7 : 0; spacing: 10
                 Icon { name: row.entry.icon; tint: row.current ? sidebar.theme.accentText : sidebar.theme.icon; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
                 Text { text: row.entry.title; color: sidebar.ink; font.pixelSize: 14; elide: Text.ElideRight; Layout.fillWidth: true }
             }
             Rectangle {
-                visible: row.disk; Layout.fillWidth: true; Layout.leftMargin: 28; height: 3; radius: 2
+                visible: row.meter; Layout.fillWidth: true; Layout.leftMargin: 28; height: 3; radius: 2
                 color: sidebar.theme.track
                 Rectangle { height: 3; width: parent.width * (row.entry.used || 0); radius: 2; color: row.entry.used > 0.9 ? sidebar.theme.danger : sidebar.theme.meter }
             }
-            Text { visible: row.disk; text: row.entry.capacity || ""; color: sidebar.muted; font.pixelSize: 11; Layout.leftMargin: 28; Layout.bottomMargin: 7; Layout.fillWidth: true; elide: Text.ElideRight }
+            Text { visible: row.meter; text: row.entry.capacity || ""; color: sidebar.muted; font.pixelSize: 11; Layout.leftMargin: 28; Layout.bottomMargin: 7; Layout.fillWidth: true; elide: Text.ElideRight }
         }
         MouseArea {
             id: pointer
@@ -73,39 +77,48 @@ Item {
         }
         DropArea {
             id: dragTarget
-            anchors.fill: parent; enabled: !!row.entry.uri
-            // Either a quick-access reorder (internal ghost) or files dropped onto this place.
+            anchors.fill: parent
+            // Either a quick-access reorder (internal ghost) or files dragged over this place:
+            // they can be dropped on it, and resting here opens it (an unmounted disk is mounted
+            // first) so the drag can continue into its folders.
             property bool reorder: false
+            property bool allowed: false
             property var urls: []
+            function hint(drag) { allowed = sidebar.host.dropHint(dragTarget, drag.x, drag.y, urls, row.entry.uri || "", row.entry.title) }
             onEntered: drag => {
                 reorder = !row.disk && drag.keys.indexOf("nook-quick-access") >= 0
-                urls = []
-                if (!reorder && drag.hasUrls) {
-                    for (let u of drag.urls) if (String(u).startsWith("file:") || String(u).startsWith("trash:")) urls.push(String(u))
-                    if (!controller.canDrop(urls, row.entry.uri)) urls = []
-                }
-                if (!reorder && urls.length === 0) drag.accepted = false
+                urls = reorder ? [] : sidebar.host.dragUris(drag)
+                if (reorder) return
+                if (urls.length === 0) { drag.accepted = false; return }
+                hint(drag)
+                if (!row.current) spring.restart()
             }
-            onExited: { reorder = false; urls = [] }
+            onPositionChanged: drag => { if (!reorder && urls.length) hint(drag) }
+            onExited: { spring.stop(); if (!reorder) sidebar.host.clearDropHint(); reorder = false; allowed = false; urls = [] }
             onDropped: drop => {
+                spring.stop()
                 if (reorder) { controller.reorderQuickAccess(drop.source.sourceUri, row.entry.uri); drop.acceptProposedAction() }
-                else if (urls.length) { controller.dragDrop(urls, row.entry.uri); drop.accept(Qt.CopyAction) }
-                reorder = false; urls = []
+                else if (allowed) { controller.dragDrop(urls, row.entry.uri); drop.accept(Qt.CopyAction) }
+                if (!reorder) sidebar.host.clearDropHint()
+                reorder = false; allowed = false; urls = []
             }
+            Timer { id: spring; interval: sidebar.host.springDelay; onTriggered: sidebar.host.springLoad(() => controller.activatePlace(row.entry)) }
         }
+        SpringProgress { running: spring.running; color: sidebar.theme.accent; duration: spring.interval }
         NookToolTip { visible: pointer.containsMouse && !sidebar.dragGhost.dragging; text: row.entry.uri || row.entry.title; delay: 1100 }
     }
     ScrollView {
         id: quickScroll
         // Desktop: a mouse drag selects text or moves items; it must not drag the whole page around.
-        Component.onCompleted: contentItem.acceptedButtons = Qt.NoButton
+        // No elastic overshoot past the first or last place, as in the file list.
+        Component.onCompleted: { contentItem.acceptedButtons = Qt.NoButton; contentItem.boundsBehavior = Flickable.StopAtBounds }
         anchors.fill: parent
         clip: true; contentWidth: availableWidth
         ColumnLayout {
-            width: quickScroll.availableWidth; spacing: 4
+            width: quickScroll.availableWidth; spacing: sidebar.compact ? 2 : 4
             Label { text: "快速访问"; color: sidebar.muted; font.pixelSize: 12; Layout.leftMargin: 12; Layout.topMargin: 6; Layout.bottomMargin: 6 }
             Repeater { model: sidebar.quickPlaces; PlaceRow { required property var modelData; entry: modelData } }
-            Rectangle { Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12; Layout.topMargin: 15; Layout.bottomMargin: 8; height: 1; color: sidebar.theme.line }
+            Rectangle { Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12; Layout.topMargin: sidebar.compact ? 8 : 15; Layout.bottomMargin: sidebar.compact ? 4 : 8; height: 1; color: sidebar.theme.line }
             Label { text: "磁盘"; color: sidebar.muted; font.pixelSize: 12; Layout.leftMargin: 12; Layout.bottomMargin: 6 }
             Repeater { model: sidebar.disks; PlaceRow { required property var modelData; entry: modelData; disk: true } }
             Item { height: 12 }

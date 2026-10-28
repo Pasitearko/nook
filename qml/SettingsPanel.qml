@@ -13,6 +13,7 @@ Dialog {
     readonly property color muted: theme.muted
     readonly property color line: theme.line
     property int category: 0
+    onCategoryChanged: if (scroll.contentItem) scroll.contentItem.contentY = 0
     property var mountChanges: ({})
     readonly property var pendingMounts: Object.values(mountChanges)
     function changeMount(disk, enabled, readOnly) {
@@ -145,6 +146,7 @@ Dialog {
         Rectangle { Layout.fillHeight: true; width: 1; color: panel.line }
         ScrollView {
             id: scroll
+            objectName: "settingsScroll"
             // Desktop: a mouse drag selects text or moves items; it must not drag the whole page around.
             Component.onCompleted: contentItem.acceptedButtons = Qt.NoButton
             Layout.fillWidth: true; Layout.fillHeight: true; clip: true; contentWidth: availableWidth
@@ -203,6 +205,43 @@ Dialog {
                     Field { Layout.fillWidth: true; text: panel.prefs.startFolder; onEditingFinished: panel.controller.settings.set("startFolder", text) }
                 }
                 Card {
+                    visible: panel.category === 1; heading: "最近位置与隐私"
+                    ToggleRow {
+                        objectName: "rememberRecentLocationsToggle"
+                        title: "记录最近访问的文件夹"
+                        checked: panel.prefs.rememberRecentLocations
+                        onToggled: value => panel.controller.settings.set("rememberRecentLocations", value)
+                    }
+                    Label { text: "侧栏最多显示 5 个最近位置，仅保存在本机。关闭此选项会同时清空记录。"; color: panel.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                    ActionButton {
+                        objectName: "clearRecentLocationsSettingsButton"
+                        text: "清空最近位置"; iconName: "trash"; foreground: panel.ink
+                        enabled: panel.controller.recentLocations.length > 0
+                        onClicked: panel.controller.clearRecentLocations()
+                    }
+                }
+                Card {
+                    visible: panel.category === 2; heading: "索引状态"
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label {
+                            objectName: "indexedCountLabel"
+                            text: panel.controller.search.indexed.toLocaleString(Qt.locale(), 'f', 0) + " 个项目"
+                            color: panel.theme.accentText; font.pixelSize: 20; font.weight: Font.Medium
+                            Layout.fillWidth: true; wrapMode: Text.Wrap
+                        }
+                        BusyIndicator { running: panel.controller.search.scanning; visible: running; Layout.preferredWidth: 24; Layout.preferredHeight: 24 }
+                    }
+                    Label { objectName: "indexStatusLabel"; text: panel.controller.search.status; color: panel.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                    Label { objectName: "indexWarningsLabel"; text: panel.controller.search.warnings.join("\n"); visible: text !== ""; color: panel.theme.warning; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
+                    ActionButton {
+                        objectName: "updateIndexButton"
+                        text: panel.controller.search.scanning ? "停止本次更新" : "更新索引"
+                        iconName: panel.controller.search.scanning ? "close" : "refresh"
+                        onClicked: { if (panel.controller.search.scanning) panel.controller.search.stop(); else panel.controller.search.start() }
+                    }
+                }
+                Card {
                     visible: panel.category === 2; heading: "后台索引"
                     ToggleRow {
                         objectName: "backgroundIndexToggle"
@@ -231,8 +270,6 @@ Dialog {
                             panel.reindexRequested()
                         }
                     }
-                    Label { text: panel.controller.search.status; color: panel.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.Wrap }
-                    Label { text: panel.controller.search.warnings.join("\n"); visible: text !== ""; color: panel.theme.warning; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
                 }
                 Card {
                     visible: panel.category === 2; heading: "Windows 分区（NTFS）"

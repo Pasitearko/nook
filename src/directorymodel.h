@@ -2,8 +2,21 @@
 #include "files.h"
 #include <QAbstractListModel>
 #include <QFileSystemWatcher>
+#include <QRegularExpression>
 #include <QSet>
 #include <QTimer>
+#include <memory>
+
+namespace nook {
+// Which files a file chooser offers: glob patterns and MIME types (any may match); folders
+// always pass so they can be entered, and foldersOnly hides every file.
+struct EntryFilter {
+    QList<QRegularExpression> globs;
+    QStringList mimeTypes;
+    bool foldersOnly = false;
+    bool accepts(const Entry &entry) const;
+};
+} // namespace nook
 
 class DirectoryModel : public QAbstractListModel {
     Q_OBJECT
@@ -81,13 +94,19 @@ class DirectoryModel : public QAbstractListModel {
     Q_INVOKABLE QVariantMap entry(int row) const;
     // First selected entry in view order; one map instead of building every row in QML.
     Q_INVOKABLE QVariantMap firstSelected() const;
+    // Every selected entry, in list order.
+    Q_INVOKABLE QVariantList selectedEntries() const;
     Q_INVOKABLE void select(int row, int modifiers = 0);
     Q_INVOKABLE void selectAll();
     Q_INVOKABLE void clearSelection();
     Q_INVOKABLE void selectUri(const QString &uri);
     // Rubber-band selection: exactly base plus these rows (signals only rows that flip).
-    Q_INVOKABLE void selectRows(const QList<int> &rows, const QStringList &base = {});
+    // Selection = base plus rows; with toggle, rows already in base are taken out instead
+    // (a band in selection mode flips what it covers).
+    Q_INVOKABLE void selectRows(const QList<int> &rows, const QStringList &base = {}, bool toggle = false);
     Q_INVOKABLE void sortBy(const QString &key, bool descending = false);
+    // rules: [{type: 0 glob | 1 MIME type, pattern}]; none = every file.
+    Q_INVOKABLE void setFilter(const QVariantList &rules, bool foldersOnly = false);
     void replaceEntries(QList<nook::Entry> entries);
     void appendEntries(QList<nook::Entry> entries);
     void setBusy(bool value, QString error = {});
@@ -124,6 +143,8 @@ class DirectoryModel : public QAbstractListModel {
     mutable QStringList m_selectedCache;
     mutable bool m_selectedDirty = true;
     nook::Cancel m_cancel;
+    std::shared_ptr<const nook::EntryFilter> m_filter;
+    QList<nook::Entry> filtered(QList<nook::Entry> entries) const;
     QFileSystemWatcher m_watcher;
     QTimer m_refreshTimer;
 };

@@ -61,7 +61,7 @@ bool fixedFlag(const QJsonValue &value) {
 
 QString displaySize(const QJsonValue &value) {
     double size = value.isString() ? value.toString().toDouble() : value.toDouble();
-    const QStringList units = {"B", "KiB", "MiB", "GiB", "TiB", "PiB"};
+    const QStringList units = {"B", "KB", "MB", "GB", "TB", "PB"};
     int unit = 0;
     while (size >= 1024.0 && unit < units.size() - 1) {
         size /= 1024.0;
