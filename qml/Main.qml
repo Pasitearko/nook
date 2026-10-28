@@ -9,7 +9,7 @@ ApplicationWindow {
     required property var controller
     readonly property var app: controller
     readonly property var prefs: app.settings.values
-    readonly property bool dark: prefs.theme === "dark" || (prefs.theme === "system" && Qt.styleHints.colorScheme === Qt.ColorScheme.Dark)
+    readonly property bool dark: prefs.theme === "dark" || (prefs.theme === "system" && app.settings.systemDark)
     readonly property Theme theme: Theme { dark: window.dark; effects: prefs.effects }
     readonly property color ink: theme.ink
     readonly property color muted: theme.muted
@@ -31,7 +31,6 @@ ApplicationWindow {
     readonly property bool editingText: activeFocusItem instanceof TextInput || activeFocusItem instanceof TextEdit
     readonly property bool dialogsOpen: settingsDialog.visible || propertiesDialog.visible || nameDialog.visible || deleteDialog.visible || conflictDialog.visible || closeDialog.visible || errorsDialog.visible
     readonly property bool menusOpen: contextMenu.visible || blankMenu.visible || quickAccessMenu.visible || sortBox.popup.visible || scopeBox.popup.visible || typeBox.popup.visible || afterDate.pickerOpen || beforeDate.pickerOpen
-    property bool permanent: false
     property bool closingAfterTask: false
     property var hoveredEntry: ({})
     property string suppressedHoverUri: ""
@@ -149,8 +148,10 @@ ApplicationWindow {
     }
     function removeSelection(force) {
         if (!currentModel() || !currentModel().selectedCount) return
-        permanent = force || currentModel().uri.startsWith("trash:")
-        deleteUris = currentModel().selectedUris.slice()
+        const uris = currentModel().selectedUris.slice()
+        // The trash can give items back, so moving there asks nothing; permanent deletion is confirmed.
+        if (!force && !currentModel().uri.startsWith("trash:")) { app.operations.run("trash", uris); return }
+        deleteUris = uris
         deleteDialog.open()
     }
     function activate(entry) {
@@ -797,7 +798,7 @@ ApplicationWindow {
         NookMenuItem { text: "重命名"; iconName: "rename"; shortcutText: "F2"; enabled: currentModel().selectedCount === 1 && !app.activePane.uri.startsWith("trash:"); onTriggered: window.openInput("rename") }
         NookMenuItem { text: "从回收站恢复"; iconName: "refresh"; visible: app.activePane.uri.startsWith("trash:"); onTriggered: app.operations.run("restore", currentModel().selectedUris) }
         MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
-        NookMenuItem { text: "移入回收站…"; iconName: "trash"; shortcutText: "Del"; visible: !app.activePane.uri.startsWith("trash:"); onTriggered: window.removeSelection(false) }
+        NookMenuItem { text: "移入回收站"; iconName: "trash"; shortcutText: "Del"; visible: !app.activePane.uri.startsWith("trash:"); onTriggered: window.removeSelection(false) }
         NookMenuItem { objectName: "permanentDeleteMenuItem"; text: "彻底删除…"; iconName: "trash"; shortcutText: "Shift Del"; danger: true; onTriggered: window.removeSelection(true) }
         MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
         NookMenuItem { objectName: "filePropertiesMenuItem"; text: "属性"; iconName: "settings"; enabled: contextModel && contextModel.selectedCount === 1; onTriggered: window.inspectProperties(contextEntry.fileUri) }
@@ -952,59 +953,69 @@ ApplicationWindow {
             }
         }
     }
-    Dialog {
-        id: deleteDialog; objectName: "deleteDialog"; anchors.centerIn: parent; width: 420; modal: true
-        title: permanent ? "永久删除选中项目？" : "移入回收站？"
-        contentItem: ColumnLayout {
-            spacing: 20
-            Label { Layout.fillWidth: true; wrapMode: Text.Wrap; text: permanent ? "这将永久删除 " + deleteUris.length + " 个项目，无法从回收站恢复。" : "将 " + deleteUris.length + " 个项目移入回收站。回收站不可用时会显示错误，不会改为永久删除。" }
-            RowLayout { Layout.alignment: Qt.AlignRight
-                Button { text: "取消"; onClicked: deleteDialog.close() }
-                Button { objectName: "confirmDeleteButton"; text: permanent ? "永久删除" : "移入回收站"; onClicked: { app.operations.run(permanent ? "delete" : "trash", deleteUris); deleteDialog.close() } }
-            }
-        }
+    NookDialog {
+        id: deleteDialog; objectName: "deleteDialog"
+        danger: true; iconName: "trash"
+        title: "永久删除选中项目？"
+        message: (deleteUris.length === 1 ? "“" + app.localPath(deleteUris[0]).split("/").pop() + "”" : deleteUris.length + " 个项目")
+                 + "将被永久删除，无法从回收站恢复。"
+        wrapAnywhere: true
+        function confirm() { app.operations.run("delete", deleteUris); close() }
+        onAccepted: confirm()
+        onClosed: window.focusActivePane()
+        actions: [
+            ActionButton { text: "取消"; foreground: ink; implicitHeight: 38; onClicked: deleteDialog.close() },
+            ActionButton { objectName: "confirmDeleteButton"; text: "永久删除"; accent: true; danger: true; implicitHeight: 38; onClicked: deleteDialog.confirm() }
+        ]
     }
-    Dialog {
-        id: conflictDialog; objectName: "conflictDialog"; anchors.centerIn: parent; width: 480; modal: true; closePolicy: Popup.NoAutoClose
+    NookDialog {
+        id: conflictDialog; objectName: "conflictDialog"
+        width: Math.min(520, window.layoutWidth - 40)
+        closePolicy: Popup.NoAutoClose
+        iconName: app.operations.conflictFolder ? "folder" : "copy"
         title: "目标位置已存在同名项目"
-        contentItem: ColumnLayout {
-            spacing: 16
-            Label { text: app.operations.conflictName; wrapMode: Text.WrapAnywhere; Layout.fillWidth: true }
-            Label { visible: app.operations.conflictFolder; text: "文件夹不会自动合并或替换。"; color: muted; font.pixelSize: 13 }
-            RowLayout {
-                Button { text: "取消任务"; onClicked: app.operations.cancel() }
-                Item { Layout.fillWidth: true }
-                Button { text: "跳过"; onClicked: app.operations.resolveConflict(0) }
-                Button { text: "保留两者"; onClicked: app.operations.resolveConflict(2) }
-                Button { text: "替换文件"; enabled: !app.operations.conflictFolder; onClicked: app.operations.resolveConflict(1) }
-            }
-        }
+        message: app.operations.conflictName + (app.operations.conflictFolder ? "\n文件夹不会自动合并或替换。" : "")
+        wrapAnywhere: true
+        onAccepted: app.operations.resolveConflict(2)
+        actions: [
+            ActionButton { text: "取消任务"; foreground: ink; implicitHeight: 38; onClicked: app.operations.cancel() },
+            ActionButton { text: "跳过"; foreground: ink; implicitHeight: 38; onClicked: app.operations.resolveConflict(0) },
+            ActionButton { text: "替换文件"; foreground: ink; implicitHeight: 38; enabled: !app.operations.conflictFolder; onClicked: app.operations.resolveConflict(1) },
+            ActionButton { text: "保留两者"; accent: true; implicitHeight: 38; onClicked: app.operations.resolveConflict(2) }
+        ]
     }
-    Dialog {
-        id: closeDialog; anchors.centerIn: parent; width: 420; modal: true
+    NookDialog {
+        id: closeDialog
+        iconName: "close"
         title: "文件任务尚未结束"
-        contentItem: ColumnLayout {
-            spacing: 16
-            Label { text: "可以继续等待，或取消未完成的任务后关闭。已完成的项目会保留。"; wrapMode: Text.Wrap; Layout.fillWidth: true }
-            RowLayout { Layout.alignment: Qt.AlignRight
-                Button { text: "继续任务"; onClicked: closeDialog.close() }
-                Button { text: "取消任务并关闭"; onClicked: { closingAfterTask = true; app.operations.cancel(); closeDialog.close() } }
-            }
-        }
+        message: "可以继续等待，或取消未完成的任务后关闭。已完成的项目会保留。"
+        onAccepted: close()
+        actions: [
+            ActionButton { text: "取消任务并关闭"; foreground: ink; implicitHeight: 38; onClicked: { closingAfterTask = true; app.operations.cancel(); closeDialog.close() } },
+            ActionButton { text: "继续任务"; accent: true; implicitHeight: 38; onClicked: closeDialog.close() }
+        ]
     }
-    Dialog {
-        id: errorsDialog; objectName: "errorsDialog"; anchors.centerIn: parent; width: 600; height: Math.min(440, window.layoutHeight - 60); modal: true
-        title: "任务错误 · 已完成的项目不会回滚"
-        contentItem: ScrollView {
+    NookDialog {
+        id: errorsDialog; objectName: "errorsDialog"
+        width: Math.min(600, window.layoutWidth - 40)
+        danger: true; iconName: "close"
+        title: "任务错误"
+        message: "以下项目未能完成。已完成的项目不会回滚。"
+        onAccepted: close()
+        ScrollView {
+            Layout.fillWidth: true
+            Layout.preferredHeight: Math.min(260, window.layoutHeight - 260)
             TextArea {
                 id: errorsText
                 ContextMenu.menu: null
                 TextMenuArea { target: errorsText }
-                selectionColor: theme.selection; selectedTextColor: theme.selectionText
-                text: app.operations.errors.join("\n\n"); readOnly: true; wrapMode: TextEdit.WrapAnywhere; selectByMouse: true; font.pixelSize: 15
+                color: ink; selectionColor: theme.selection; selectedTextColor: theme.selectionText
+                text: app.operations.errors.join("\n\n"); readOnly: true; wrapMode: TextEdit.WrapAnywhere; selectByMouse: true; font.pixelSize: 13
+                padding: 12
+                background: Rectangle { radius: 10; color: theme.sunken; border.width: 1; border.color: line }
             }
         }
-        footer: Item { implicitHeight: 46; Button { anchors.right: parent.right; anchors.rightMargin: 12; text: "关闭"; onClicked: errorsDialog.close() } }
+        actions: [ ActionButton { text: "关闭"; accent: true; implicitHeight: 38; onClicked: errorsDialog.close() } ]
     }
     PropertiesDialog { id: propertiesDialog; controller: app.properties; host: window }
     SettingsPanel {

@@ -676,6 +676,31 @@ class FollowupUiTest : public QObject {
         QTRY_VERIFY(!window->isVisible());
     }
 
+    // Delete goes straight to the trash; only permanent deletion asks, in nook's own dialog.
+    void trashAsksNothing() {
+        auto *dialog = object("deleteDialog");
+        QVERIFY(dialog);
+        controller->left()->selectUri(uri("sample.txt"));
+        QTRY_COMPARE(controller->left()->selectedCount(), 1);
+        window->requestActivate();
+        QTest::keyClick(window, Qt::Key_Delete);
+        QTRY_VERIFY_WITH_TIMEOUT(!QFileInfo::exists(fixture->path() + "/sample.txt"), 10000);
+        QVERIFY(!dialog->property("visible").toBool());
+        QTRY_VERIFY(!operations->busy());
+        QVERIFY2(operations->errors().isEmpty(), qPrintable(operations->errors().join("\n")));
+
+        controller->left()->selectUri(uri("folder"));
+        QTRY_COMPARE(controller->left()->selectedCount(), 1);
+        QTest::keyClick(window, Qt::Key_Delete, Qt::ShiftModifier);
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QVERIFY(dialog->property("danger").toBool());
+        QVERIFY(dialog->property("message").toString().contains("folder"));
+        checkPopupBounds(dialog);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QVERIFY(QFileInfo::exists(fixture->path() + "/folder"));
+    }
+
     void selectionMode() {
         auto *folderRow = entry(uri("folder"));
         auto *sampleRow = entry(uri("sample.txt"));

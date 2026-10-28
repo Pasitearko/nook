@@ -9,6 +9,7 @@ AbstractButton {
     property string iconName: ""
     property string hint: text
     property bool accent: false
+    property bool danger: false // with accent: a destructive answer, in red
     property bool active: false
     property var hostWindow: ApplicationWindow.window
     readonly property var theme: hostWindow && hostWindow.theme ? hostWindow.theme : Palette.fallback()
@@ -29,7 +30,8 @@ AbstractButton {
     Accessible.name: hint
     background: Rectangle {
         radius: 8
-        color: control.accent ? (control.down ? control.theme.accentHover : control.hovered ? control.theme.accentHover : control.theme.accent)
+        color: control.accent && control.danger ? (control.down || control.hovered ? Qt.darker(control.theme.dangerFill, 1.12) : control.theme.dangerFill)
+             : control.accent ? (control.down ? control.theme.accentHover : control.hovered ? control.theme.accentHover : control.theme.accent)
              : control.down ? control.theme.pressed : control.active ? control.theme.activeFill : control.hovered ? control.theme.hover : "transparent"
         border.width: control.active && !control.accent ? 1 : 0
         border.color: control.theme.activeBorder

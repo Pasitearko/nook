@@ -16,7 +16,7 @@ add_library(nook_core STATIC
     src/preview.cpp src/preview.h src/application.cpp src/application.h
     src/fileproperties.cpp src/fileproperties.h
     src/diskmounts.cpp src/diskmounts.h src/ntfs.cpp src/ntfs.h
-    src/filemanager1.cpp src/filemanager1.h src/filechooser.cpp src/filechooser.h)
+    src/filemanager1.cpp src/filemanager1.h src/filechooser.cpp src/filechooser.h src/appearance.cpp src/appearance.h)
 target_link_libraries(nook_core PUBLIC Qt6::Core Qt6::Gui Qt6::Quick Qt6::Concurrent Qt6::Network Qt6::DBus
     PkgConfig::GIO PkgConfig::ICU SQLite3::SQLite3)
 target_include_directories(nook_core PUBLIC src)
@@ -28,7 +28,7 @@ qt_add_qml_module(nook URI Nook VERSION 1.0
         qml/NookMenu.qml qml/NookMenuItem.qml qml/SettingsPanel.qml
         qml/NookToolTip.qml qml/NookComboBox.qml qml/Sidebar.qml qml/PropertiesDialog.qml
         qml/Spotlight.qml qml/RecentActivity.qml
-        qml/Theme.qml qml/palette.js qml/DatePicker.qml qml/TextMenu.qml qml/TextMenuArea.qml qml/SpringProgress.qml qml/FileChooser.qml qml/WindowCloseButton.qml
+        qml/Theme.qml qml/palette.js qml/DatePicker.qml qml/TextMenu.qml qml/TextMenuArea.qml qml/SpringProgress.qml qml/FileChooser.qml qml/WindowCloseButton.qml qml/NookDialog.qml
     RESOURCES qml/icons/folder.svg qml/icons/file.svg qml/icons/image.svg
     qml/icons/code.svg qml/icons/document.svg qml/icons/video.svg qml/icons/music.svg
     qml/icons/home.svg qml/icons/download.svg qml/icons/drive.svg qml/icons/trash.svg

@@ -13,7 +13,7 @@ ApplicationWindow {
     required property var request
     readonly property var app: controller
     readonly property var prefs: app.settings.values
-    readonly property bool dark: prefs.theme === "dark" || (prefs.theme === "system" && Qt.styleHints.colorScheme === Qt.ColorScheme.Dark)
+    readonly property bool dark: prefs.theme === "dark" || (prefs.theme === "system" && app.settings.systemDark)
     readonly property Theme theme: Theme { dark: window.dark; effects: prefs.effects }
     readonly property color ink: theme.ink
     readonly property color muted: theme.muted
@@ -235,15 +235,6 @@ ApplicationWindow {
         currentIndex: Math.max(0, window.filterIndex)
         onActivated: window.filterIndex = currentIndex
     }
-    component ChooserDialog: Popup {
-        anchors.centerIn: parent
-        width: Math.min(440, window.layoutWidth - 40)
-        modal: true; focus: true; padding: 22
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-        Overlay.modal: Rectangle { color: window.theme.scrim }
-        background: Rectangle { radius: 18; color: window.theme.raised; border.width: 1; border.color: window.line }
-        onClosed: window.listFocus()
-    }
 
     Item {
         id: workspace
@@ -421,9 +412,13 @@ ApplicationWindow {
         }
     }
 
-    ChooserDialog {
+    NookDialog {
         id: newFolderDialog
         objectName: "chooserNewFolderDialog"
+        iconName: "folder"
+        title: "新建文件夹"
+        message: "位置：" + app.left.displayPath
+        wrapAnywhere: true
         readonly property string problem: folderName.text.trim() === "" ? "请输入名称"
             : folderName.text.indexOf("/") >= 0 ? "名称不能包含“/”"
             : !app.nameAvailable(app.left.uri, folderName.text) ? "此位置已存在“" + folderName.text + "”" : ""
@@ -434,34 +429,28 @@ ApplicationWindow {
             close()
         }
         onOpened: folderName.forceActiveFocus()
-        contentItem: ColumnLayout {
-            spacing: 14
-            Text { text: "新建文件夹"; color: ink; font.pixelSize: 18; font.weight: Font.DemiBold }
-            Text { text: "位置：" + app.left.displayPath; color: muted; font.pixelSize: 12; elide: Text.ElideMiddle; Layout.fillWidth: true }
-            Field { id: folderName; objectName: "chooserFolderName"; Layout.fillWidth: true; leftPadding: 12; rightPadding: 12; onAccepted: newFolderDialog.submit() }
-            Text { text: newFolderDialog.problem || "Enter 确认 · Esc 取消"; color: newFolderDialog.problem && folderName.text ? theme.warning : muted; font.pixelSize: 12 }
-            RowLayout {
-                Layout.fillWidth: true; spacing: 8
-                Item { Layout.fillWidth: true }
-                ActionButton { text: "取消"; foreground: ink; onClicked: newFolderDialog.close() }
-                ActionButton { text: "创建"; accent: true; enabled: newFolderDialog.problem === ""; onClicked: newFolderDialog.submit() }
-            }
-        }
+        onClosed: window.listFocus()
+        Field { id: folderName; objectName: "chooserFolderName"; Layout.fillWidth: true; Layout.preferredHeight: 40; leftPadding: 12; rightPadding: 12; onAccepted: newFolderDialog.submit() }
+        Text { text: newFolderDialog.problem || "Enter 确认 · Esc 取消"; color: newFolderDialog.problem && folderName.text ? theme.warning : muted; font.pixelSize: 12 }
+        actions: [
+            ActionButton { text: "取消"; foreground: ink; implicitHeight: 38; onClicked: newFolderDialog.close() },
+            ActionButton { text: "创建"; accent: true; implicitHeight: 38; enabled: newFolderDialog.problem === ""; onClicked: newFolderDialog.submit() }
+        ]
     }
-    ChooserDialog {
+    NookDialog {
         id: overwriteDialog
         objectName: "chooserOverwriteDialog"
         property string target: ""
-        contentItem: ColumnLayout {
-            spacing: 14
-            Text { text: "“" + app.localPath(overwriteDialog.target).split("/").pop() + "”已存在"; color: ink; font.pixelSize: 18; font.weight: Font.DemiBold; Layout.fillWidth: true; elide: Text.ElideMiddle }
-            Text { text: "替换后，原文件的内容会被覆盖。"; color: muted; font.pixelSize: 13; Layout.fillWidth: true; wrapMode: Text.Wrap }
-            RowLayout {
-                Layout.fillWidth: true; spacing: 8
-                Item { Layout.fillWidth: true }
-                ActionButton { text: "取消"; foreground: ink; onClicked: overwriteDialog.close() }
-                ActionButton { objectName: "chooserReplace"; text: "替换"; accent: true; onClicked: { const target = overwriteDialog.target; overwriteDialog.close(); window.finish([target]) } }
-            }
-        }
+        danger: true; iconName: "file"
+        title: "“" + app.localPath(target).split("/").pop() + "”已存在"
+        message: "替换后，原文件的内容会被覆盖。"
+        wrapAnywhere: true
+        function replace() { const chosen = target; close(); window.finish([chosen]) }
+        onAccepted: replace()
+        onClosed: window.listFocus()
+        actions: [
+            ActionButton { text: "取消"; foreground: ink; implicitHeight: 38; onClicked: overwriteDialog.close() },
+            ActionButton { objectName: "chooserReplace"; text: "替换"; accent: true; danger: true; implicitHeight: 38; onClicked: overwriteDialog.replace() }
+        ]
     }
 }

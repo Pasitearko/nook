@@ -6,6 +6,7 @@
 #include "operations.h"
 #include "preview.h"
 #include "searchindex.h"
+#include "appearance.h"
 #include <QSettings>
 #include <QVariantList>
 #include <memory>
@@ -13,9 +14,14 @@
 class AppSettings : public QObject {
     Q_OBJECT
     Q_PROPERTY(QVariantMap values READ values NOTIFY changed)
+    // The desktop's own dark/light preference, for the "system" theme.
+    Q_PROPERTY(bool systemDark READ systemDark NOTIFY systemDarkChanged)
   public:
     explicit AppSettings(QObject *parent = nullptr);
     QVariantMap values() const;
+    bool systemDark() const {
+        return m_appearance.dark();
+    }
     Q_INVOKABLE void set(const QString &key, const QVariant &value);
     QSettings &store() {
         return *m_store;
@@ -24,9 +30,11 @@ class AppSettings : public QObject {
     void changed();
     void columnWidthsReset();
     void recentLocationsChanged();
+    void systemDarkChanged();
 
   private:
     std::unique_ptr<QSettings> m_store;
+    SystemAppearance m_appearance;
 };
 namespace nook {
 // Keeps ~/.config/autostart in step with the "background index" preference.

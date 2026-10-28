@@ -30,33 +30,25 @@ Dialog {
         mountChanges = ({}); controller.diskMounts.refresh()
     }
     Connections { target: panel.controller.diskMounts; function onDisksChanged() { panel.mountChanges = ({}) } }
-    Dialog {
+    NookDialog {
         id: mountConfirm
         objectName: "mountConfirmDialog"
-        anchors.centerIn: parent
-        width: Math.min(580, panel.width - 32)
-        modal: true; title: "确认开机挂载更改"
-        background: Rectangle { radius: 14; color: panel.theme.raised; border.color: panel.line }
-        contentItem: ColumnLayout {
-            spacing: 16
-            Label {
-                Layout.fillWidth: true; color: panel.ink; wrapMode: Text.Wrap
-                text: panel.pendingMounts.map(c => c.uuid + "  ·  " + (c.enabled ? "启用开机挂载 / " + (c.readOnly ? "只读" : "读写") : "关闭开机挂载")).join("\n")
-            }
-            Label {
-                Layout.fillWidth: true; color: panel.muted; wrapMode: Text.Wrap
-                text: "将通过系统授权更新 /etc/fstab，并备份原配置。仅处理以上分区；关闭时不会卸载或删除数据。Windows 休眠或未正常关机可能导致挂载失败，不会强制修复。"
-            }
-            RowLayout {
-                Item { Layout.fillWidth: true }
-                ActionButton { objectName: "cancelMountApplyButton"; text: "取消"; onClicked: mountConfirm.close() }
-                ActionButton {
-                    objectName: "confirmMountApplyButton"; text: "授权并应用"; accent: true
-                    enabled: panel.pendingMounts.length > 0 && !panel.controller.diskMounts.busy
-                    onClicked: { const choices = panel.pendingMounts; mountConfirm.close(); panel.controller.diskMounts.apply(choices); panel.mountChanges = ({}) }
-                }
-            }
+        width: Math.min(560, panel.width - 32)
+        iconName: "drive"
+        title: "确认开机挂载更改"
+        message: "将通过系统授权更新 /etc/fstab，并备份原配置。仅处理以下分区；关闭时不会卸载或删除数据。Windows 休眠或未正常关机可能导致挂载失败，不会强制修复。"
+        Text {
+            Layout.fillWidth: true; color: panel.ink; font.pixelSize: 13; wrapMode: Text.WrapAnywhere
+            text: panel.pendingMounts.map(c => c.uuid + "  ·  " + (c.enabled ? "启用开机挂载 / " + (c.readOnly ? "只读" : "读写") : "关闭开机挂载")).join("\n")
         }
+        actions: [
+            ActionButton { objectName: "cancelMountApplyButton"; text: "取消"; foreground: panel.ink; implicitHeight: 38; onClicked: mountConfirm.close() },
+            ActionButton {
+                objectName: "confirmMountApplyButton"; text: "授权并应用"; accent: true; implicitHeight: 38
+                enabled: panel.pendingMounts.length > 0 && !panel.controller.diskMounts.busy
+                onClicked: { const choices = panel.pendingMounts; mountConfirm.close(); panel.controller.diskMounts.apply(choices); panel.mountChanges = ({}) }
+            }
+        ]
     }
     objectName: "settingsDialog"
     width: Math.min(820, host.layoutWidth - 40)

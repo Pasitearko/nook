@@ -16,8 +16,13 @@ Dialog {
     width: Math.min(590, host.layoutWidth - 36)
     height: Math.min(610, host.layoutHeight - 32)
     anchors.centerIn: parent
-    modal: true; padding: 20
-    title: "属性"
+    modal: true; padding: 20; topPadding: 16
+    header: Item {
+        implicitHeight: 64
+        Text { x: 22; anchors.verticalCenter: parent.verticalCenter; text: "属性"; color: panel.ink; font.pixelSize: 20; font.weight: Font.DemiBold }
+        ActionButton { anchors.right: parent.right; anchors.rightMargin: 14; anchors.verticalCenter: parent.verticalCenter; iconName: "close"; hint: "关闭"; onClicked: panel.close() }
+        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: panel.theme.line }
+    }
     background: Rectangle { radius: 16; color: panel.theme.raised; border.color: panel.theme.line }
     Overlay.modal: Rectangle { color: panel.theme.scrim }
     Connections { target: panel.controller; function onChanged() { panel.draftMode = Number(panel.details.permissions) || 0 } }

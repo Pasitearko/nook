@@ -26,7 +26,9 @@ AppSettings::AppSettings(QObject *parent)
                   ? std::make_unique<QSettings>(nook::storageDirectory(nook::Storage::Config) +
                                                     "/preferences.ini", QSettings::IniFormat)
                   : std::make_unique<QSettings>(QSettings::IniFormat, QSettings::UserScope,
-                                                "nook", "preferences")) {}
+                                                "nook", "preferences")) {
+    connect(&m_appearance, &SystemAppearance::changed, this, &AppSettings::systemDarkChanged);
+}
 QVariantMap AppSettings::values() const {
     // An INI file stores everything as text: a saved `false` comes back as the string
     // "false", which QML treats as true. Restore the real types on the way out.

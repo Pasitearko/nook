@@ -1,6 +1,6 @@
 pkgname=nook
 pkgver=0.1
-pkgrel=7
+pkgrel=9
 pkgdesc='A native Wayland file manager with local filename search and on-demand previews'
 arch=('x86_64')
 url='https://github.com/Pasitearko/nook'
