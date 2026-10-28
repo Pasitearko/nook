@@ -50,6 +50,7 @@ QVariantMap AppSettings::values() const {
             {"rememberRecentLocations", flag("rememberRecentLocations", true)},
             {"backgroundIndex", flag("backgroundIndex", true)},
             {"ntfsJournal", flag("ntfsJournal", false)},
+            {"chooserGrid", flag("chooserGrid", false)},
             {"roots", list("roots")},
             {"exclusions", list("exclusions")}};
 }

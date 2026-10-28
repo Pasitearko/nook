@@ -32,6 +32,7 @@ ApplicationWindow {
     property var choiceState: ({})
     property string pendingFolder: ""
     property string toastMessage: ""
+    readonly property bool gridView: prefs.chooserGrid === true
 
     // What FilePane and Sidebar expect from their window.
     readonly property bool dialogsOpen: newFolderDialog.visible || overwriteDialog.visible
@@ -44,7 +45,7 @@ ApplicationWindow {
     function clearDropHint() {}
     function springLoad(open) { open() }
 
-    width: 860; height: 600
+    width: 1102; height: 709
     minimumWidth: 620; minimumHeight: 400
     visible: true
     color: "transparent"
@@ -308,7 +309,10 @@ ApplicationWindow {
                         Icon { name: "search"; width: 14; height: 14; x: 11; anchors.verticalCenter: parent.verticalCenter }
                         ActionButton { visible: searchBox.text !== ""; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; implicitWidth: 30; implicitHeight: 30; leftPadding: 7; rightPadding: 7; iconName: "close"; hint: "清除搜索"; foreground: muted; onClicked: searchBox.clear() }
                     }
-                    ActionButton { objectName: "chooserClose"; iconName: "close"; hint: "取消 · Esc"; foreground: muted; onClicked: request.cancel() }
+                    ActionButton { objectName: "chooserListView"; iconName: "list"; hint: "列表视图"; active: !window.gridView; foreground: ink; Layout.leftMargin: 4; onClicked: app.settings.set("chooserGrid", false) }
+                    ActionButton { objectName: "chooserGridView"; iconName: "grid"; hint: "网格视图"; active: window.gridView; foreground: ink; onClicked: app.settings.set("chooserGrid", true) }
+                    Rectangle { width: 1; height: 18; color: line; Layout.leftMargin: 4; Layout.rightMargin: 2 }
+                    WindowCloseButton { objectName: "chooserClose"; hint: "取消 · Esc"; onClicked: request.cancel() }
                 }
                 Rectangle { Layout.fillWidth: true; height: 1; color: line; opacity: 0.7 }
                 RowLayout {
@@ -326,8 +330,9 @@ ApplicationWindow {
                         objectName: "chooserPane"
                         Layout.fillWidth: true; Layout.fillHeight: true
                         directoryModel: window.listModel
-                        controller: app; gridMode: false; focusedPane: true; searchMode: window.searching
+                        controller: app; gridMode: window.gridView; focusedPane: true; searchMode: window.searching
                         dark: window.dark; dense: true; showHeader: false; useSavedWidths: false
+                        emptyText: window.rulesOf(window.filterIndex).length || window.pickFolders ? "这里没有符合“" + (window.pickFolders ? "文件夹" : request.filters[window.filterIndex].name) + "”的项目" : "这个文件夹是空的"
                         onActivated: entry => window.activate(entry)
                     }
                 }

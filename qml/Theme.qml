@@ -59,6 +59,7 @@ QtObject {
     // Status
     readonly property color danger: dark ? "#f0857a" : "#c2453a"
     readonly property color dangerSoft: dark ? "#4a2a27" : "#fbe9e6"
+    readonly property color closeHover: "#c42b1c"                         // the window ✕, as on Windows
     readonly property color warning: dark ? "#e0ad62" : "#b9822f"
     readonly property color warningSoft: dark ? "#3a3022" : "#f7eedd"
     readonly property color success: dark ? "#9cc08a" : "#5f8a4e"

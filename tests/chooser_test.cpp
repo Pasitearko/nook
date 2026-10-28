@@ -268,6 +268,23 @@ class ChooserTest : public QObject {
         QCOMPARE(choices[0].value, QString("false"));
     }
 
+    void gridToggleIsRemembered() {
+        open("open", options());
+        auto *pane = item("chooserPane");
+        auto *grid = item("chooserGridView");
+        auto *list = item("chooserListView");
+        QVERIFY(pane && grid && list);
+        QCOMPARE(window->width(), 1102);
+        QCOMPARE(window->height(), 709);
+        QVERIFY(!pane->property("gridMode").toBool());
+        QMetaObject::invokeMethod(grid, "clicked");
+        QVERIFY(pane->property("gridMode").toBool());
+        QCOMPARE(settings->values().value("chooserGrid").toBool(), true);
+        QMetaObject::invokeMethod(list, "clicked");
+        QVERIFY(!pane->property("gridMode").toBool());
+        QCOMPARE(settings->values().value("chooserGrid").toBool(), false);
+    }
+
     void escapeCancels() {
         open("open", options());
         QSignalSpy finished(request.get(), &ChooserRequest::finished);

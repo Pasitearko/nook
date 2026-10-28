@@ -13,6 +13,7 @@ Rectangle {
     property bool dense: false
     property bool thumbnails: true
     property bool showHeader: true // folder title, column-width button and item count
+    property string emptyText: "这个文件夹是空的"
     readonly property var theme: ApplicationWindow.window.theme
     readonly property var host: ApplicationWindow.window
     // Selection mode (toolbar): a click toggles an item, a drag from anywhere draws a band,
@@ -458,7 +459,7 @@ Rectangle {
                     anchors.centerIn: parent; spacing: 12
                     visible: directoryModel.count === 0 && !directoryModel.loading
                     Icon { anchors.horizontalCenter: parent.horizontalCenter; name: pane.searchMode ? "search" : "folder"; width: 46; height: 46; opacity: 0.5 }
-                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: directoryModel.error || (pane.searchMode ? "没有匹配的项目" : "这个文件夹是空的"); color: pane.muted; font.pixelSize: 16; width: Math.min(320, pane.width - 40); wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter }
+                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: directoryModel.error || (pane.searchMode ? "没有匹配的项目" : pane.emptyText); color: pane.muted; font.pixelSize: 16; width: Math.min(320, pane.width - 40); wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter }
                     Text { anchors.horizontalCenter: parent.horizontalCenter; visible: pane.searchMode; text: "索引更新期间，结果可能尚不完整"; color: pane.muted; font.pixelSize: 13 }
                 }
                 DropArea {

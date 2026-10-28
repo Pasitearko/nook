@@ -428,6 +428,7 @@ ApplicationWindow {
                     Rectangle { width: 1; height: 18; color: line }
                     ActionButton { iconName: dark ? "sun" : "moon"; hint: "切换深浅主题"; foreground: ink; onClicked: app.settings.set("theme", dark ? "light" : "dark") }
                     ActionButton { objectName: "settingsButton"; iconName: "settings"; hint: "设置"; onClicked: settingsDialog.open() }
+                    WindowCloseButton { objectName: "windowCloseButton"; hint: "关闭窗口 · Ctrl+W"; Layout.leftMargin: 2; onClicked: window.close() }
                 }
             }
             RowLayout {

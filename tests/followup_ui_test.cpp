@@ -661,6 +661,21 @@ class FollowupUiTest : public QObject {
         QTRY_COMPARE(controller->tabs().size(), 1);
     }
 
+    // The window's ✕ sits in the top-right corner, beside the toolbar buttons, and closes it.
+    void closeButtonClosesWindow() {
+        auto *close = item("windowCloseButton");
+        auto *settingsButton = item("settingsButton");
+        QVERIFY(close && settingsButton);
+        const auto rect = close->mapRectToScene(close->boundingRect());
+        const auto beside = settingsButton->mapRectToScene(settingsButton->boundingRect());
+        QVERIFY2(window->width() - rect.right() < 24, qPrintable(QString::number(window->width() - rect.right())));
+        QVERIFY(rect.top() < 30);
+        QCOMPARE(rect.height(), beside.height());
+        QVERIFY(rect.left() > beside.right());
+        click(close);
+        QTRY_VERIFY(!window->isVisible());
+    }
+
     void selectionMode() {
         auto *folderRow = entry(uri("folder"));
         auto *sampleRow = entry(uri("sample.txt"));

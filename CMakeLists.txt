@@ -28,7 +28,7 @@ qt_add_qml_module(nook URI Nook VERSION 1.0
         qml/NookMenu.qml qml/NookMenuItem.qml qml/SettingsPanel.qml
         qml/NookToolTip.qml qml/NookComboBox.qml qml/Sidebar.qml qml/PropertiesDialog.qml
         qml/Spotlight.qml qml/RecentActivity.qml
-        qml/Theme.qml qml/palette.js qml/DatePicker.qml qml/TextMenu.qml qml/TextMenuArea.qml qml/SpringProgress.qml qml/FileChooser.qml
+        qml/Theme.qml qml/palette.js qml/DatePicker.qml qml/TextMenu.qml qml/TextMenuArea.qml qml/SpringProgress.qml qml/FileChooser.qml qml/WindowCloseButton.qml
     RESOURCES qml/icons/folder.svg qml/icons/file.svg qml/icons/image.svg
     qml/icons/code.svg qml/icons/document.svg qml/icons/video.svg qml/icons/music.svg
     qml/icons/home.svg qml/icons/download.svg qml/icons/drive.svg qml/icons/trash.svg

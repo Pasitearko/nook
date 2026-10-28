@@ -17,8 +17,8 @@ window-rule {
 window-rule {
     match app-id="^local\.nook\.chooser$"
     open-floating true
-    default-column-width { fixed 860; }
-    default-window-height { fixed 600; }
+    default-column-width { fixed 1102; }
+    default-window-height { fixed 709; }
 }
 // Optional bind; replace an existing Mod+E instead of defining it twice.
 // binds { Mod+E { spawn "nook" "--new-window"; } }
