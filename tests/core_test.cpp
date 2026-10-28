@@ -639,6 +639,113 @@ class CoreTest : public QObject {
         QCOMPARE(index.model()->count(), 1);
         index.stop();
     }
+    // Generated and cached folders stay out of the index unless asked for; names that need no
+    // pinyin store none, and Chinese names are still found by it.
+    void noiseFoldersAndCompactRows() {
+        QTemporaryDir dir(QDir::currentPath() + "/fixture-XXXXXX");
+        const auto data = dir.path() + "/data";
+        for (const auto &folder : {"/node_modules/pkg", "/proj/target/debug", "/proj/src", "/env", "/.git/objects",
+                                   "/app/Code Cache", "/cmake-out"})
+            QVERIFY(QDir().mkpath(data + folder));
+        put(data + "/node_modules/pkg/index.js");
+        put(data + "/proj/target/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55");
+        put(data + "/proj/target/debug/needle-build.bin");
+        put(data + "/proj/src/needle.rs");
+        put(data + "/env/pyvenv.cfg");
+        put(data + "/env/needle-venv.py");
+        put(data + "/.git/objects/needle-object");
+        put(data + "/app/Code Cache/needle-cache");
+        put(data + "/cmake-out/CMakeCache.txt");
+        put(data + "/cmake-out/needle-cmake.o");
+        put(data + "/农业经济学.txt");
+        const QString database = dir.path() + "/db/index.sqlite";
+        SearchIndex index(database);
+        index.setRoots({data});
+        index.setIncluded(true, false);
+        auto names = [&](const QString &text) {
+            index.query(text);
+            QTest::qWaitFor([&] { return !index.model()->loading(); }, 5000);
+            QStringList found;
+            for (int row = 0; row < index.model()->count(); ++row)
+                found << index.model()->entry(row)["fileName"].toString();
+            found.sort();
+            return found;
+        };
+        index.start();
+        QTRY_VERIFY_WITH_TIMEOUT(!index.scanning(), 10000);
+        QCOMPARE(names("needle"), QStringList{"needle.rs"});
+        QCOMPARE(names("node_modules"), QStringList{});
+        QCOMPARE(names("target"), QStringList{});
+        // Pinyin, initials and short queries still reach Chinese names.
+        QCOMPARE(names("nongye"), QStringList{"农业经济学.txt"});
+        QCOMPARE(names("nyjj"), QStringList{"农业经济学.txt"});
+        QCOMPARE(names("经济"), QStringList{"农业经济学.txt"});
+        QCOMPARE(names("ny"), QStringList{"农业经济学.txt"});
+        {
+            sqlite3 *db = nullptr;
+            sqlite3_open_v2(QFile::encodeName(database).constData(), &db, SQLITE_OPEN_READONLY, nullptr);
+            sqlite3_stmt *stmt = nullptr;
+            sqlite3_prepare_v2(db, "SELECT name,path,pinyin,initials FROM entries WHERE name IN ('needle.rs','农业经济学.txt') ORDER BY name",
+                               -1, &stmt, nullptr);
+            QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+            QCOMPARE(QString::fromUtf8(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0))), QString("needle.rs"));
+            QCOMPARE(QByteArray(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1))),
+                     QFile::encodeName(data + "/proj/src/needle.rs"));
+            QCOMPARE(sqlite3_column_bytes(stmt, 2), 0);
+            QCOMPARE(sqlite3_column_bytes(stmt, 3), 0);
+            QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+            QCOMPARE(QString::fromUtf8(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3))), QString("nyjjx.txt"));
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        }
+        // Asked for, they come back; turned off again, their rows go.
+        index.setIncluded(true, true);
+        index.start();
+        QTRY_VERIFY_WITH_TIMEOUT(!index.scanning(), 10000);
+        QCOMPARE(names("needle"), (QStringList{"needle-build.bin", "needle-cache", "needle-cmake.o", "needle-object",
+                                              "needle-venv.py", "needle.rs"}));
+        index.setIncluded(true, false);
+        index.start();
+        QTRY_VERIFY_WITH_TIMEOUT(!index.scanning(), 10000);
+        QCOMPARE(names("needle"), QStringList{"needle.rs"});
+        index.stop();
+        QVERIFY(nook::noisePath("a/node_modules/b.js"));
+        QVERIFY(nook::noisePath("Users/x/AppData/Code Cache"));
+        QVERIFY(!nook::noisePath("Users/x/Documents/build/report.docx"));
+    }
+    // An index from before v3 (URIs, pinyin everywhere) is emptied and rebuilt by the next scan.
+    void oldIndexIsRebuilt() {
+        QTemporaryDir dir(QDir::currentPath() + "/fixture-XXXXXX");
+        QDir().mkdir(dir.path() + "/data");
+        QDir().mkdir(dir.path() + "/db");
+        put(dir.path() + "/data/fresh.txt");
+        const QString database = dir.path() + "/db/index.sqlite";
+        {
+            sqlite3 *db = nullptr;
+            QCOMPARE(sqlite3_open(QFile::encodeName(database).constData(), &db), SQLITE_OK);
+            QCOMPARE(sqlite3_exec(db,
+                                  "CREATE TABLE entries(id INTEGER PRIMARY KEY,uri TEXT UNIQUE NOT NULL,root TEXT NOT NULL,"
+                                  "name TEXT NOT NULL,name_fold TEXT NOT NULL,pinyin TEXT NOT NULL,initials TEXT NOT NULL,"
+                                  "folder INTEGER,size INTEGER,mtime INTEGER,icon TEXT,seen INTEGER,ref INTEGER);"
+                                  "INSERT INTO entries(uri,root,name,name_fold,pinyin,initials) "
+                                  "VALUES('file:///gone/old.txt','/gone','old.txt','old.txt','old.txt','old.txt');"
+                                  "PRAGMA user_version=2;",
+                                  nullptr, nullptr, nullptr),
+                     SQLITE_OK);
+            sqlite3_close(db);
+        }
+        SearchIndex index(database);
+        index.setRoots({dir.path() + "/data"});
+        index.start();
+        QTRY_VERIFY_WITH_TIMEOUT(!index.scanning(), 10000);
+        index.query("old");
+        QTRY_VERIFY(!index.model()->loading());
+        QCOMPARE(index.model()->count(), 0);
+        index.query("fresh");
+        QTRY_VERIFY(!index.model()->loading());
+        QCOMPARE(index.model()->count(), 1);
+        index.stop();
+    }
     void incrementalFolderTimes() {
         // Between daily verifications a sweep trusts unchanged folder times: names stay exact
         // (any add/remove/rename changes the folder's mtime), only in-place edits wait a day.

@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <unicode/translit.h>
 
@@ -221,6 +222,41 @@ bool sidebarDataPartition(const QString &filesystem, const QString &partitionTyp
     if (!type.isEmpty() && !basic)
         return false;
     return fs == "ntfs" || fs == "ntfs3" || fs == "exfat" || (fs == "vfat" && basic);
+}
+QStringList systemFolders() {
+    return {"/usr", "/opt", "/etc", "/var", "/boot", "/srv", "/bin", "/sbin", "/lib", "/lib64", "/lost+found"};
+}
+bool noiseFolderName(const QByteArray &name) {
+    static const QSet<QByteArray> names = {
+        "node_modules", "bower_components", "__pycache__", ".git", ".hg", ".svn", ".venv", ".tox", ".nox",
+        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".gradle", ".next", ".nuxt", ".parcel-cache", ".turbo",
+        // Chromium/Electron caches inside application profiles.
+        "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "GrShaderCache",
+        "ShaderCache", "CacheStorage", "ScriptCache"};
+    return names.contains(name);
+}
+bool noiseFolder(int parentFd, const QByteArray &name) {
+    if (noiseFolderName(name))
+        return true;
+    // CACHEDIR.TAG marks a cache by convention (cargo's target/, npm, gradle, …); CMakeCache.txt
+    // a CMake build tree; pyvenv.cfg a Python virtual environment, whatever they are called.
+    for (const char *marker : {"/CACHEDIR.TAG", "/CMakeCache.txt", "/pyvenv.cfg"})
+        if (::faccessat(parentFd, (name + marker).constData(), F_OK, AT_SYMLINK_NOFOLLOW) == 0)
+            return true;
+    return false;
+}
+bool noisePath(const QByteArray &relativePath) {
+    qsizetype start = 0;
+    while (start <= relativePath.size()) {
+        qsizetype end = relativePath.indexOf('/', start);
+        if (end < 0)
+            end = relativePath.size();
+        // The last part is the entry itself: a noise folder is skipped together with its contents.
+        if (noiseFolderName(relativePath.mid(start, end - start)))
+            return true;
+        start = end + 1;
+    }
+    return false;
 }
 QStringList localRoots() {
     QStringList roots;

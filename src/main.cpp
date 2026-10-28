@@ -245,10 +245,12 @@ int main(int argc, char **argv) {
     Operations operations;
     index.setRoots(settings.values()["roots"].toStringList());
     index.setExclusions(settings.values()["exclusions"].toStringList());
+    index.setIncluded(settings.values()["indexSystem"].toBool(), settings.values()["indexNoise"].toBool());
     index.setNtfsJournal(settings.values()["ntfsJournal"].toBool());
     QObject::connect(&settings, &AppSettings::changed, &index, [&] {
         index.setRoots(settings.values()["roots"].toStringList());
         index.setExclusions(settings.values()["exclusions"].toStringList());
+        index.setIncluded(settings.values()["indexSystem"].toBool(), settings.values()["indexNoise"].toBool());
         const bool ntfs = settings.values()["ntfsJournal"].toBool();
         if (ntfs == index.ntfsJournal())
             return;

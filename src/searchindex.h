@@ -58,6 +58,12 @@ class SearchIndex : public QObject {
     void setNtfsJournal(bool enabled) {
         m_ntfsJournal = enabled;
     }
+    // The system's own trees and generated or cached folders (nook::systemFolders, noiseFolder)
+    // are indexed only when asked for.
+    void setIncluded(bool systemFolders, bool noiseFolders) {
+        m_indexSystem = systemFolders;
+        m_indexNoise = noiseFolders;
+    }
     // Tests: treats every root as an NTFS partition and opens it with this (key = root path).
     using VolumeOpener = std::function<int(const QString &key, QString *error)>;
     void setVolumeOpener(VolumeOpener opener) {
@@ -84,8 +90,8 @@ class SearchIndex : public QObject {
     // Scan thread: brings one NTFS partition up to date (journal replay, or a file-table pass
     // when the journal cannot vouch for the index). False: the walk has to cover it this time.
     bool syncNtfs(sqlite3 *db, const VolumeOpener &opener, const QString &key, const QString &root,
-                  const QStringList &excludes, bool rebuild, qint64 generation, qint64 &count, QStringList &watches,
-                  QString *error);
+                  const QStringList &excludes, bool skipNoise, bool rebuild, qint64 generation, qint64 &count,
+                  QStringList &watches, QString *error);
     QString m_database, m_status = QStringLiteral("尚未建立索引");
     QStringList m_roots, m_exclusions, m_warnings;
     DirectoryModel m_results;
@@ -102,7 +108,7 @@ class SearchIndex : public QObject {
     qint64 m_min = 0, m_max = 0, m_after = 0, m_before = 0;
     int m_offset = 0;
     SearchIndex *m_scanSource = nullptr;
-    bool m_ntfsJournal = false;
+    bool m_ntfsJournal = false, m_indexSystem = true, m_indexNoise = true;
     VolumeOpener m_volumeOpener;
     std::map<QString, int> m_volumes; // read-only partition descriptors, used by the scan thread only
 };

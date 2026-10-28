@@ -53,6 +53,8 @@ QVariantMap AppSettings::values() const {
             {"backgroundIndex", flag("backgroundIndex", true)},
             {"ntfsJournal", flag("ntfsJournal", false)},
             {"chooserGrid", flag("chooserGrid", false)},
+            {"indexSystem", flag("indexSystem", false)},
+            {"indexNoise", flag("indexNoise", false)},
             {"roots", list("roots")},
             {"exclusions", list("exclusions")}};
 }

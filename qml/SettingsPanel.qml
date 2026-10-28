@@ -252,6 +252,22 @@ Dialog {
                     visible: panel.category === 2; heading: "搜索范围"
                     Label { text: "扫描目录（每行一个，留空使用默认）"; color: panel.ink; font.pixelSize: 13; Layout.fillWidth: true; wrapMode: Text.Wrap }
                     Area { id: rootsInput; objectName: "rootsInput"; Layout.fillWidth: true; Layout.preferredHeight: 82; placeholderText: "/home\n/mnt/data" }
+                    ToggleRow {
+                        objectName: "indexSystemToggle"
+                        title: "包含系统目录（/usr、/etc、/opt、/var 等）"
+                        checked: panel.prefs.indexSystem
+                        onToggled: value => { panel.controller.settings.set("indexSystem", value); panel.reindexRequested() }
+                    }
+                    ToggleRow {
+                        objectName: "indexNoiseToggle"
+                        title: "包含开发与缓存目录"
+                        checked: panel.prefs.indexNoise
+                        onToggled: value => { panel.controller.settings.set("indexNoise", value); panel.reindexRequested() }
+                    }
+                    Label {
+                        Layout.fillWidth: true; wrapMode: Text.Wrap; color: panel.muted; font.pixelSize: 12
+                        text: "开发与缓存目录指 node_modules、.git、__pycache__、构建输出（CMake 构建目录、带 CACHEDIR.TAG 的 target 等）、Python 虚拟环境，以及浏览器与 Electron 应用的缓存。关闭时它们不会出现在搜索结果里，索引也更小。"
+                    }
                     Label { text: "排除目录（每行一个）"; color: panel.ink; font.pixelSize: 13 }
                     Area { id: excludeInput; objectName: "excludeInput"; Layout.fillWidth: true; Layout.preferredHeight: 74; placeholderText: "/home/用户名/缓存" }
                     ActionButton {

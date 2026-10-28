@@ -31,6 +31,15 @@ bool excludedPath(const QByteArray &path, const QStringList &extra);
 // Windows system areas at the root of an NTFS/FAT volume ($Recycle.Bin, Windows, …): huge,
 // churning and never what a file-name search is for. Case-insensitive, as on Windows.
 bool windowsSystemEntry(const QByteArray &name);
+// Folders a file-name search is not for, skipped unless the user asks for them:
+// systemFolders() are the operating system's own trees (/usr, /etc, …); a noise folder is
+// generated or cached content — dependency trees, build output, virtual environments, VCS
+// data, application caches. noiseFolder looks inside (CACHEDIR.TAG, CMakeCache.txt,
+// pyvenv.cfg); noisePath only knows names, for sources that cannot look (the NTFS file table).
+QStringList systemFolders();
+bool noiseFolderName(const QByteArray &name);
+bool noiseFolder(int parentFd, const QByteArray &name);
+bool noisePath(const QByteArray &relativePath);
 QString folded(const QString &text);
 QPair<QString, QString> pinyinKeys(const QString &text);
 bool validName(const QString &name);

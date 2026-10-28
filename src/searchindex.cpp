@@ -24,6 +24,16 @@
 #include <unistd.h>
 
 namespace {
+// Rows are found by a 64-bit hash of their path (FNV-1a): an index of these is a fraction of
+// one over the paths themselves. Lookups compare the path too, so a collision costs nothing.
+sqlite3_int64 pathKey(const QByteArray &path) {
+    quint64 hash = 14695981039346656037ULL;
+    for (const char c : path) {
+        hash ^= quint8(c);
+        hash *= 1099511628211ULL;
+    }
+    return sqlite3_int64(hash);
+}
 // inotify watches cost kernel memory (~1 KiB each); unwatched directories fall back to the sweep.
 constexpr int kWatchBudget = 8192;
 struct Database {
@@ -39,6 +49,13 @@ struct Database {
         if (db) {
             sqlite3_busy_timeout(db, 2500);
             sqlite3_exec(db, "PRAGMA cache_size=-8192; PRAGMA temp_store=FILE;", nullptr, nullptr, nullptr);
+            sqlite3_create_function(
+                db, "path_key", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, nullptr,
+                [](sqlite3_context *context, int, sqlite3_value **values) {
+                    const auto *data = static_cast<const char *>(sqlite3_value_blob(values[0]));
+                    sqlite3_result_int64(context, pathKey(QByteArray::fromRawData(data, sqlite3_value_bytes(values[0]))));
+                },
+                nullptr, nullptr);
         }
     }
     ~Database() {
@@ -53,6 +70,20 @@ void textBind(sqlite3_stmt *stmt, int at, const QString &value) {
     QByteArray data = value.toUtf8();
     sqlite3_bind_text(stmt, at, data.constData(), data.size(), SQLITE_TRANSIENT);
 }
+// Paths are stored as the file system gives them (raw bytes), not as percent-encoded URIs.
+void pathBind(sqlite3_stmt *stmt, int at, const QByteArray &path) {
+    sqlite3_bind_text(stmt, at, path.constData(), int(path.size()), SQLITE_TRANSIENT);
+}
+QByteArray pathColumn(sqlite3_stmt *stmt, int n) {
+    const auto *value = reinterpret_cast<const char *>(sqlite3_column_text(stmt, n));
+    return value ? QByteArray(value, sqlite3_column_bytes(stmt, n)) : QByteArray();
+}
+// "dir/" for prefix matches; "/" stays "/".
+QByteArray treePrefix(QByteArray path) {
+    if (!path.endsWith('/'))
+        path += '/';
+    return path;
+}
 QString column(sqlite3_stmt *stmt, int n) {
     const auto *value = sqlite3_column_text(stmt, n);
     return value ? QString::fromUtf8(reinterpret_cast<const char *>(value)) : QString();
@@ -60,13 +91,14 @@ QString column(sqlite3_stmt *stmt, int n) {
 bool schema(Database &db) {
     return db.exec(
         "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
-        "CREATE TABLE IF NOT EXISTS entries(id INTEGER PRIMARY KEY,uri TEXT UNIQUE NOT NULL,root TEXT NOT "
-        "NULL,name TEXT NOT NULL,"
+        // pinyin/initials are empty unless they differ from name_fold (names with Chinese).
+        "CREATE TABLE IF NOT EXISTS entries(id INTEGER PRIMARY KEY,path TEXT NOT NULL,key INTEGER NOT NULL,"
+        "root TEXT NOT NULL,name TEXT NOT NULL,"
         "name_fold TEXT NOT NULL,pinyin TEXT NOT NULL,initials TEXT NOT NULL,folder INTEGER,size "
-        "INTEGER,mtime INTEGER,icon TEXT,seen INTEGER);"
+        "INTEGER,mtime INTEGER,icon TEXT,seen INTEGER,ref INTEGER);"
         "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value INTEGER);"
-        "CREATE INDEX IF NOT EXISTS entries_root ON entries(root);"
-        "CREATE INDEX IF NOT EXISTS entries_name ON entries(name_fold);"
+        "CREATE INDEX IF NOT EXISTS entries_key ON entries(key);"
+        "CREATE INDEX IF NOT EXISTS entries_ref ON entries(root,ref);"
         "CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING "
         "fts5(name_fold,pinyin,initials,content=entries,content_rowid=id,tokenize=trigram);"
         "CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN INSERT INTO "
@@ -111,7 +143,15 @@ void setMetaValue(sqlite3 *db, const QByteArray &key, qint64 value) {
     sqlite3_step(stmt);
 }
 // Binds every column of the INSERT used by the walk and by the NTFS reader.
-void bindInsert(sqlite3_stmt *insert, const QString &uri, const QString &root, const QString &display, bool folder,
+constexpr const char *kInsert =
+    "INSERT INTO entries(path,key,root,name,name_fold,pinyin,initials,folder,size,mtime,icon,seen,ref) "
+    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)";
+constexpr const char *kLookup = "SELECT id,folder,size,mtime,root,ref FROM entries WHERE key=?1 AND path=?2";
+void bindLookup(sqlite3_stmt *lookup, const QByteArray &path) {
+    sqlite3_bind_int64(lookup, 1, pathKey(path));
+    pathBind(lookup, 2, path);
+}
+void bindInsert(sqlite3_stmt *insert, const QByteArray &path, const QString &root, const QString &display, bool folder,
                 qint64 size, qint64 mtime, qint64 generation, qint64 ref) {
     bool nonAscii = false;
     for (auto ch : display)
@@ -120,19 +160,26 @@ void bindInsert(sqlite3_stmt *insert, const QString &uri, const QString &root, c
             break;
         }
     const QString fold = nook::folded(display);
-    auto keys = nonAscii ? nook::pinyinKeys(display) : qMakePair(fold, fold);
-    textBind(insert, 1, uri);
-    textBind(insert, 2, root);
-    textBind(insert, 3, display);
-    textBind(insert, 4, fold);
-    textBind(insert, 5, keys.first);
-    textBind(insert, 6, keys.second);
-    sqlite3_bind_int(insert, 7, folder);
-    sqlite3_bind_int64(insert, 8, size);
-    sqlite3_bind_int64(insert, 9, mtime);
-    textBind(insert, 10, nook::iconFor(display, folder));
-    sqlite3_bind_int64(insert, 11, generation);
-    sqlite3_bind_int64(insert, 12, ref);
+    // Pinyin only where it says something the name does not: most names would store theirs
+    // three times over, in the table and in the full-text index.
+    auto keys = nonAscii ? nook::pinyinKeys(display) : QPair<QString, QString>();
+    if (keys.first == fold)
+        keys.first.clear();
+    if (keys.second == fold)
+        keys.second.clear();
+    pathBind(insert, 1, path);
+    sqlite3_bind_int64(insert, 2, pathKey(path));
+    textBind(insert, 3, root);
+    textBind(insert, 4, display);
+    textBind(insert, 5, fold);
+    textBind(insert, 6, keys.first);
+    textBind(insert, 7, keys.second);
+    sqlite3_bind_int(insert, 8, folder);
+    sqlite3_bind_int64(insert, 9, size);
+    sqlite3_bind_int64(insert, 10, mtime);
+    textBind(insert, 11, nook::iconFor(display, folder));
+    sqlite3_bind_int64(insert, 12, generation);
+    sqlite3_bind_int64(insert, 13, ref);
 }
 QString uriOf(const QByteArray &path) {
     GFile *file = g_file_new_for_path(path.constData());
@@ -141,6 +188,30 @@ QString uriOf(const QByteArray &path) {
     g_free(value);
     g_object_unref(file);
     return uri;
+}
+int userVersion(Database &db) {
+    Statement version(db.db, "PRAGMA user_version");
+    return version && sqlite3_step(version) == SQLITE_ROW ? sqlite3_column_int(version, 0) : 0;
+}
+// v3 stores paths instead of URIs and keeps pinyin only where it differs. Older indexes are
+// emptied rather than converted: the next scan rebuilds them (NTFS from its file table), and
+// the space they held is given back. Every process opening the index runs this; the first
+// one does the work under an exclusive lock.
+void migrate(Database &db) {
+    constexpr int kVersion = 3;
+    if (userVersion(db) >= kVersion)
+        return;
+    sqlite3_busy_timeout(db.db, 60000);
+    if (db.exec("BEGIN EXCLUSIVE;")) {
+        if (userVersion(db) < kVersion) {
+            db.exec("DROP TABLE IF EXISTS entries_fts; DROP TABLE IF EXISTS entries; DROP TABLE IF EXISTS meta;");
+            db.exec("PRAGMA user_version=3;");
+            db.exec("COMMIT;");
+            db.exec("VACUUM;");
+        } else
+            db.exec("COMMIT;");
+    }
+    sqlite3_busy_timeout(db.db, 2500);
 }
 QString literalLike(QString text) {
     text.replace('\\', "\\\\");
@@ -155,24 +226,10 @@ SearchIndex::SearchIndex(const QString &database, QObject *parent) : QObject(par
     QDir().mkpath(QFileInfo(m_database).absolutePath());
     {
         Database db(m_database);
+        if (db.db)
+            migrate(db);
         if (!db.db || !schema(db))
             m_status = QStringLiteral("索引数据库初始化失败（需要 SQLite FTS5）");
-        // v1: PDFs were once tagged "image" when a PDF image plugin was installed. Unchanged
-        // rows are never rewritten by a re-scan, so correct them once here.
-        else if (sqlite3_stmt *version = nullptr;
-                 sqlite3_prepare_v2(db.db, "PRAGMA user_version", -1, &version, nullptr) == SQLITE_OK) {
-            const int current = sqlite3_step(version) == SQLITE_ROW ? sqlite3_column_int(version, 0) : 0;
-            sqlite3_finalize(version);
-            if (current < 1)
-                db.exec("UPDATE entries SET icon='document' WHERE icon='image' AND name_fold LIKE '%.pdf';"
-                        "PRAGMA user_version=1;");
-            // v2: `ref` holds the inode number, which on NTFS is the MFT record number, so rows
-            // from the directory walk and from the NTFS file table describe files the same way.
-            if (current < 2)
-                db.exec("ALTER TABLE entries ADD COLUMN ref INTEGER;"
-                        "CREATE INDEX IF NOT EXISTS entries_ref ON entries(root,ref);"
-                        "PRAGMA user_version=2;");
-        }
     }
     m_sweep.setInterval(30 * 60 * 1000);
     connect(&m_sweep, &QTimer::timeout, this, &SearchIndex::start);
@@ -268,6 +325,9 @@ void SearchIndex::scan(QStringList scopes) {
     if (full)
         scopes = roots;
     QStringList excludes = m_exclusions;
+    if (!m_indexSystem)
+        excludes.append(nook::systemFolders());
+    const bool skipNoise = !m_indexNoise;
     excludes.append(nook::storageDirectory(nook::Storage::Cache));
     excludes.append(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/Trash");
     excludes.append(QFileInfo(m_database).absolutePath());
@@ -305,7 +365,7 @@ void SearchIndex::scan(QStringList scopes) {
         }
     const VolumeOpener opener = m_volumeOpener ? m_volumeOpener : VolumeOpener(nook::ntfs::openVolume);
     m_thread = std::thread([this, roots, scopes, excludes, dbPath, watchBudget, full, configuredRoots, trusted,
-                            windowsVolumes, ntfsKeys, opener] {
+                            windowsVolumes, ntfsKeys, opener, skipNoise] {
         // Priority applies to this Linux task, not the UI/render threads. The idle I/O
         // class lets the background service yield the disk to anything interactive.
         setpriority(PRIO_PROCESS, 0, 10);
@@ -357,14 +417,16 @@ void SearchIndex::scan(QStringList scopes) {
                 for (const auto &path : excludes) {
                     if (path.isEmpty())
                         continue;
-                    QString base = nook::normalizeUri(path), prefix = base.endsWith('/') ? base : base + '/';
+                    const QByteArray base = QFile::encodeName(QDir::cleanPath(path)), prefix = treePrefix(base);
+                    if (base == "/")
+                        continue;
                     sqlite3_stmt *remove = nullptr;
-                    sqlite3_prepare_v2(db.db, "DELETE FROM entries WHERE uri=? OR substr(uri,1,length(?))=?",
+                    sqlite3_prepare_v2(db.db, "DELETE FROM entries WHERE path=? OR substr(path,1,length(?))=?",
                                        -1, &remove, nullptr);
                     if (remove) {
-                        textBind(remove, 1, base);
-                        textBind(remove, 2, prefix);
-                        textBind(remove, 3, prefix);
+                        pathBind(remove, 1, base);
+                        pathBind(remove, 2, prefix);
+                        pathBind(remove, 3, prefix);
                         sqlite3_step(remove);
                         sqlite3_finalize(remove);
                     }
@@ -374,16 +436,11 @@ void SearchIndex::scan(QStringList scopes) {
             // database pages (and the SSD) are not rewritten every time the index is verified.
             sqlite3_stmt *lookup = nullptr, *update = nullptr, *insert = nullptr, *remove = nullptr;
             const bool prepared =
-                sqlite3_prepare_v2(db.db, "SELECT id,folder,size,mtime,root,ref FROM entries WHERE uri=?", -1,
-                                   &lookup, nullptr) == SQLITE_OK &&
+                sqlite3_prepare_v2(db.db, kLookup, -1, &lookup, nullptr) == SQLITE_OK &&
                 sqlite3_prepare_v2(db.db,
                                    "UPDATE entries SET root=?,folder=?,size=?,mtime=?,icon=?,ref=? WHERE id=?", -1,
                                    &update, nullptr) == SQLITE_OK &&
-                sqlite3_prepare_v2(
-                    db.db,
-                    "INSERT INTO entries(uri,root,name,name_fold,pinyin,initials,folder,size,mtime,icon,seen,ref) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                    -1, &insert, nullptr) == SQLITE_OK &&
+                sqlite3_prepare_v2(db.db, kInsert, -1, &insert, nullptr) == SQLITE_OK &&
                 sqlite3_prepare_v2(db.db, "DELETE FROM entries WHERE id=?", -1, &remove, nullptr) == SQLITE_OK;
             if (!prepared) {
                 warnings.append(QString::fromUtf8(sqlite3_errmsg(db.db)));
@@ -413,8 +470,8 @@ void SearchIndex::scan(QStringList scopes) {
                     if (nook::excludedPath(QFile::encodeName(rootString), excludes))
                         continue;
                     QString error;
-                    if (syncNtfs(db.db, opener, it.value(), rootString, excludes, verify, generation, count,
-                                 ntfsWatches, &error))
+                    if (syncNtfs(db.db, opener, it.value(), rootString, excludes, skipNoise, verify, generation,
+                                 count, ntfsWatches, &error))
                         journaled.insert(rootString);
                     else if (!error.isEmpty())
                         warnings.append(QStringLiteral("%1 改为逐目录扫描：%2").arg(rootString, error));
@@ -498,11 +555,10 @@ void SearchIndex::scan(QStringList scopes) {
                             QByteArray child = path + (path == "/" ? "" : "/") + name;
                             if (nook::excludedPath(child, excludes))
                                 continue;
-                            const QString uri = uriOf(child);
                             // Unchanged folder: a known file is confirmed from the listing alone,
                             // with no inode read. Folders are still examined to decide their turn.
                             if (quick && item->d_type != DT_UNKNOWN && item->d_type != DT_DIR) {
-                                textBind(lookup, 1, uri);
+                                bindLookup(lookup, child);
                                 const bool known = step(lookup) == SQLITE_ROW;
                                 if (known)
                                     seen.push_back(sqlite3_column_int64(lookup, 0));
@@ -519,9 +575,14 @@ void SearchIndex::scan(QStringList scopes) {
                                 continue;
                             }
                             bool folder = S_ISDIR(info.st_mode);
+                            // Left out with everything in it; rows from before are pruned below.
+                            if (folder && skipNoise && nook::noiseFolder(dirfd(dir), name)) {
+                                errno = 0;
+                                continue;
+                            }
                             bool boundary = child != root && boundaries.contains(child);
                             bool unchanged = false;
-                            textBind(lookup, 1, uri);
+                            bindLookup(lookup, child);
                             if (step(lookup) == SQLITE_ROW) {
                                 const auto id = sqlite3_column_int64(lookup, 0);
                                 // A folder's size is file-system bookkeeping, not something to search by.
@@ -547,7 +608,7 @@ void SearchIndex::scan(QStringList scopes) {
                                 }
                             } else if (databaseOk) {
                                 sqlite3_reset(lookup);
-                                bindInsert(insert, uri, rootString, QString::fromUtf8(name), folder, info.st_size,
+                                bindInsert(insert, child, rootString, QString::fromUtf8(name), folder, info.st_size,
                                            info.st_mtime, generation, qint64(info.st_ino));
                                 if (step(insert) == SQLITE_DONE)
                                     seen.push_back(sqlite3_last_insert_rowid(db.db));
@@ -572,16 +633,14 @@ void SearchIndex::scan(QStringList scopes) {
                         std::sort(seen.begin(), seen.end());
                         sqlite3_stmt *stale = nullptr;
                         sqlite3_prepare_v2(db.db,
-                                           "SELECT id FROM entries WHERE root=? AND substr(uri,1,length(?))=?", -1,
+                                           "SELECT id FROM entries WHERE root=? AND substr(path,1,length(?))=?", -1,
                                            &stale, nullptr);
                         std::vector<sqlite3_int64> obsolete;
                         if (stale) {
                             textBind(stale, 1, rootString);
-                            QString prefix = nook::normalizeUri(scopeString);
-                            if (!prefix.endsWith('/'))
-                                prefix += '/';
-                            textBind(stale, 2, prefix);
-                            textBind(stale, 3, prefix);
+                            const QByteArray prefix = treePrefix(QFile::encodeName(QDir::cleanPath(scopeString)));
+                            pathBind(stale, 2, prefix);
+                            pathBind(stale, 3, prefix);
                             while (sqlite3_step(stale) == SQLITE_ROW) {
                                 const auto id = sqlite3_column_int64(stale, 0);
                                 if (!std::binary_search(seen.begin(), seen.end(), id))
@@ -659,7 +718,7 @@ void SearchIndex::scan(QStringList scopes) {
     });
 }
 bool SearchIndex::syncNtfs(sqlite3 *db, const VolumeOpener &opener, const QString &key, const QString &root,
-                           const QStringList &excludes, bool rebuild, qint64 generation, qint64 &count,
+                           const QStringList &excludes, bool skipNoise, bool rebuild, qint64 generation, qint64 &count,
                            QStringList &watches, QString *error) {
     using namespace nook::ntfs;
     // Replaying more than this is slower than one sequential pass over the file table.
@@ -703,17 +762,17 @@ bool SearchIndex::syncNtfs(sqlite3 *db, const VolumeOpener &opener, const QStrin
         rebuild = rebuild || unique.size() > kMaxReplay;
         records.assign(unique.begin(), unique.end());
     }
-    Statement lookup(db, "SELECT id,folder,size,mtime,root,ref FROM entries WHERE uri=?"),
+    Statement lookup(db, kLookup),
         update(db, "UPDATE entries SET root=?,folder=?,size=?,mtime=?,icon=?,ref=? WHERE id=?"),
-        insert(db, "INSERT INTO entries(uri,root,name,name_fold,pinyin,initials,folder,size,mtime,icon,seen,ref) "
-                   "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"),
-        remove(db, "DELETE FROM entries WHERE id=?"), byRef(db, "SELECT id,uri,folder FROM entries WHERE root=? AND ref=?"),
-        occupied(db, "SELECT 1 FROM entries WHERE root=?1 AND (uri=?2 OR substr(uri,1,length(?3))=?3) AND ref IS NOT ?4 "
+        insert(db, kInsert),
+        remove(db, "DELETE FROM entries WHERE id=?"), byRef(db, "SELECT id,path,folder FROM entries WHERE root=? AND ref=?"),
+        occupied(db, "SELECT 1 FROM entries WHERE root=?1 AND (path=?2 OR substr(path,1,length(?3))=?3) AND ref IS NOT ?4 "
                      "LIMIT 1"),
-        dropTree(db, "DELETE FROM entries WHERE root=?1 AND substr(uri,1,length(?2))=?2"),
-        moveTree(db, "UPDATE entries SET uri=?1||substr(uri,length(?2)+1) WHERE root=?3 AND substr(uri,1,length(?2))=?2"),
+        dropTree(db, "DELETE FROM entries WHERE root=?1 AND substr(path,1,length(?2))=?2"),
+        moveTree(db, "UPDATE entries SET path=?1||substr(path,length(?2)+1),key=path_key(?1||substr(path,length(?2)+1)) "
+                     "WHERE root=?3 AND substr(path,1,length(?2))=?2"),
         all(db, "SELECT id FROM entries WHERE root=?"),
-        folders(db, "SELECT uri FROM entries WHERE root=? AND folder=1 ORDER BY length(uri) LIMIT ?");
+        folders(db, "SELECT path FROM entries WHERE root=? AND folder=1 ORDER BY length(path) LIMIT ?");
     for (sqlite3_stmt *stmt : {lookup.stmt, update.stmt, insert.stmt, remove.stmt, byRef.stmt, occupied.stmt,
                                dropTree.stmt, moveTree.stmt, all.stmt, folders.stmt})
         if (!stmt) {
@@ -757,10 +816,14 @@ bool SearchIndex::syncNtfs(sqlite3 *db, const VolumeOpener &opener, const QStrin
     auto pathOf = [&root](const Entry &entry) {
         return QFile::encodeName(root == "/" ? "/" + entry.path : root + '/' + entry.path);
     };
+    // The file table cannot be looked into folder by folder: noise is recognised by name.
+    auto skipped = [&](const Entry &entry, const QByteArray &path) {
+        return nook::excludedPath(path, excludes) || (skipNoise && nook::noisePath(entry.path.toUtf8()));
+    };
     // Same comparison as the walk, so rows written by either are left alone by the other.
-    auto upsert = [&](const QString &uri, const Entry &entry) -> sqlite3_int64 {
+    auto upsert = [&](const QByteArray &path, const Entry &entry) -> sqlite3_int64 {
         sqlite3_int64 id = 0;
-        textBind(lookup, 1, uri);
+        bindLookup(lookup, path);
         if (step(lookup) == SQLITE_ROW) {
             id = sqlite3_column_int64(lookup, 0);
             const bool changed = sqlite3_column_int(lookup, 1) != int(entry.folder) ||
@@ -782,7 +845,7 @@ bool SearchIndex::syncNtfs(sqlite3 *db, const VolumeOpener &opener, const QStrin
             }
         } else if (ok) {
             sqlite3_reset(lookup);
-            bindInsert(insert, uri, root, entry.path.section('/', -1), entry.folder, entry.size, entry.mtime,
+            bindInsert(insert, path, root, entry.path.section('/', -1), entry.folder, entry.size, entry.mtime,
                        generation, qint64(entry.record));
             if (step(insert) == SQLITE_DONE)
                 id = sqlite3_last_insert_rowid(db);
@@ -798,7 +861,7 @@ bool SearchIndex::syncNtfs(sqlite3 *db, const VolumeOpener &opener, const QStrin
     auto replay = [&]() -> bool {
         struct Item {
             std::uint64_t record;
-            std::vector<std::pair<QString, Entry>> now;
+            std::vector<std::pair<QByteArray, Entry>> now;
             int depth = INT_MAX;
         };
         std::vector<Item> items;
@@ -806,8 +869,8 @@ bool SearchIndex::syncNtfs(sqlite3 *db, const VolumeOpener &opener, const QStrin
             Item item{record, {}};
             for (auto &entry : volume.current(record)) {
                 const QByteArray path = pathOf(entry);
-                if (!nook::excludedPath(path, excludes))
-                    item.now.emplace_back(uriOf(path), std::move(entry));
+                if (!skipped(entry, path))
+                    item.now.emplace_back(path, std::move(entry));
             }
             textBind(byRef, 1, root);
             sqlite3_bind_int64(byRef, 2, sqlite3_int64(record));
@@ -820,46 +883,46 @@ bool SearchIndex::syncNtfs(sqlite3 *db, const VolumeOpener &opener, const QStrin
         for (const auto &item : items) {
             if (!ok || m_stop)
                 return false;
-            const std::pair<QString, Entry> *folder = nullptr;
+            const std::pair<QByteArray, Entry> *folder = nullptr;
             for (const auto &now : item.now)
                 if (now.second.folder)
                     folder = &now;
             struct Row {
                 sqlite3_int64 id;
-                QString uri;
+                QByteArray path;
                 bool folder;
             };
             std::vector<Row> rows;
             textBind(byRef, 1, root);
             sqlite3_bind_int64(byRef, 2, sqlite3_int64(item.record));
             while (step(byRef) == SQLITE_ROW)
-                rows.push_back({sqlite3_column_int64(byRef, 0), column(byRef, 1), sqlite3_column_int(byRef, 2) != 0});
+                rows.push_back({sqlite3_column_int64(byRef, 0), pathColumn(byRef, 1), sqlite3_column_int(byRef, 2) != 0});
             sqlite3_reset(byRef);
             for (const auto &row : rows) {
-                if (std::any_of(item.now.begin(), item.now.end(), [&](const auto &now) { return now.first == row.uri; }))
+                if (std::any_of(item.now.begin(), item.now.end(), [&](const auto &now) { return now.first == row.path; }))
                     continue;
                 if (row.folder) {
-                    const QString from = row.uri + '/';
+                    const QByteArray from = row.path + '/';
                     if (folder) {
-                        const QString to = folder->first + '/';
+                        const QByteArray to = folder->first + '/';
                         // Something else already sits at the destination (swapped names, say):
                         // replaying record by record would be ambiguous.
                         textBind(occupied, 1, root);
-                        textBind(occupied, 2, folder->first);
-                        textBind(occupied, 3, to);
+                        pathBind(occupied, 2, folder->first);
+                        pathBind(occupied, 3, to);
                         sqlite3_bind_int64(occupied, 4, sqlite3_int64(item.record));
                         const bool taken = step(occupied) == SQLITE_ROW;
                         sqlite3_reset(occupied);
                         if (taken)
                             return false;
-                        textBind(moveTree, 1, to);
-                        textBind(moveTree, 2, from);
+                        pathBind(moveTree, 1, to);
+                        pathBind(moveTree, 2, from);
                         textBind(moveTree, 3, root);
                         step(moveTree);
                         sqlite3_reset(moveTree);
                     } else {
                         textBind(dropTree, 1, root);
-                        textBind(dropTree, 2, from);
+                        pathBind(dropTree, 2, from);
                         step(dropTree);
                         sqlite3_reset(dropTree);
                     }
@@ -868,8 +931,8 @@ bool SearchIndex::syncNtfs(sqlite3 *db, const VolumeOpener &opener, const QStrin
                 step(remove);
                 sqlite3_reset(remove);
             }
-            for (const auto &[uri, entry] : item.now) {
-                upsert(uri, entry);
+            for (const auto &[path, entry] : item.now) {
+                upsert(path, entry);
                 tick();
             }
         }
@@ -889,9 +952,9 @@ bool SearchIndex::syncNtfs(sqlite3 *db, const VolumeOpener &opener, const QStrin
                 if (!ok)
                     return;
                 const QByteArray path = pathOf(entry);
-                if (nook::excludedPath(path, excludes))
+                if (skipped(entry, path))
                     return;
-                if (const auto id = upsert(uriOf(path), entry))
+                if (const auto id = upsert(path, entry))
                     seen.push_back(id);
                 tick();
             },
@@ -934,7 +997,7 @@ bool SearchIndex::syncNtfs(sqlite3 *db, const VolumeOpener &opener, const QStrin
     textBind(folders, 1, root);
     sqlite3_bind_int(folders, 2, kWatchBudget);
     while (step(folders) == SQLITE_ROW)
-        watches.append(nook::localPath(column(folders, 0)));
+        watches.append(QFile::decodeName(pathColumn(folders, 0)));
     return true;
 }
 void SearchIndex::query(const QString &text, const QString &scope, const QString &type, qint64 minBytes,
@@ -987,12 +1050,12 @@ void SearchIndex::runQuery(bool append) {
                 [](void *value) { return static_cast<std::atomic_bool *>(value)->load() ? 1 : 0; },
                 cancel.get());
             bool trigram = text.toUcs4().size() >= 3;
-            QString sql = "SELECT uri,name,folder,size,mtime,icon FROM entries WHERE ";
+            QString sql = "SELECT path,name,folder,size,mtime,icon FROM entries WHERE ";
             sql += trigram ? "id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)"
                            : "(name_fold LIKE ? ESCAPE '\\' OR pinyin LIKE ? ESCAPE '\\' OR initials LIKE ? "
                              "ESCAPE '\\')";
             if (!scope.isEmpty())
-                sql += " AND (uri=? OR substr(uri,1,length(?))=?)";
+                sql += " AND (path=? OR substr(path,1,length(?))=?)";
             if (type == "folder")
                 sql += " AND folder=1";
             else if (type == "file")
@@ -1007,7 +1070,7 @@ void SearchIndex::runQuery(bool append) {
                 sql += " AND mtime>=?";
             if (before > 0)
                 sql += " AND mtime<=?";
-            sql += " ORDER BY folder DESC,name_fold,uri LIMIT 201 OFFSET ?";
+            sql += " ORDER BY folder DESC,name_fold,path LIMIT 201 OFFSET ?";
             sqlite3_stmt *stmt = nullptr;
             if (sqlite3_prepare_v2(db.db, sql.toUtf8().constData(), -1, &stmt, nullptr) != SQLITE_OK)
                 error = QString::fromUtf8(sqlite3_errmsg(db.db));
@@ -1021,11 +1084,10 @@ void SearchIndex::runQuery(bool append) {
                     for (int i = 0; i < 3; ++i)
                         textBind(stmt, bind++, literalLike(text));
                 if (!scope.isEmpty()) {
-                    QString base = nook::normalizeUri(scope);
-                    textBind(stmt, bind++, base);
-                    QString prefix = base.endsWith('/') ? base : base + '/';
-                    textBind(stmt, bind++, prefix);
-                    textBind(stmt, bind++, prefix);
+                    const QByteArray base = QFile::encodeName(nook::localPath(scope)), prefix = treePrefix(base);
+                    pathBind(stmt, bind++, base);
+                    pathBind(stmt, bind++, prefix);
+                    pathBind(stmt, bind++, prefix);
                 }
                 if (type != "all" && type != "folder" && type != "file")
                     textBind(stmt, bind++, type);
@@ -1036,7 +1098,8 @@ void SearchIndex::runQuery(bool append) {
                 int rc = SQLITE_DONE;
                 while (!cancel->load() && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {
                     nook::Entry e;
-                    e.uri = column(stmt, 0);
+                    const QByteArray path = pathColumn(stmt, 0);
+                    e.uri = uriOf(path);
                     e.name = column(stmt, 1);
                     e.directory = sqlite3_column_int(stmt, 2);
                     e.size = sqlite3_column_int64(stmt, 3);
@@ -1044,10 +1107,9 @@ void SearchIndex::runQuery(bool append) {
                     e.icon = column(stmt, 5);
                     e.hidden = e.name.startsWith('.');
                     e.kind = e.directory ? QStringLiteral("文件夹") : QFileInfo(e.name).suffix().toUpper();
-                    GFile *file = g_file_new_for_uri(e.uri.toUtf8().constData());
-                    if (!g_file_query_exists(file, nullptr))
+                    struct stat info{};
+                    if (::lstat(path.constData(), &info) != 0)
                         e.kind = QStringLiteral("位置不可用");
-                    g_object_unref(file);
                     rows.append(e);
                 }
                 if (rc != SQLITE_DONE && rc != SQLITE_ROW && !cancel->load())
