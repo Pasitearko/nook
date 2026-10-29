@@ -1,14 +1,14 @@
 # nook解压缩：阶段 6 验收与 File Roller 对比
 
-适用版本：**0.1-19**。这是自动化结果与待实机确认事项的记录，**不是“全部格式已验证、已经完全替代 File Roller”的声明**。
+适用版本：**0.1-20**（0.1-19 的复核与补充见各节“0.1-20”标注）。这是自动化结果与待实机确认事项的记录，**不是“全部格式已验证、已经完全替代 File Roller”的声明**。
 
 ## 1. 已实现的默认关联流程
 
 - 只在空窗口显示顶部横幅；关闭只影响当前窗口，“不再提示”写入偏好。
 - 设置页始终保留“默认压缩软件”入口，显示已接管数量、其他主要默认程序、备份路径，以及设置／恢复按钮。
-- 设置与恢复都先弹出确认框，列出声明的文件类型及它们当前的默认程序；打开、取消、启动应用均不写默认关联。
+- 设置与恢复都先弹出确认框，列出声明的文件类型及它们当前的默认程序；打开、取消、启动应用均不写默认关联。0.1-20：每种类型用中文名称和扩展名列出（如“ISO 光盘映像 · .iso”）。shared-mime-info 的中文翻译标记为 `zh-Hans-CN`，Qt 和 GIO 在 zh_CN 下都匹配不到，会显示英文，所以声明的 39 种类型由程序自带名称，测试保证每种都有。
 - desktop 声明当前是 52 个 MIME 名称，经本机 MIME 数据库去别名后为 39 个类型；这不是 52 种独立压缩算法。范围包括 ISO、deb/rpm、jar/apk、dmg；不接管 exe、办公文档、epub、虚拟磁盘。
-- 更改前复制现有 `~/.config/mimeapps.list` 到旁边唯一命名的 `.bak-nook-archive-*` 文件；同一轮重复接管不覆盖首次备份。原文件不存在时不伪造备份。
+- 更改前复制现有 `~/.config/mimeapps.list` 到旁边的 `.bak-nook-archive-<时间>` 文件（已存在时加编号，与 niri 配置备份同一命名方式）；同一轮重复接管不覆盖首次备份。原文件不存在时不伪造备份。
 - 原默认和本应用关联基线记录在 `~/.config/nook/archive-defaults.json`。记录写入失败则不开始接管；记录损坏则报错，不覆盖它。
 - 恢复只处理仍由 nook解压缩 打开的、当初确实接管的类型。原本已经是 nook 的选择和后来手动改给其他程序的类型保持原样。
 - 之前没有默认程序时，只局部移除本次加入的 nook ID，保留其他程序的“打开方式”条目；不调用会重置整类型关联的 GIO reset API，不整份回滚备份。
@@ -57,6 +57,8 @@ python3 tools/archive-compare.py --worker build-undo/nook-archive-worker \
 
 输出目录必须不存在。脚本保留生成样本、JSONL 事件、stderr、File Roller 日志、内容清单、独立元数据清单及 `report.json` / `report.md`，不删除测试证据。退出码 0 代表脚本规定的必需检查通过；1 是必需检查失败；2 是依赖／隔离环境无法启动。**0 不代表下文交互待验项也通过了。**
 
+0.1-20 修复：Broadway 的两个 UNIX socket 原先放在 `--output` 下。输出路径一长（超过 socket 地址 108 字节的上限），两个地址会被截断成同一个，Broadway 报 “Address already in use” 而无法启动，只有放在 `/tmp` 下的短路径能用。现在 socket 放在沙盒私有 `/tmp` 下的临时目录里，`--output` 可以放在任意位置。
+
 ### 隔离与判定
 
 - 外层 bubblewrap：系统和项目只读，隐藏个人 `/home`、`/run`、`/tmp`，只开放新建结果目录写入；网络隔离。Broadway 使用私有 XDG_RUNTIME_DIR 和 UNIX HTTP socket，不开放宿主 TCP 端口。
@@ -86,6 +88,31 @@ python3 tools/archive-compare.py --worker build-undo/nook-archive-worker \
 | 路径越界、链接逃逸、安全链接、硬链接、set-id、FIFO | Nook 按文档安全契约检查；目标外 canary 保持，File Roller 不作为安全标准 |
 
 报告内耗时只作复现参考：**单次启动到退出，含私有 D-Bus／GTK 启动开销，不含样本构造和哈希扫描**。`/tmp` 本机为 tmpfs，缓存未控制，等待进程的采样也有精度限制；不能据此宣传速度倍数或“无性能瓶颈”。正式性能验收应在实际文件系统上预热、交替顺序至少三轮，报告中位数、内存峰值和缓存／落盘条件；GiB 级及更多文件的测试仍待执行。
+
+### 大包性能（0.1-20）
+
+```bash
+# 每个大包解开约 1 GiB；输出放在实际磁盘上（不要放 tmpfs），需约 6 GiB 空间
+python3 tools/archive-compare.py --worker build/nook-archive-worker --bench --bench-gib 1 --rounds 3 \
+  --timeout 1200 --output "$PWD/build/bench-$(date +%s)"
+```
+
+`--bench` 生成四个大包：1 GiB 不可压缩 ZIP（8 个文件）、100000 个小文件 ZIP、1 GiB 可压缩 7z 和 tar.zst。每轮先把压缩包完整读一遍，两边都在热缓存下运行；每轮交替先后顺序，解压到同一文件系统上的空目录。记录两项时间：工具返回所用的时间，以及再加上对输出执行 `sync -f`（落盘）的时间。峰值内存是整个进程树的最大 RSS（wait4，包含 worker 调用的 7-Zip、`dbus-run-session` 下的 File Roller），每次的内容都与源清单比对。
+
+本机实测（btrfs、NVMe、16 线程、46 GiB 内存；3 轮全部完成且内容一致；中位数）：
+
+| 压缩包 | 压缩后 | 文件数 | Nook 用时（含落盘） | Nook 峰值内存 | File Roller 用时（含落盘） | File Roller 峰值内存 |
+|---|---|---|---|---|---|---|
+| large.zip（不可压缩） | 1024 MiB | 8 | 0.33 s（0.39 s） | 23 MiB | 0.44 s（0.46 s） | 58 MiB |
+| many.zip | 119 MiB | 100000 | 1.22 s（1.29 s） | 49 MiB | 2.13 s（2.20 s） | 207 MiB |
+| large.7z | 342 MiB | 8 | 0.72 s（0.76 s） | 355 MiB | 0.82 s（0.86 s） | 354 MiB |
+| large.tar.zst | 329 MiB | 8 | 0.82 s（0.86 s） | 23 MiB | 1.48 s（1.53 s） | 62 MiB |
+
+解读：
+
+- 解压 1 GiB 级压缩包时，两边都没有出现失败、内容不一致或内存随大小增长的情况；Nook 的 worker 内存基本固定（ZIP、tar 约 23 MiB），十万个小文件时也不到 50 MiB。7z 两边都调用 7-Zip，内存由 7-Zip 的字典决定，所以相同。
+- 量的是后台进程（worker）对比 File Roller 整个程序。File Roller 的时间里包含约 0.1 s 的 GTK/Broadway 启动；Nook 界面本身的开销没有计入。所以这只说明“大包下没有明显瓶颈、内存可控”，**不作为速度倍数的宣传**。
+- 只测了一台机器、热缓存；冷缓存、机械硬盘、更大的包（10 GiB 以上）和内存紧张时的表现仍待测。
 
 ## 4. 真实桌面验收清单（待用户实机确认）
 
@@ -118,7 +145,9 @@ python3 tools/archive-compare.py --worker build-undo/nook-archive-worker \
 ### 格式、故障与边界
 
 - [ ] 使用合法来源的真实 RAR／加密 RAR／分卷 RAR；不能用改后缀的 ZIP 代替。
-- [ ] rpm、cab、lha、arj、dmg、squashfs、sv4crc 用真实或可靠生成样本逐项验收；尚无样本的不可标通过。
+- [x] sv4crc、rpm、cab、lha（0.1-20，`archive` 测试里按格式规范逐字节生成的最小样本：带校验的 SVR4 cpio、空签名和空头部的 RPM（内含 gzip 压缩的 cpio）、不压缩的 CAB、存储方式（lh0）的 LHA；这些样本都能列出、解压，系统识别出的类型也在声明的类型里）。
+- [ ] 真实世界的压缩变体：CAB 的 MSZIP/LZX、LHA 的 lh5/lh6/lh7、带完整头部的真实 RPM。
+- [ ] arj、dmg、squashfs：本机无法生成，需要真实样本；没有样本的不可标通过。
 - [ ] File Roller 密码、覆盖与错误对话框实机作同任务比较，关闭提示后记录原生完成／失败结果。
 - [ ] 磁盘满、只读位置、目标设备拔出、进程强杀后暂存清理、大文件和多文件内存峰值。
 

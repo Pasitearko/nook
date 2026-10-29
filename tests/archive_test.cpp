@@ -171,6 +171,102 @@ bool writeWith(const QString &file, const char *format, const char *filter, cons
     return ok;
 }
 
+// Formats nothing here writes, put together byte by byte from their specifications (small and
+// uncompressed): enough to show that each is routed to a backend that reads it.
+QByteArray le16(quint16 v) {
+    QByteArray bytes(2, '\0'); // (not {a, b}: that is QByteArray(size, fill))
+    bytes[0] = char(v & 0xff);
+    bytes[1] = char(v >> 8);
+    return bytes;
+}
+QByteArray le32(quint32 v) { return le16(quint16(v & 0xffff)) + le16(quint16(v >> 16)); }
+using Files = QList<QPair<QByteArray, QByteArray>>;
+
+// SVR4 cpio with checksums ("070702": newc plus the byte sum of each file).
+QByteArray sv4crc(const Files &files) {
+    QByteArray out;
+    quint32 inode = 1;
+    const auto entry = [&](const QByteArray &name, const QByteArray &data, quint32 mode) {
+        quint32 sum = 0;
+        for (const char c : data)
+            sum += quint8(c);
+        out += "070702";
+        for (const quint32 value : {inode++, mode, 0u, 0u, 1u, 1700000000u, quint32(data.size()), 0u, 0u, 0u, 0u,
+                                    quint32(name.size() + 1), sum})
+            out += QByteArray::number(value, 16).rightJustified(8, '0');
+        out += name + '\0';
+        while (out.size() % 4)
+            out += '\0';
+        out += data;
+        while (out.size() % 4)
+            out += '\0';
+    };
+    for (const auto &[name, data] : files)
+        entry(name, data, 0100644);
+    entry("TRAILER!!!", {}, 0);
+    return out;
+}
+
+// An RPM: the lead, an empty signature and an empty header, then the cpio payload.
+QByteArray rpm(const QByteArray &payload) {
+    QByteArray lead(96, '\0');
+    lead.replace(0, 6, QByteArray("\xed\xab\xee\xdb\x03\x00", 6));
+    lead[9] = 1; // architecture
+    lead.replace(10, 10, "nook-1.0-1");
+    lead[77] = 1; // operating system
+    lead[79] = 5; // signature type: a header
+    const QByteArray emptyHeader("\x8e\xad\xe8\x01\0\0\0\0\0\0\0\0\0\0\0\0", 16);
+    return lead + emptyHeader + emptyHeader + payload;
+}
+
+// A Microsoft cabinet with one uncompressed folder (names flagged UTF-8, "\" between parts).
+QByteArray cab(const Files &files) {
+    QByteArray entries, data;
+    for (const auto &[name, content] : files) {
+        QByteArray dosName = name;
+        dosName.replace('/', '\\');
+        entries += le32(quint32(content.size())) + le32(quint32(data.size())) + le16(0)
+                   + le16(((2023 - 1980) << 9) | (11 << 5) | 14) + le16(0) + le16(0x20 | 0x80) + dosName + '\0';
+        data += content;
+    }
+    QByteArray blocks;
+    int count = 0;
+    for (qsizetype at = 0; at < data.size(); at += 32768, ++count) {
+        const QByteArray block = data.mid(at, 32768);
+        blocks += le32(0) + le16(quint16(block.size())) + le16(quint16(block.size())) + block; // no checksum
+    }
+    const quint32 filesAt = 36 + 8, dataAt = filesAt + quint32(entries.size());
+    const QByteArray folder = le32(dataAt) + le16(quint16(count)) + le16(0);
+    const QByteArray header = QByteArray("MSCF") + le32(0) + le32(dataAt + quint32(blocks.size())) + le32(0)
+                              + le32(filesAt) + le32(0) + QByteArray("\x03\x01", 2) + le16(1)
+                              + le16(quint16(files.size())) + le16(0) + le16(0) + le16(0);
+    return header + folder + entries + blocks;
+}
+
+// LHA, level-0 headers, stored ("-lh0-").
+QByteArray lha(const Files &files) {
+    const auto crc16 = [](const QByteArray &bytes) {
+        quint16 crc = 0;
+        for (const char c : bytes) {
+            crc ^= quint8(c);
+            for (int bit = 0; bit < 8; ++bit)
+                crc = crc & 1 ? (crc >> 1) ^ 0xa001 : crc >> 1;
+        }
+        return crc;
+    };
+    QByteArray out;
+    for (const auto &[name, content] : files) {
+        const QByteArray body = QByteArray("-lh0-") + le32(quint32(content.size())) + le32(quint32(content.size()))
+                                + le32((quint32(((2023 - 1980) << 9) | (11 << 5) | 14) << 16)) + char(0x20) + char(0)
+                                + char(name.size()) + name + le16(crc16(content));
+        quint8 sum = 0;
+        for (const char c : body)
+            sum += quint8(c);
+        out += QByteArray(1, char(body.size())) + QByteArray(1, char(sum)) + body + content;
+    }
+    return out + '\0';
+}
+
 // The MIME types nook解压缩 says it opens (and so takes as the default compression software).
 QStringList claimedTypes() {
     QFile desktop(QString(NOOK_SOURCE_DIR) + "/packaging/local.nook.archive.desktop");
@@ -804,6 +900,19 @@ class ArchiveTest : public QObject {
             QVERIFY2(writeWith(file, "raw", filter, {{inner.toUtf8(), text}}), qPrintable(name));
             check(file, {inner}, inner, text);
         }
+        // Hand-made: SVR4 cpio with checksums, RPM (a cpio inside), cabinet, LHA.
+        put(base + "/a.sv4crc", sv4crc(files));
+        check(base + "/a.sv4crc", {"docs/说明.txt", "docs/b.txt"}, "docs/说明.txt", text);
+        const QString payload = base + "/payload.cpio.gz";
+        QVERIFY(writeWith(payload, "newc", "gzip", files));
+        QFile payloadFile(payload);
+        QVERIFY(payloadFile.open(QIODevice::ReadOnly));
+        put(base + "/nook-1.0-1.x86_64.rpm", rpm(payloadFile.readAll()));
+        check(base + "/nook-1.0-1.x86_64.rpm", {"docs/说明.txt", "docs/b.txt"}, "docs/说明.txt", text);
+        put(base + "/a.cab", cab(files));
+        check(base + "/a.cab", {"docs/说明.txt", "docs/b.txt"}, "docs/说明.txt", text);
+        put(base + "/a.lzh", lha({{"b.txt", "b"}, {"c.txt", text}}));
+        check(base + "/a.lzh", {"b.txt", "c.txt"}, "c.txt", text);
         if (sevenZipAvailable()) {
             const QString wim = base + "/a.wim";
             const QString source = fresh("claimed-wim");

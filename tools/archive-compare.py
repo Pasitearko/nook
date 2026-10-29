@@ -49,11 +49,11 @@ def run(command, env, log, timeout=60, cwd=None):
     return {"state": state, "exit": code, "seconds": round(time.monotonic() - start, 4)}
 
 
-def worker(command, request, env, log, timeout):
+def worker(command, request, env, log, timeout, prefix=()):
     start = time.monotonic()
     events, state = [], "missing-done"
     with log.with_suffix(".stderr.log").open("wb") as error:
-        process = subprocess.Popen([str(command)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        process = subprocess.Popen([*prefix, str(command)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=error, env=env, start_new_session=True)
         # EOF means cancel: keep this pipe open until done/timeout, unlike communicate(input=...).
         process.stdin.write((json.dumps(request, ensure_ascii=False) + "\n").encode())
@@ -222,6 +222,133 @@ def make_fixtures(root, quick, env):
     return cases
 
 
+def measure(out, command):
+    """--measure: run command (stdin/stdout passed through), then record its wall time and the
+    peak RSS of it and every descendant it waited for (wait4 covers the whole tree: File Roller
+    under dbus-run-session, 7-Zip under the worker)."""
+    start = time.monotonic()
+    process = subprocess.Popen(command)
+    _, status, usage = os.wait4(process.pid, 0)
+    seconds = time.monotonic() - start
+    code = os.waitstatus_to_exitcode(status)
+    Path(out).write_text(json.dumps({"seconds": round(seconds, 3), "maxrss_mib": round(usage.ru_maxrss / 1024, 1), "exit": code}))
+    return code if code >= 0 else 1
+
+
+def make_bench_fixtures(root, gib, env):
+    """Large packages on the output's filesystem: incompressible ZIP, many small files, and
+    compressible 7z / tar.zst (each about gib GiB unpacked)."""
+    archives, sources = root / "fixtures", root / "sources"
+    archives.mkdir()
+    sources.mkdir()
+    total = int(gib * 1024 ** 3)
+    def fill(folder, compressible):
+        folder.mkdir()
+        words = [bytes(random.Random(i).choices(b"abcdefghijklmnopqrstuvwxyz", k=random.Random(i).randint(3, 11))) for i in range(4096)]
+        rng = random.Random(7)
+        for index in range(8):
+            with (folder / f"part-{index}.bin").open("wb") as data:
+                left = total // 8
+                while left > 0:
+                    block = (b" ".join(rng.choices(words, k=200000)) if compressible else os.urandom(4 * 1024 * 1024))[:left]
+                    data.write(block)
+                    left -= len(block)
+    def pack(command, name, cwd):
+        made = run(command, env, archives / ("make-" + name + ".log"), timeout=3600, cwd=cwd)
+        if made["state"] != "ok":
+            raise RuntimeError(name + " fixture creation failed; see make-" + name + ".log")
+    cases = []
+    incompressible = sources / "incompressible"
+    fill(incompressible, False)
+    pack(["7z", "a", "-tzip", "-mx=1", "-bso0", "-bsp0", str(archives / "large.zip"), "."], "large.zip", incompressible)
+    cases.append((archives / "large.zip", manifest(incompressible)))
+    many = sources / "many"
+    many.mkdir()
+    rng = random.Random(3)
+    for index in range(100000):
+        folder = many / f"d{index // 1000:03d}"
+        folder.mkdir(exist_ok=True)
+        (folder / f"{index:06d}.txt").write_bytes(rng.randbytes(rng.randint(200, 2000)))
+    pack(["7z", "a", "-tzip", "-mx=1", "-bso0", "-bsp0", str(archives / "many.zip"), "."], "many.zip", many)
+    cases.append((archives / "many.zip", manifest(many)))
+    text = sources / "compressible"
+    fill(text, True)
+    pack(["7z", "a", "-t7z", "-mx=3", "-bso0", "-bsp0", str(archives / "large.7z"), "."], "large.7z", text)
+    pack(["bsdtar", "-c", "--zstd", "-f", str(archives / "large.tar.zst"), "."], "large.tar.zst", text)
+    expected = manifest(text)
+    cases += [(archives / "large.7z", expected), (archives / "large.tar.zst", expected)]
+    return cases
+
+
+def bench(args, root, env):
+    """Rounds alternate which tool goes first; each starts with the package read once (a warm
+    cache for both) and a fresh, empty destination on the same filesystem."""
+    cases = make_bench_fixtures(root, args.bench_gib, env)
+    script = str(Path(__file__).resolve())
+    results = []
+    for archive, expected in cases:
+        rounds = {"nook": [], "file-roller": []}
+        for number in range(args.rounds):
+            order = ("nook", "file-roller") if number % 2 == 0 else ("file-roller", "nook")
+            for tool in order:
+                with archive.open("rb") as data:
+                    while data.read(16 * 1024 * 1024):
+                        pass
+                case = root / "runs" / f"{archive.name}-{number}-{tool}"
+                destination = case / "out"
+                destination.mkdir(parents=True)
+                stats = case / "measure.json"
+                wrapper = (sys.executable, script, "--measure", str(stats), "--")
+                if tool == "nook":
+                    result = worker(args.worker, {"op": "extract", "archive": str(archive), "destination": str(destination),
+                                                  "subfolder": "never", "conflict": "overwrite"},
+                                    env, case / "nook.jsonl", args.timeout, prefix=wrapper)
+                else:
+                    result = run([*wrapper, "dbus-run-session", "--", "file-roller", "--force", "--extract-to", str(destination), str(archive)],
+                                 env, case / "file-roller.log", args.timeout)
+                if stats.exists():
+                    result.update(json.loads(stats.read_text()))
+                # Returning is not being on disk: what the page cache still holds, timed apart.
+                flushed = time.monotonic()
+                subprocess.run(["sync", "-f", str(destination)], check=False)
+                result["flush_seconds"] = round(time.monotonic() - flushed, 3)
+                result["matches_source"] = manifest(destination) == expected
+                rounds[tool].append({k: result.get(k) for k in ("state", "seconds", "flush_seconds", "maxrss_mib", "matches_source")})
+                print(archive.name, number + 1, tool, result.get("state"), result.get("seconds"), "s +", result["flush_seconds"], "s sync,",
+                      result.get("maxrss_mib"), "MiB", "match" if result["matches_source"] else "MISMATCH", flush=True)
+                # Keep the logs, not a GiB per run.
+                shutil.rmtree(destination)
+        summary = {}
+        for tool, runs in rounds.items():
+            ok = [r for r in runs if r["state"] == "ok" and r["matches_source"]]
+            good = sorted(r["seconds"] for r in ok)
+            synced = sorted(round(r["seconds"] + r["flush_seconds"], 3) for r in ok)
+            summary[tool] = {"runs": runs, "ok_runs": len(good),
+                             "median_seconds": good[len(good) // 2] if good else None,
+                             "median_with_sync": synced[len(synced) // 2] if synced else None,
+                             "peak_rss_mib": max((r["maxrss_mib"] or 0) for r in runs)}
+        results.append({"archive": archive.name, "packed_mib": round(archive.stat().st_size / 1024 ** 2, 1),
+                        "files": sum("sha256" in v for v in expected.values()), **summary})
+    failures = [f"{r['archive']}/{tool}: {r[tool]['ok_runs']}/{args.rounds} runs complete and matching"
+                for r in results for tool in ("nook", "file-roller") if r[tool]["ok_runs"] != args.rounds]
+    report = {"note": "Warm cache, same filesystem, alternating order; wall time until the tool returns, the same plus sync -f "
+                      "of its output, and peak RSS of the whole process tree.",
+              "filesystem": subprocess.run(["findmnt", "-no", "FSTYPE", "--target", str(root)], capture_output=True, text=True).stdout.strip(),
+              "rounds": args.rounds, "gib": args.bench_gib, "results": results, "required_failures": failures}
+    (root / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    lines = ["# Nook / File Roller large-package benchmark", "", report["note"], f"Filesystem: {report['filesystem']}", "",
+             "| Package | Packed | Files | Nook median (with sync) | Nook peak RSS | File Roller median (with sync) | File Roller peak RSS |", "|---|---|---|---|---|---|---|"]
+    for r in results:
+        n, f = r["nook"], r["file-roller"]
+        lines.append(f"| {r['archive']} | {r['packed_mib']} MiB | {r['files']} | {n['median_seconds']} s ({n['median_with_sync']} s; {n['ok_runs']}/{args.rounds}) | {n['peak_rss_mib']} MiB "
+                     f"| {f['median_seconds']} s ({f['median_with_sync']} s; {f['ok_runs']}/{args.rounds}) | {f['peak_rss_mib']} MiB |")
+    (root / "report.md").write_text("\n".join(lines) + "\n")
+    print(f"Reports retained: {root}")
+    for failure in failures:
+        print(f"FAIL: {failure}", file=sys.stderr)
+    return 1 if failures else 0
+
+
 def required_failures(results):
     """Keep policy separate from execution so crash/timeout false-positives can be tested."""
     failures = []
@@ -285,9 +412,14 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("/tmp") / time.strftime("nook-archive-compare-%Y%m%d-%H%M%S"))
     parser.add_argument("--timeout", type=float, default=30, help="per operation; blocked dialogs remain inconclusive")
     parser.add_argument("--quick", action="store_true", help="1000 small files and 8 MiB instead of 20000 / 64 MiB")
+    parser.add_argument("--bench", action="store_true", help="large-package timing and memory instead of the fixture comparison")
+    parser.add_argument("--bench-gib", type=float, default=1, help="unpacked size of each large package (--bench)")
+    parser.add_argument("--rounds", type=int, default=3, help="rounds per tool (--bench)")
     parser.add_argument("--inside-sandbox", action="store_true", help=argparse.SUPPRESS)
+    if len(sys.argv) > 3 and sys.argv[1] == "--measure" and sys.argv[3] == "--":
+        return measure(sys.argv[2], sys.argv[4:])
     args = parser.parse_args()
-    for binary in ("7z", "file-roller", "gtk4-broadwayd", "dbus-run-session", "bwrap"):
+    for binary in ("7z", "bsdtar", "file-roller", "gtk4-broadwayd", "dbus-run-session", "bwrap", "findmnt"):
         if not shutil.which(binary):
             parser.error(f"missing optional acceptance dependency: {binary}")
     args.worker = args.worker.resolve()
@@ -307,6 +439,8 @@ def main():
                    "--inside-sandbox", "--worker", str(args.worker), "--output", str(root), "--timeout", str(args.timeout)]
         if args.quick:
             command.append("--quick")
+        if args.bench:
+            command += ["--bench", "--bench-gib", str(args.bench_gib), "--rounds", str(args.rounds)]
         code = subprocess.call(command, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
         return code if (root / "report.json").exists() else 2
     env = isolated_env(root)
@@ -325,6 +459,8 @@ def main():
                 time.sleep(0.05)
             if not ready_socket.exists():
                 raise RuntimeError("Broadway startup failed; see broadway.log")
+            if args.bench:
+                return bench(args, root, env)
             results = []
             for archive, category, expected, options in make_fixtures(root, args.quick, env):
                 case = root / archive.name
