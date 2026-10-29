@@ -7,6 +7,7 @@ find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Concu
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 pkg_check_modules(ICU REQUIRED IMPORTED_TARGET icu-i18n icu-uc)
+pkg_check_modules(LIBARCHIVE REQUIRED IMPORTED_TARGET libarchive)
 find_package(SQLite3 REQUIRED)
 qt_standard_project_setup(REQUIRES 6.8)
 add_library(nook_core STATIC
@@ -22,6 +23,21 @@ target_link_libraries(nook_core PUBLIC Qt6::Core Qt6::Gui Qt6::Quick Qt6::Concur
 target_include_directories(nook_core PUBLIC src)
 target_compile_definitions(nook_core PUBLIC QT_NO_KEYWORDS)
 target_compile_options(nook_core PRIVATE -Wall -Wextra -Wpedantic)
+# nook解压缩: naming rules and the client of the unprivileged worker that reads and writes packages.
+add_library(nook_archive STATIC
+    src/archive/archivenames.cpp src/archive/archivenames.h
+    src/archive/archivejob.cpp src/archive/archivejob.h)
+target_link_libraries(nook_archive PUBLIC Qt6::Core PkgConfig::ICU)
+target_include_directories(nook_archive PUBLIC src/archive)
+target_compile_definitions(nook_archive PUBLIC QT_NO_KEYWORDS
+    PRIVATE NOOK_ARCHIVE_WORKER="${CMAKE_INSTALL_PREFIX}/lib/nook/nook-archive-worker")
+target_compile_options(nook_archive PRIVATE -Wall -Wextra -Wpedantic)
+add_executable(nook-archive-worker
+    src/archive/worker/main.cpp src/archive/worker/worker.h src/archive/worker/channel.cpp
+    src/archive/worker/sandbox.cpp src/archive/worker/stage.cpp
+    src/archive/worker/libarchivebackend.cpp src/archive/worker/sevenzip.cpp src/archive/worker/create.cpp)
+target_link_libraries(nook-archive-worker PRIVATE nook_archive PkgConfig::LIBARCHIVE)
+target_compile_options(nook-archive-worker PRIVATE -Wall -Wextra -Wpedantic)
 qt_add_executable(nook src/main.cpp)
 qt_add_qml_module(nook URI Nook VERSION 1.0
     QML_FILES qml/Main.qml qml/FilePane.qml qml/ActionButton.qml qml/Icon.qml
@@ -103,6 +119,11 @@ if(BUILD_TESTING)
     target_compile_definitions(nook-ui-tests PRIVATE NOOK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" NOOK_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}")
     add_test(NAME ui COMMAND nook-ui-tests)
     set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+    qt_add_executable(nook-archive-tests tests/archive_test.cpp)
+    target_link_libraries(nook-archive-tests PRIVATE nook_archive Qt6::Test PkgConfig::LIBARCHIVE)
+    add_dependencies(nook-archive-tests nook-archive-worker)
+    add_test(NAME archive COMMAND nook-archive-tests)
+    set_tests_properties(archive PROPERTIES ENVIRONMENT "NOOK_ARCHIVE_WORKER=$<TARGET_FILE:nook-archive-worker>;LANG=zh_CN.UTF-8")
 endif()
 include(GNUInstallDirs)
 install(TARGETS nook RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -113,10 +134,11 @@ install(FILES packaging/org.freedesktop.impl.portal.desktop.nook.service DESTINA
 # The pkexec policy intentionally names an absolute, root-owned installed helper.
 install(PROGRAMS packaging/nook-mount-helper DESTINATION lib/nook)
 install(PROGRAMS packaging/nook-volume-helper packaging/nook-volume-setup DESTINATION lib/nook)
+install(TARGETS nook-archive-worker RUNTIME DESTINATION lib/nook)
 install(FILES packaging/local.nook.mount.policy packaging/local.nook.volume.policy
         DESTINATION ${CMAKE_INSTALL_DATADIR}/polkit-1/actions)
 install(FILES qml/icons/folder.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps RENAME nook.svg)
 install(FILES LICENSE THIRD_PARTY.md DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/nook)
 install(FILES README.md LICENSE THIRD_PARTY.md packaging/niri.example.kdl DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook)
-install(FILES docs/VALIDATION.md docs/AUTOMOUNT-DESIGN.md docs/INPUT-METHOD.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook/docs)
+install(FILES docs/VALIDATION.md docs/AUTOMOUNT-DESIGN.md docs/INPUT-METHOD.md docs/ARCHIVE-DESIGN.md docs/ARCHIVE-WORKER.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook/docs)
 install(DIRECTORY docs/screenshots DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook/docs)

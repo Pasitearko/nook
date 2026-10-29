@@ -1,0 +1,558 @@
+#include "archivejob.h"
+#include "archivenames.h"
+#include <QDir>
+#include <QDirIterator>
+#include <QEventLoop>
+#include <QFile>
+#include <QFileInfo>
+#include <QRandomGenerator>
+#include <QStandardPaths>
+#include <QTemporaryDir>
+#include <QtTest>
+#include <archive.h>
+#include <clocale>
+#include <archive_entry.h>
+#include <functional>
+#include <sys/stat.h>
+#include <unistd.h>
+
+using namespace nook::archive;
+
+namespace {
+
+struct Entry {
+    QByteArray path;
+    mode_t type = AE_IFREG;
+    QByteArray data;
+    mode_t perm = 0644;
+    QByteArray link;
+    QByteArray hardlink;
+};
+
+void writeArchive(const QString &file, const QList<Entry> &entries, bool zip, const QByteArray &password = {}) {
+    // In the C locale names are stored as the given bytes, without the ZIP UTF-8 flag, the way
+    // legacy Windows tools wrote them.
+    const QByteArray locale = setlocale(LC_CTYPE, nullptr);
+    setlocale(LC_CTYPE, "C");
+    struct Restore {
+        QByteArray locale;
+        ~Restore() { setlocale(LC_CTYPE, locale.constData()); }
+    } restore{locale};
+    struct archive *a = archive_write_new();
+    if (zip)
+        archive_write_set_format_zip(a);
+    else
+        archive_write_set_format_pax_restricted(a);
+    if (!password.isEmpty()) {
+        QCOMPARE(archive_write_set_options(a, "zip:encryption=aes256"), ARCHIVE_OK);
+        archive_write_set_passphrase(a, password.constData());
+    }
+    QCOMPARE(archive_write_open_filename(a, file.toLocal8Bit().constData()), ARCHIVE_OK);
+    for (const auto &item : entries) {
+        archive_entry *entry = archive_entry_new();
+        archive_entry_copy_pathname(entry, item.path.constData());
+        archive_entry_set_filetype(entry, item.type);
+        archive_entry_set_perm(entry, item.perm);
+        archive_entry_set_mtime(entry, 1700000000, 0);
+        if (!item.link.isEmpty())
+            archive_entry_copy_symlink(entry, item.link.constData());
+        if (!item.hardlink.isEmpty())
+            archive_entry_copy_hardlink(entry, item.hardlink.constData());
+        archive_entry_set_size(entry, item.type == AE_IFREG && item.hardlink.isEmpty() ? item.data.size() : 0);
+        QVERIFY(archive_write_header(a, entry) >= ARCHIVE_WARN);
+        if (!item.data.isEmpty() && item.hardlink.isEmpty())
+            archive_write_data(a, item.data.constData(), size_t(item.data.size()));
+        archive_entry_free(entry);
+    }
+    archive_write_close(a);
+    archive_write_free(a);
+}
+
+QByteArray read(const QString &path) {
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray("<missing>");
+}
+
+void put(const QString &path, const QByteArray &data) {
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(data);
+}
+
+QByteArray noise(qsizetype size) {
+    QByteArray data(size, Qt::Uninitialized);
+    QRandomGenerator::global()->fillRange(reinterpret_cast<quint32 *>(data.data()), size / 4);
+    return data;
+}
+
+QStringList tree(const QString &root) {
+    QStringList paths;
+    QDirIterator it(root, QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext())
+        paths << QDir(root).relativeFilePath(it.next());
+    paths.sort();
+    return paths;
+}
+
+struct Outcome {
+    QVariantMap done;
+    QList<QVariantMap> events;
+    QList<QVariantMap> of(const QString &type) const {
+        QList<QVariantMap> found;
+        for (const auto &event : events) {
+            if (event.value("event") == type)
+                found << event;
+        }
+        return found;
+    }
+    QStringList paths() const {
+        QStringList all;
+        for (const auto &batch : of("entries")) {
+            for (const auto &item : batch.value("items").toList())
+                all << item.toMap().value("path").toString();
+        }
+        all.sort();
+        return all;
+    }
+};
+
+using Handler = std::function<void(ArchiveJob &, const QVariantMap &)>;
+
+Outcome runJob(const QVariantMap &request, const Handler &handler = {}) {
+    ArchiveJob job;
+    Outcome outcome;
+    QEventLoop loop;
+    QObject::connect(&job, &ArchiveJob::workerEvent, &job, [&](const QVariantMap &event) {
+        outcome.events << event;
+        const QString type = event.value("event").toString();
+        if (handler)
+            handler(job, event);
+        else if (type == "need-password")
+            job.cancel();
+        else if (type == "conflict")
+            job.resolveConflict(event.value("id").toInt(), "skip", false);
+    });
+    QObject::connect(&job, &ArchiveJob::finished, &loop, [&](const QVariantMap &result) {
+        outcome.done = result;
+        loop.quit();
+    });
+    QTimer::singleShot(60000, &loop, &QEventLoop::quit);
+    job.start(request);
+    loop.exec();
+    return outcome;
+}
+
+bool sevenZipAvailable() { return !QStandardPaths::findExecutable("7z").isEmpty(); }
+
+}
+
+class ArchiveTest : public QObject {
+    Q_OBJECT
+    QTemporaryDir m_dir{qEnvironmentVariable("NOOK_TEST_KEEP", QDir::tempPath()) + "/archive-test-XXXXXX"};
+    bool keep = [this] { m_dir.setAutoRemove(!qEnvironmentVariableIsSet("NOOK_TEST_KEEP")); return true; }();
+    QString path(const QString &name) const { return m_dir.filePath(name); }
+    QString fresh(const QString &name) const {
+        QDir(path(name)).removeRecursively();
+        QDir().mkpath(path(name));
+        return path(name);
+    }
+    QVariantMap extract(const QString &archive, const QString &destination, QVariantMap extra = {}) const {
+        extra.insert("op", "extract");
+        extra.insert("archive", archive);
+        extra.insert("destination", destination);
+        return extra;
+    }
+
+  private Q_SLOTS:
+    void initTestCase() {
+        // The legacy-name fallback follows the desktop language; these cases assume Simplified Chinese.
+        qputenv("LC_ALL", "zh_CN.UTF-8");
+        qputenv("LANG", "zh_CN.UTF-8");
+        QVERIFY(m_dir.isValid());
+        QVERIFY2(QFileInfo(ArchiveJob::workerPath()).isExecutable(), qPrintable(ArchiveJob::workerPath()));
+    }
+
+    void names() {
+        QCOMPARE(stemOf("photos.tar.gz"), QString("photos"));
+        QCOMPARE(stemOf("pack.part01.rar"), QString("pack"));
+        QCOMPARE(stemOf("data.7z.001"), QString("data"));
+        QCOMPARE(stemOf("notes.txt.gz"), QString("notes.txt"));
+        QCOMPARE(stemOf("README"), QString("README"));
+        QCOMPARE(numberedName("report.txt", 2, false), QString("report (2).txt"));
+        QCOMPARE(numberedName("v1.2", 3, true), QString("v1.2 (3)"));
+        QCOMPARE(numberedName(".bashrc", 2, false), QString(".bashrc (2)"));
+        for (const auto *part : {"set.7z.001", "set.7z.002", "set.7z.003", "old.rar", "old.r00", "old.r01",
+                                 "new.part1.rar", "new.part2.rar"})
+            put(path(part), "x");
+        const Volumes volumes = volumesOf(path("set.7z.002"));
+        QVERIFY(volumes.split);
+        QCOMPARE(volumes.first, path("set.7z.001"));
+        QCOMPARE(volumes.parts.size(), 3);
+        QCOMPARE(volumesOf(path("old.r01")).first, path("old.rar"));
+        QCOMPARE(volumesOf(path("old.rar")).parts.size(), 3);
+        QCOMPARE(volumesOf(path("new.part2.rar")).first, path("new.part1.rar"));
+        put(path("plain.rar"), "x");
+        QVERIFY(!volumesOf(path("plain.rar")).split);
+        put(path("backup.2024"), "x");
+        QVERIFY(!volumesOf(path("backup.2024")).split);
+    }
+
+    void encodings() {
+        const QByteArray gbk("\xd6\xd0\xce\xc4\xce\xc4\xbc\xfe.txt"); // 中文文件.txt
+        QVERIFY(!isUtf8(gbk));
+        QVERIFY(isUtf8("plain ascii"));
+        QVERIFY(isUtf8(QString("中文").toUtf8()));
+        QCOMPARE(detectEncoding({"readme.txt", QString("说明.txt").toUtf8()}), QString("UTF-8"));
+        QCOMPARE(detectEncoding({gbk, "readme.txt"}), QString("GB18030"));
+        QCOMPARE(decodeName(gbk, "GB18030"), QString("中文文件.txt"));
+        bool ok = true;
+        decodeName(gbk, "UTF-8", &ok);
+        QVERIFY(!ok);
+    }
+
+    void listsLegacyZipNames() {
+        const QString zip = path("gbk.zip");
+        writeArchive(zip, {{"\xd6\xd0\xce\xc4/", AE_IFDIR}, {"\xd6\xd0\xce\xc4/\xce\xc4\xbc\xfe.txt", AE_IFREG, "1"}}, true);
+        Outcome listed = runJob({{"op", "list"}, {"archive", zip}});
+        QVERIFY2(listed.done.value("ok").toBool(), qPrintable(listed.done.value("error").toMap().value("message").toString()));
+        const auto info = listed.of("info").value(0);
+        QCOMPARE(info.value("encoding").toString(), QString("GB18030"));
+        QVERIFY(info.value("legacyNames").toBool());
+        QCOMPARE(listed.paths(), QStringList({"中文", "中文/文件.txt"}));
+        // An explicit choice applies to every name, even when it is the wrong one.
+        Outcome big5 = runJob({{"op", "list"}, {"archive", zip}, {"encoding", "Big5"}});
+        QCOMPARE(big5.of("info").value(0).value("encoding").toString(), QString("Big5"));
+        QVERIFY(!big5.paths().contains("中文/文件.txt"));
+        const QString out = fresh("gbk-out");
+        Outcome extracted = runJob(extract(zip, out));
+        QVERIFY(extracted.done.value("ok").toBool());
+        QCOMPARE(read(out + "/中文/文件.txt"), QByteArray("1"));
+    }
+
+    void smartFolder() {
+        const QString single = path("single.zip");
+        writeArchive(single, {{"top/", AE_IFDIR}, {"top/a.txt", AE_IFREG, "a"}}, true);
+        const QString many = path("many.zip");
+        writeArchive(many, {{"a.txt", AE_IFREG, "a"}, {"b.txt", AE_IFREG, "b"}}, true);
+        QString out = fresh("smart");
+        QVERIFY(runJob(extract(single, out)).done.value("ok").toBool());
+        QVERIFY(runJob(extract(many, out)).done.value("ok").toBool());
+        QCOMPARE(tree(out), QStringList({"many", "many/a.txt", "many/b.txt", "top", "top/a.txt"}));
+        QCOMPARE(QFileInfo(out + "/many").permissions() & QFileDevice::ReadOwner, QFileDevice::ReadOwner);
+        out = fresh("never");
+        QVERIFY(runJob(extract(many, out, {{"subfolder", "never"}})).done.value("ok").toBool());
+        QCOMPARE(tree(out), QStringList({"a.txt", "b.txt"}));
+        out = fresh("always");
+        const Outcome always = runJob(extract(single, out, {{"subfolder", "always"}, {"folderName", "命名"}}));
+        QCOMPARE(always.done.value("created").toStringList(), QStringList{"命名"});
+        QCOMPARE(tree(out), QStringList({"命名", "命名/top", "命名/top/a.txt"}));
+    }
+
+    void conflicts() {
+        const QString zip = path("conflict.zip");
+        writeArchive(zip, {{"dir/", AE_IFDIR}, {"dir/new.txt", AE_IFREG, "new"}, {"dir/same.txt", AE_IFREG, "archive"}}, true);
+        const QString out = fresh("conflicts");
+        put(out + "/dir/same.txt", "mine");
+        put(out + "/dir/old.txt", "old");
+        // Ask: the folder merges, the clashing file is renamed on request.
+        Outcome renamed = runJob(extract(zip, out), [](ArchiveJob &job, const QVariantMap &event) {
+            if (event.value("event") == "conflict")
+                job.resolveConflict(event.value("id").toInt(), "rename", false);
+        });
+        QVERIFY(renamed.done.value("ok").toBool());
+        QCOMPARE(renamed.of("conflict").size(), 1);
+        QCOMPARE(renamed.of("conflict").value(0).value("path").toString(), QString("dir/same.txt"));
+        QCOMPARE(read(out + "/dir/same.txt"), QByteArray("mine"));
+        QCOMPARE(read(out + "/dir/same (2).txt"), QByteArray("archive"));
+        QCOMPARE(read(out + "/dir/old.txt"), QByteArray("old"));
+        QCOMPARE(renamed.done.value("created").toStringList(), QStringList({"dir/new.txt", "dir/same (2).txt"}));
+        // Skip leaves everything as it was.
+        Outcome skipped = runJob(extract(zip, out));
+        QCOMPARE(skipped.done.value("skipped").toInt(), 2);
+        QCOMPARE(read(out + "/dir/same.txt"), QByteArray("mine"));
+        // Overwrite with "apply to all" asks once.
+        Outcome overwritten = runJob(extract(zip, out), [](ArchiveJob &job, const QVariantMap &event) {
+            if (event.value("event") == "conflict")
+                job.resolveConflict(event.value("id").toInt(), "overwrite", true);
+        });
+        QCOMPARE(overwritten.of("conflict").size(), 1);
+        QCOMPARE(read(out + "/dir/same.txt"), QByteArray("archive"));
+        QVERIFY(tree(out).filter(".nook-").isEmpty());
+    }
+
+    void refusesEscapes() {
+        const QString outside = fresh("outside");
+        const QString tar = path("hostile.tar");
+        writeArchive(tar, {
+                              {"../escape.txt", AE_IFREG, "x"},
+                              {"/absolute.txt", AE_IFREG, "abs"},
+                              {"jump", AE_IFLNK, {}, 0777, outside.toUtf8()},
+                              {"jump/planted.txt", AE_IFREG, "x"},
+                              {"up", AE_IFLNK, {}, 0777, ".."},
+                              {"dir/", AE_IFDIR, {}, 0755},
+                              {"dir/inner", AE_IFLNK, {}, 0777, "../file.txt"},
+                              {"dir/hop", AE_IFLNK, {}, 0777, "../up/x"}, // escapes only through "up"
+                              {"file.txt", AE_IFREG, "content", 04755},
+                              {"fifo", AE_IFIFO},
+                              {"hard", AE_IFREG, {}, 0644, {}, "file.txt"},
+                          },
+                     false);
+        const QString out = fresh("hostile");
+        Outcome result = runJob(extract(tar, out, {{"subfolder", "never"}}));
+        QVERIFY(result.done.value("ok").toBool());
+        QCOMPARE(tree(outside), QStringList());
+        QVERIFY(!QFileInfo::exists(path("escape.txt")));
+        QCOMPARE(tree(out), QStringList({"absolute.txt", "dir", "dir/inner", "file.txt", "hard"}));
+        QCOMPARE(QFileInfo(out + "/dir/inner").symLinkTarget(), QFileInfo(out + "/file.txt").absoluteFilePath());
+        struct stat st{};
+        QCOMPARE(::stat(QFile::encodeName(out + "/file.txt").constData(), &st), 0);
+        const mode_t mask = ::umask(022);
+        ::umask(mask);
+        QCOMPARE(st.st_mode & 07777, mode_t(0755 & ~mask));
+        QCOMPARE(st.st_nlink, nlink_t(2));
+        QCOMPARE(read(out + "/hard"), QByteArray("content"));
+        QStringList warnings;
+        for (const auto &warning : result.of("warning"))
+            warnings << warning.value("code").toString() + ":" + warning.value("path").toString();
+        warnings.sort();
+        QCOMPARE(warnings, QStringList({"special:fifo", "unsafe-link:dir/hop", "unsafe-link:jump", "unsafe-link:up",
+                                        "unsafe-path:../escape.txt", "unsafe-path:jump/planted.txt"}));
+    }
+
+    void zipPasswords() {
+        const QString zip = path("secret.zip");
+        writeArchive(zip, {{"secret.txt", AE_IFREG, "classified"}}, true, "right");
+        const QString out = fresh("secret");
+        QStringList asked;
+        Outcome result = runJob(extract(zip, out), [&](ArchiveJob &job, const QVariantMap &event) {
+            if (event.value("event") != "need-password")
+                return;
+            asked << (event.value("wrong").toBool() ? "wrong" : "first");
+            job.sendPassword(asked.size() == 1 ? "guess" : "right");
+        });
+        QVERIFY(result.done.value("ok").toBool());
+        QCOMPARE(asked, QStringList({"first", "wrong"}));
+        QCOMPARE(read(out + "/secret.txt"), QByteArray("classified"));
+        // Giving up on the password cancels, and nothing is left behind.
+        const QString empty = fresh("secret-cancel");
+        Outcome cancelled = runJob(extract(zip, empty));
+        QVERIFY(cancelled.done.value("cancelled").toBool());
+        QCOMPARE(tree(empty), QStringList());
+    }
+
+    void createsAndReadsEveryFormat() {
+        if (!sevenZipAvailable())
+            QSKIP("7z is not installed");
+        const QString source = fresh("source");
+        put(source + "/project/readme.md", "# 说明");
+        put(source + "/project/src/main.c", "int main(){}");
+        QVERIFY(QFile::link("readme.md", source + "/project/link.md"));
+        put(source + "/single.txt", noise(4096).toBase64());
+        const QString outputs = fresh("created");
+        for (const QString format : {"zip", "7z", "tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst"}) {
+            const QString output = outputs + "/project." + format;
+            Outcome made = runJob({{"op", "create"}, {"format", format}, {"output", output},
+                                   {"items", QStringList{source + "/project"}}, {"testAfter", true},
+                                   {"options", QVariantMap{{"level", 5}}}});
+            QVERIFY2(made.done.value("ok").toBool(), qPrintable(format + ": " + made.done.value("error").toMap().value("message").toString()));
+            QCOMPARE(made.done.value("output").toString(), output);
+            Outcome listed = runJob({{"op", "list"}, {"archive", output}});
+            QVERIFY2(listed.paths().contains("project/src/main.c"), qPrintable(format + ": " + listed.paths().join(", ")));
+            QVERIFY(listed.paths().contains("project/link.md"));
+            const QString out = fresh("roundtrip-" + format);
+            QVERIFY(runJob(extract(output, out)).done.value("ok").toBool());
+            QCOMPARE(read(out + "/project/readme.md"), QByteArray("# 说明"));
+            const QFileInfo link(out + "/project/link.md");
+            // Links stay links in 7z and tar; ZIP stores what they point to.
+            QCOMPARE(link.isSymLink(), format != "zip");
+            QCOMPARE(read(link.filePath()), QByteArray("# 说明"));
+        }
+        for (const QString format : {"gz", "xz", "zst", "bz2"}) {
+            const QString output = outputs + "/single.txt." + format;
+            Outcome made = runJob({{"op", "create"}, {"format", format}, {"output", output},
+                                   {"items", QStringList{source + "/single.txt"}}});
+            QVERIFY2(made.done.value("ok").toBool(), qPrintable(format));
+            Outcome listed = runJob({{"op", "list"}, {"archive", output}});
+            QCOMPARE(listed.paths(), QStringList{"single.txt"});
+            QVERIFY(listed.of("info").value(0).value("stream").toBool());
+            const QString out = fresh("stream-" + format);
+            QVERIFY(runJob(extract(output, out)).done.value("ok").toBool());
+            QCOMPARE(read(out + "/single.txt"), read(source + "/single.txt"));
+        }
+        Outcome refused = runJob({{"op", "create"}, {"format", "gz"}, {"output", outputs + "/two.gz"},
+                                  {"items", QStringList{source + "/single.txt", source + "/project"}}});
+        QCOMPARE(refused.done.value("error").toMap().value("code").toString(), QString("options"));
+    }
+
+    void encryptedSevenZip() {
+        if (!sevenZipAvailable())
+            QSKIP("7z is not installed");
+        const QString source = fresh("enc-source");
+        put(source + "/a.txt", "alpha");
+        put(source + "/b/c.txt", "gamma");
+        const QString output = path("hidden.7z");
+        QFile::remove(output);
+        Outcome made = runJob({{"op", "create"}, {"format", "7z"}, {"output", output}, {"password", "pw 密码"},
+                               {"items", QStringList{source + "/a.txt", source + "/b"}},
+                               {"options", QVariantMap{{"encryptNames", true}}}});
+        QVERIFY(made.done.value("ok").toBool());
+        // Names are hidden too: listing needs the password.
+        Outcome refused = runJob({{"op", "list"}, {"archive", output}});
+        QVERIFY(refused.done.value("cancelled").toBool());
+        QCOMPARE(refused.paths(), QStringList());
+        int asked = 0;
+        Outcome listed = runJob({{"op", "list"}, {"archive", output}}, [&](ArchiveJob &job, const QVariantMap &event) {
+            if (event.value("event") == "need-password")
+                job.sendPassword(++asked == 1 ? "nope" : "pw 密码");
+        });
+        QCOMPARE(asked, 2);
+        QCOMPARE(listed.paths(), QStringList({"a.txt", "b", "b/c.txt"}));
+        QVERIFY(listed.of("info").value(0).value("headerEncrypted").toBool());
+        const QString out = fresh("enc-out");
+        Outcome extracted = runJob(extract(output, out, {{"password", "pw 密码"}}));
+        QVERIFY(extracted.done.value("ok").toBool());
+        QCOMPARE(read(out + "/hidden/b/c.txt"), QByteArray("gamma"));
+        Outcome tested = runJob({{"op", "test"}, {"archive", output}, {"password", "pw 密码"}});
+        QVERIFY(tested.done.value("ok").toBool());
+        // ZIP: AES-256 by default.
+        const QString zip = path("hidden.zip");
+        QFile::remove(zip);
+        QVERIFY(runJob({{"op", "create"}, {"format", "zip"}, {"output", zip}, {"password", "zz"},
+                        {"items", QStringList{source + "/a.txt"}}})
+                    .done.value("ok").toBool());
+        QProcess sevenZip;
+        sevenZip.start("7z", {"l", "-slt", zip});
+        QVERIFY(sevenZip.waitForFinished());
+        QVERIFY(sevenZip.readAllStandardOutput().contains("AES-256"));
+    }
+
+    void volumes() {
+        if (!sevenZipAvailable())
+            QSKIP("7z is not installed");
+        const QString source = fresh("vol-source");
+        const QByteArray data = noise(300 * 1024);
+        put(source + "/big.bin", data);
+        const QString outputs = fresh("vol-out");
+        Outcome made = runJob({{"op", "create"}, {"format", "7z"}, {"output", outputs + "/set.7z"},
+                               {"items", QStringList{source + "/big.bin"}},
+                               {"options", QVariantMap{{"volumeSize", 100 * 1024}, {"level", 0}}}});
+        QVERIFY(made.done.value("ok").toBool());
+        const QStringList parts = made.done.value("created").toStringList();
+        QVERIFY(parts.size() >= 3);
+        QCOMPARE(parts.first(), QString("set.7z.001"));
+        QVERIFY(parts.filter(QRegularExpression("^set\\.7z\\.\\d{3}$")).size() == parts.size());
+        // Opening any part opens the set.
+        const QString out = fresh("vol-extract");
+        Outcome extracted = runJob(extract(outputs + "/set.7z.003", out));
+        QVERIFY(extracted.done.value("ok").toBool());
+        QCOMPARE(read(out + "/big.bin"), data);
+        // A second set with the same name is renamed as a whole.
+        Outcome again = runJob({{"op", "create"}, {"format", "7z"}, {"output", outputs + "/set.7z"},
+                                {"items", QStringList{source + "/big.bin"}}, {"conflict", "rename"},
+                                {"options", QVariantMap{{"volumeSize", 100 * 1024}, {"level", 0}}}});
+        QCOMPARE(again.done.value("created").toStringList().value(0), QString("set (2).7z.001"));
+        QFile::remove(outputs + "/set.7z.002");
+        Outcome missing = runJob(extract(outputs + "/set.7z.001", fresh("vol-missing")));
+        QVERIFY(!missing.done.value("ok").toBool());
+    }
+
+    void selectionPrefixAndFlatten() {
+        const QString zip = path("select.zip");
+        writeArchive(zip, {{"d/e/f.txt", AE_IFREG, "f"}, {"d/g.txt", AE_IFREG, "g"}, {"h.txt", AE_IFREG, "h"}}, true);
+        QString out = fresh("select");
+        QVERIFY(runJob(extract(zip, out, {{"entries", QStringList{"d/e"}}, {"prefix", "d"}})).done.value("ok").toBool());
+        QCOMPARE(tree(out), QStringList({"e", "e/f.txt"}));
+        out = fresh("flatten");
+        QVERIFY(runJob(extract(zip, out, {{"flatten", true}, {"subfolder", "never"}})).done.value("ok").toBool());
+        QCOMPARE(tree(out), QStringList({"f.txt", "g.txt", "h.txt"}));
+        if (!sevenZipAvailable())
+            return;
+        const QString source = fresh("select-source");
+        put(source + "/d/e/f.txt", "f");
+        put(source + "/d/g.txt", "g");
+        const QString seven = path("select.7z");
+        QFile::remove(seven);
+        QVERIFY(runJob({{"op", "create"}, {"format", "7z"}, {"output", seven}, {"items", QStringList{source + "/d"}}})
+                    .done.value("ok").toBool());
+        out = fresh("select-7z");
+        QVERIFY(runJob(extract(seven, out, {{"entries", QStringList{"d/e"}}, {"prefix", "d"}})).done.value("ok").toBool());
+        QCOMPARE(tree(out), QStringList({"e", "e/f.txt"}));
+    }
+
+    void cancelKeepsOnlyWholeFiles() {
+        const QString tar = path("large.tar");
+        QList<Entry> entries;
+        for (int i = 0; i < 6; ++i)
+            entries << Entry{"part" + QByteArray::number(i) + ".bin", AE_IFREG, noise(24 << 20)};
+        writeArchive(tar, entries, false);
+        const QString out = fresh("cancel");
+        Outcome result = runJob(extract(tar, out, {{"subfolder", "never"}}), [](ArchiveJob &job, const QVariantMap &event) {
+            if (event.value("event") == "progress")
+                job.cancel();
+        });
+        QVERIFY(result.done.value("cancelled").toBool());
+        for (const auto &name : tree(out))
+            QCOMPARE(QFileInfo(out + u'/' + name).size(), qint64(24 << 20));
+        QCOMPARE(result.done.value("created").toStringList(), tree(out));
+        // Stopping mid-way, at a password prompt: what was complete stays, nothing partial does.
+        if (!sevenZipAvailable())
+            QSKIP("7z is not installed");
+        const QString zip = path("late-password.zip");
+        const QString source = fresh("late-source");
+        for (const auto *name : {"1.bin", "2.bin", "3.bin", "4.bin"})
+            put(source + u'/' + name, noise(1 << 20));
+        QCOMPARE(QProcess::execute("7z", {"a", "-bso0", zip, source + "/1.bin", source + "/2.bin", source + "/3.bin"}), 0);
+        QCOMPARE(QProcess::execute("7z", {"a", "-bso0", "-plate", "-mem=AES256", zip, source + "/4.bin"}), 0);
+        const QString partial = fresh("cancel-partial");
+        Outcome stopped = runJob(extract(zip, partial, {{"subfolder", "never"}}));
+        QVERIFY(stopped.done.value("cancelled").toBool());
+        QCOMPARE(tree(partial), QStringList({"1.bin", "2.bin", "3.bin"}));
+        QCOMPARE(stopped.done.value("created").toStringList(), tree(partial));
+        for (const auto &name : tree(partial))
+            QCOMPARE(QFileInfo(partial + u'/' + name).size(), qint64(1 << 20));
+    }
+
+    void reportsDamage() {
+        const QString zip = path("damaged.zip");
+        writeArchive(zip, {{"data.bin", AE_IFREG, noise(64 * 1024)}}, true);
+        QFile file(zip);
+        QVERIFY(file.open(QIODevice::ReadWrite));
+        file.seek(2000);
+        file.write(QByteArray(64, '\0'));
+        file.close();
+        Outcome tested = runJob({{"op", "test"}, {"archive", zip}});
+        QVERIFY(!tested.done.value("ok").toBool());
+        QVERIFY(!tested.done.value("errors").toList().isEmpty());
+        Outcome missing = runJob({{"op", "list"}, {"archive", path("nothing.zip")}});
+        QCOMPARE(missing.done.value("error").toMap().value("code").toString(), QString("not-found"));
+        put(path("text.zip"), "not an archive at all");
+        Outcome unknown = runJob({{"op", "list"}, {"archive", path("text.zip")}});
+        QVERIFY(!unknown.done.value("ok").toBool());
+    }
+
+    void sandboxAndCleanup() {
+        const QString zip = path("single.zip");
+        Outcome result = runJob(extract(zip, fresh("sandbox")));
+        QVERIFY(result.of("started").value(0).value("sandbox").toBool());
+        // A worker killed outright leaves no staging folder behind.
+        const QString tar = path("large.tar");
+        const QString out = fresh("killed");
+        {
+            ArchiveJob job;
+            QEventLoop loop;
+            QObject::connect(&job, &ArchiveJob::workerEvent, &loop, [&](const QVariantMap &event) {
+                if (event.value("event") == "progress")
+                    loop.quit();
+            });
+            QTimer::singleShot(20000, &loop, &QEventLoop::quit);
+            job.start(extract(tar, out));
+            loop.exec();
+        }
+        QCOMPARE(tree(out), QStringList());
+    }
+};
+
+QTEST_GUILESS_MAIN(ArchiveTest)
+#include "archive_test.moc"
