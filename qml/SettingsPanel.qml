@@ -37,6 +37,7 @@ Dialog {
     onOpened: {
         rootsInput.text = prefs.roots.join("\n"); excludeInput.text = prefs.exclusions.join("\n")
         mountChanges = ({}); controller.diskMounts.refresh()
+        controller.checkInstalledVersion()
     }
     Connections { target: panel.controller.diskMounts; function onDisksChanged() { panel.mountChanges = ({}) } }
     // The pages, in the order the navigation lists them; `page` is the category number.
@@ -45,7 +46,7 @@ Dialog {
         {page: 1, title: "浏览与交互", icon: "list", summary: "文件列表、预览、快速访问和撤销"},
         {page: 2, title: "搜索与索引", icon: "search", summary: "文件名索引的状态、范围和 Windows 分区"},
         {page: 4, title: "磁盘与挂载", icon: "drive", summary: "数据分区的开机自动挂载"},
-        {page: 3, title: "关于应用", icon: "info", summary: "版本与组成"}
+        {page: 3, title: "关于应用", icon: "info", summary: "版本、更新与组成"}
     ]
     readonly property var current: pages.find(p => p.page === category) || pages[0]
     NookDialog {
@@ -300,6 +301,12 @@ Dialog {
             spacing: 10
             Icon { name: navItem.modelData.icon; tint: navItem.chosen ? panel.theme.accentText : panel.theme.icon; Layout.leftMargin: 12; Layout.preferredWidth: 17; Layout.preferredHeight: 17 }
             Text { text: navItem.modelData.title; color: navItem.chosen ? panel.theme.accentText : panel.theme.inkSoft; font.pixelSize: 14; font.weight: navItem.chosen ? Font.DemiBold : Font.Normal; Layout.fillWidth: true; elide: Text.ElideRight }
+            // A newer version is installed and waits for a restart.
+            Rectangle {
+                visible: navItem.modelData.page === 3 && panel.controller.upgraded
+                Layout.rightMargin: 12; Layout.preferredWidth: 7; Layout.preferredHeight: 7; radius: 3.5
+                color: panel.theme.accent
+            }
         }
     }
     component ThemeTile: AbstractButton {
@@ -719,12 +726,37 @@ Dialog {
                                     Icon { anchors.centerIn: parent; name: "folder"; width: 44; height: 44 }
                                 }
                                 Text { Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 6; text: "nook · 星择"; color: panel.ink; font.pixelSize: 22; font.weight: Font.DemiBold }
-                                Chip { Layout.alignment: Qt.AlignHCenter; text: "版本 " + (Qt.application.version || "0.3"); tone: panel.theme.accentText }
+                                RowLayout {
+                                    Layout.alignment: Qt.AlignHCenter; spacing: 6
+                                    Chip { text: "版本 " + (Qt.application.version || "0.3.1"); tone: panel.theme.accentText }
+                                    Chip {
+                                        visible: panel.controller.upgraded
+                                        text: panel.controller.installedVersion !== "" ? "已安装 " + panel.controller.installedVersion : "已安装新版本"
+                                        tone: panel.theme.accentText
+                                    }
+                                }
                                 Text {
                                     Layout.fillWidth: true; Layout.topMargin: 6; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
                                     text: "原生 Linux 文件管理器，同一套外观里还有文件选择器和 nook解压缩。"
                                     color: panel.muted; font.pixelSize: 13; lineHeight: 1.2
                                 }
+                            }
+                        }
+                    }
+                    Group {
+                        visible: panel.category === 3; heading: "更新"
+                        SettingRow {
+                            title: panel.controller.upgraded
+                                   ? (panel.controller.installedVersion !== "" ? "新版本 " + panel.controller.installedVersion + " 已安装" : "新版本已安装")
+                                   : "重启 nook"
+                            description: panel.controller.operations.busy
+                                         ? "正在复制、移动或删除文件，完成后才能重启"
+                                         : (panel.controller.upgraded ? "重启后切换到新版本。" : "用 pacman 安装新版本后，在这里重启即可切换。")
+                                           + "所有窗口和标签页会原样恢复，撤销记录会清空。"
+                            RowButton {
+                                objectName: "restartButton"; text: "重启"; iconName: "refresh"
+                                enabled: !panel.controller.operations.busy
+                                onClicked: panel.controller.restart()
                             }
                         }
                     }

@@ -545,6 +545,38 @@ class FollowupUiTest : public QObject {
         QVERIFY(!menu->property("visible").toBool());
     }
 
+    void restartFromSettings() {
+        click(item("settingsButton"));
+        auto *panel = object("settingsDialog");
+        QVERIFY(panel);
+        QTRY_VERIFY(panel->property("opened").toBool());
+        click(item("settingsCategory3"));
+        QTRY_COMPARE(panel->property("category").toInt(), 3);
+        // Running from the build tree, nothing has replaced the program.
+        QVERIFY(!controller->upgraded());
+        QCOMPARE(controller->installedVersion(), QCoreApplication::applicationVersion());
+        auto *restart = item("restartButton");
+        QVERIFY(restart);
+        revealSetting(restart);
+        QVERIFY(restart->isEnabled());
+        QSignalSpy requested(controller.get(), &Application::restartRequested);
+        click(restart);
+        QCOMPARE(requested.size(), 1);
+        closeSettings();
+    }
+    void restartKeepsTabs() {
+        controller->addTab(nook::normalizeUri(fixture->path()));
+        controller->setGrid(true);
+        controller->setActiveTab(0);
+        const auto state = controller->state();
+        QCOMPARE(state["tabs"].toArray().size(), 2);
+        Application next(search.get(), operations.get(), settings.get(), false, nullptr, state);
+        QCOMPARE(next.tabs().size(), 2);
+        QCOMPARE(next.activeTab(), 0);
+        QCOMPARE(next.state(), state);
+        controller->closeTab(1);
+    }
+
     void mountSettingsRequireConfirmation() {
         QTRY_VERIFY(!controller->diskMounts()->busy());
         click(item("settingsButton"));

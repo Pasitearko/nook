@@ -15,11 +15,13 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QLockFile>
+#include <QProcess>
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QTextStream>
+#include <QThread>
 #include <QTimer>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -41,8 +43,9 @@ int main(int argc, char **argv) {
     QGuiApplication app(argc, argv);
     app.setApplicationName("nook");
     app.setOrganizationName("nook");
-    app.setApplicationVersion("0.3");
+    app.setApplicationVersion("0.3.1");
     app.setDesktopFileName("local.nook");
+    nook::executablePath(); // before an upgrade can replace it
     QImageReader::setAllocationLimit(96);
     if (worker) {
         struct rlimit cpu{12, 12};
@@ -67,15 +70,18 @@ int main(int argc, char **argv) {
     parser.addOption({"file-chooser", "作为桌面门户的文件选择器后端运行（D-Bus 激活使用）"});
     parser.addOption({"service", "作为 org.freedesktop.FileManager1 服务启动，不打开窗口（D-Bus 激活使用）"});
     parser.addOption({"isolated", "独立实例，不转发给已运行窗口"});
+    parser.addOption({"restart-from", "等旧进程退出后接替它，恢复它的窗口（设置里的“重启”使用）", "pid"});
     parser.addOption({"profile-dir", "仅隔离 nook 的配置、索引和缓存，保留系统输入法主题（开发验证）", "path"});
     parser.addOption({"capture", "保存本窗口截图（开发验证）", "path"});
     parser.addOption({"metrics", "记录首次内容渲染时间（开发验证）", "path"});
     parser.addOption({"quit-after", "指定毫秒后退出（开发验证）", "milliseconds"});
+    parser.addOption({"restart-after", "指定毫秒后重启，同设置里的“重启”（开发验证）", "milliseconds"});
     parser.addOption({"benchmark-directory", "仅测量隔离目录读取时间，不显示窗口", "path"});
     parser.addOption({"benchmark-query", "仅测量已有索引查询，不扫描文件", "query"});
     parser.process(app);
-    nook::initializeProfile(parser.isSet("profile-dir") ? parser.value("profile-dir")
-                                                      : qEnvironmentVariable("NOOK_PROFILE_DIR"));
+    const QString profileDir =
+        parser.isSet("profile-dir") ? parser.value("profile-dir") : qEnvironmentVariable("NOOK_PROFILE_DIR");
+    nook::initializeProfile(profileDir);
     const bool profile = nook::customProfile();
     const bool isolated = profile || parser.isSet("isolated");
     if (parser.isSet("file-chooser")) {
@@ -93,6 +99,14 @@ int main(int argc, char **argv) {
         idle.setInterval(10 * 60 * 1000);
         QObject::connect(&idle, &QTimer::timeout, &app, &QCoreApplication::quit);
         int open = 0;
+        // After an upgrade, step aside while no dialog is open: the next one starts the new program.
+        QTimer upgrade;
+        upgrade.setInterval(30 * 1000);
+        QObject::connect(&upgrade, &QTimer::timeout, &app, [&] {
+            if (open == 0 && nook::executableReplaced())
+                app.quit();
+        });
+        upgrade.start();
         nook::portal::FileChooserPortal portal(
             [&](nook::portal::ChooserRequest *request) {
                 ++open;
@@ -184,6 +198,24 @@ int main(int argc, char **argv) {
         {"paths", QJsonArray::fromStringList(paths)},
         {"select", parser.isSet("select") ? nook::normalizeUri(parser.value("select")) : QString()},
         {"newWindow", parser.isSet("new-window")}};
+    // A restart: the previous process still holds the instance lock and the D-Bus name until it
+    // has saved everything and exited.
+    if (parser.isSet("restart-from")) {
+        const QString stat = "/proc/" + QString::number(parser.value("restart-from").toInt()) + "/stat";
+        auto running = [&stat] {
+            QFile file(stat);
+            if (!file.open(QIODevice::ReadOnly))
+                return false;
+            const QByteArray line = file.readAll();
+            const auto at = line.lastIndexOf(") ") + 2;
+            const char state = at >= 2 && at < line.size() ? line.at(at) : 'R';
+            return state != 'Z' && state != 'X';
+        };
+        QElapsedTimer waited;
+        waited.start();
+        while (running() && waited.elapsed() < 10000)
+            QThread::msleep(20);
+    }
     QString socketPath = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation) + "/nook-" +
                          QString::number(getuid()) + ".sock";
     QLocalServer server;
@@ -270,7 +302,27 @@ int main(int argc, char **argv) {
     std::vector<std::unique_ptr<Application>> controllers;
     QQmlApplicationEngine engine;
     engine.addImageProvider("thumb", new ThumbnailProvider);
-    std::function<void(const QJsonObject &, bool)> createWindow;
+    std::function<void(const QJsonObject &, bool, const QJsonObject &)> createWindow;
+    // Restart: hand the open windows to a new process started from the program now installed.
+    bool restarting = false;
+    QJsonArray restartWindows;
+    auto restart = [&] {
+        if (restarting || operations.busy())
+            return;
+        restarting = true;
+        for (auto *root : engine.rootObjects()) {
+            auto *window = qobject_cast<QQuickWindow *>(root);
+            auto *controller = root->property("controller").value<Application *>();
+            if (!window || !window->isVisible() || !controller)
+                continue;
+            auto state = controller->state();
+            state["width"] = window->width();
+            state["height"] = window->height();
+            state["maximized"] = window->visibility() == QWindow::Maximized;
+            restartWindows.append(state);
+        }
+        app.quit();
+    };
     auto handlePaths = [](Application *controller, const QJsonObject &req) {
         for (const auto &value : req["paths"].toArray()) {
             QString uri = nook::normalizeUri(value.toString());
@@ -283,16 +335,24 @@ int main(int argc, char **argv) {
         if (!req["select"].toString().isEmpty())
             controller->reveal(nook::normalizeUri(req["select"].toString()));
     };
-    createWindow = [&](const QJsonObject &req, bool restore) {
-        auto controller = std::make_unique<Application>(&index, &operations, &settings, restore);
+    createWindow = [&](const QJsonObject &req, bool restore, const QJsonObject &state) {
+        auto controller = std::make_unique<Application>(&index, &operations, &settings, restore, nullptr, state);
         auto *ptr = controller.get();
         controllers.push_back(std::move(controller));
-        QObject::connect(ptr, &Application::windowRequested, &app, [&] { createWindow({}, false); });
-        engine.setInitialProperties({{"controller", QVariant::fromValue(ptr)}});
+        QObject::connect(ptr, &Application::windowRequested, &app, [&] { createWindow({}, false, {}); });
+        QObject::connect(ptr, &Application::restartRequested, &app, restart);
+        QVariantMap properties{{"controller", QVariant::fromValue(ptr)}};
+        if (state["width"].toInt() > 0 && state["height"].toInt() > 0) {
+            properties["width"] = state["width"].toInt();
+            properties["height"] = state["height"].toInt();
+        }
+        engine.setInitialProperties(properties);
         engine.loadFromModule("Nook", "Main");
         if (!engine.rootObjects().isEmpty()) {
             auto *root = engine.rootObjects().last();
             if (auto *window = qobject_cast<QQuickWindow *>(root)) {
+                if (state["maximized"].toBool())
+                    window->showMaximized();
                 QObject::connect(window, &QWindow::visibleChanged, window, [window](bool visible) {
                     if (!visible)
                         window->deleteLater();
@@ -330,9 +390,20 @@ int main(int argc, char **argv) {
         }
         handlePaths(ptr, req);
     };
-    if (!background) {
+    // The windows a restart handed over; none means it was a resident process without windows.
+    QJsonArray handedOver;
+    if (parser.isSet("restart-from")) {
+        handedOver = QJsonDocument::fromJson(settings.store().value("restartWindows").toByteArray()).array();
+        settings.store().remove("restartWindows");
+    }
+    if (!handedOver.isEmpty()) {
+        for (const auto &window : handedOver)
+            createWindow({}, false, window.toObject());
+        if (engine.rootObjects().isEmpty())
+            return 1;
+    } else if (!background) {
         createWindow(request, !isolated && parser.positionalArguments().isEmpty() &&
-                                  !parser.isSet("select"));
+                                  !parser.isSet("select"), {});
         if (engine.rootObjects().isEmpty())
             return 1;
     }
@@ -345,12 +416,14 @@ int main(int argc, char **argv) {
                 root = *it;
                 break;
             }
+        if (restarting)
+            return;
         if (req["newWindow"].toBool())
-            createWindow(req, false);
+            createWindow(req, false, {});
         else if (!root) {
             // First window after all were closed (or of a background start): restore the session.
             createWindow(req, req["paths"].toArray().isEmpty() && req["select"].toString().isEmpty() &&
-                                  controllers.empty());
+                                  controllers.empty(), {});
         } else {
             auto *controller = root->property("controller").value<Application *>();
             if (controller)
@@ -427,8 +500,19 @@ int main(int argc, char **argv) {
             if (auto *window = engine.rootObjects().isEmpty() ? nullptr : qobject_cast<QQuickWindow *>(engine.rootObjects().first()))
                 window->grabWindow().save(parser.value("capture"));
         });
+    // A resident process with no window open picks up an upgrade by itself.
+    QTimer upgrade;
+    upgrade.setInterval(60 * 1000);
+    QObject::connect(&upgrade, &QTimer::timeout, &app, [&] {
+        if (controllers.empty() && !operations.busy() && nook::executableReplaced())
+            restart();
+    });
+    if (!isolated)
+        upgrade.start();
     if (parser.isSet("quit-after"))
         QTimer::singleShot(parser.value("quit-after").toInt(), &app, &QCoreApplication::quit);
+    if (parser.isSet("restart-after"))
+        QTimer::singleShot(parser.value("restart-after").toInt(), &app, restart);
     int code = app.exec();
     index.stop();
     for (auto &controller : controllers) {
@@ -436,5 +520,20 @@ int main(int argc, char **argv) {
         controller->saveSession();
     }
     operations.cancel();
+    if (restarting) {
+        // Written last, after every window has saved its session.
+        settings.store().setValue("restartWindows", QJsonDocument(restartWindows).toJson(QJsonDocument::Compact));
+        settings.store().sync();
+        QStringList arguments{"--restart-from", QString::number(QCoreApplication::applicationPid())};
+        if (!profileDir.isEmpty())
+            arguments << "--profile-dir" << profileDir;
+        else if (isolated)
+            arguments << "--isolated";
+        if (parser.isSet("no-index"))
+            arguments << "--no-index";
+        if (restartWindows.isEmpty())
+            arguments << "--background";
+        QProcess::startDetached(nook::executablePath(), arguments);
+    }
     return code;
 }

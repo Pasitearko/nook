@@ -7,6 +7,7 @@
 #include "preview.h"
 #include "searchindex.h"
 #include "appearance.h"
+#include <QJsonObject>
 #include <QSettings>
 #include <QVariantList>
 #include <memory>
@@ -38,6 +39,10 @@ class AppSettings : public QObject {
 namespace nook {
 // Keeps ~/.config/autostart in step with the "background index" preference.
 void syncAutostart(bool enabled);
+// The program this process was started from, recorded at startup.
+QString executablePath();
+// True once a package upgrade has replaced the running program on disk.
+bool executableReplaced();
 } // namespace nook
 class Application : public QObject {
     Q_OBJECT
@@ -58,9 +63,13 @@ class Application : public QObject {
     Q_PROPERTY(AppSettings *settings READ settings CONSTANT)
     Q_PROPERTY(bool ntfsBusy READ ntfsBusy NOTIFY ntfsBusyChanged)
     Q_PROPERTY(bool ntfsInstalled READ ntfsInstalled CONSTANT)
+    // After an upgrade the program on disk is newer than the running one.
+    Q_PROPERTY(bool upgraded READ upgraded NOTIFY installedVersionChanged)
+    Q_PROPERTY(QString installedVersion READ installedVersion NOTIFY installedVersionChanged)
   public:
+    // state, from a restart: the tabs to open instead of the saved session.
     Application(SearchIndex *search, Operations *ops, AppSettings *settings, bool restore,
-                QObject *parent = nullptr);
+                QObject *parent = nullptr, const QJsonObject &state = {});
     ~Application() override;
     QVariantList tabs() const;
     int activeTab() const {
@@ -133,6 +142,20 @@ class Application : public QObject {
     // The program and arguments archive() starts (nook-archive next to nook, else from PATH).
     QStringList archiveCommand(const QString &action, const QStringList &uris) const;
     Q_INVOKABLE void saveSession();
+    // This window's tabs, as a restart hands them to the next process.
+    QJsonObject state() const;
+    // Replaces this process with the program now installed; windows and tabs come back as they were.
+    Q_INVOKABLE void restart() {
+        Q_EMIT restartRequested();
+    }
+    bool upgraded() const {
+        return m_upgraded;
+    }
+    QString installedVersion() const {
+        return m_installedVersion;
+    }
+    // Asks the program on disk for its version (it runs once more, without a window).
+    Q_INVOKABLE void checkInstalledVersion();
     // A file chooser browses with the same controller but must never replace the saved tabs.
     void setRemembersSession(bool remember) {
         m_remembersSession = remember;
@@ -153,6 +176,8 @@ class Application : public QObject {
     void windowRequested();
     void notice(const QString &message);
     void ntfsBusyChanged();
+    void restartRequested();
+    void installedVersionChanged();
 
   private:
     struct Tab {
@@ -176,4 +201,7 @@ class Application : public QObject {
     QProcess *m_ntfsSetup = nullptr;
     bool m_remembersSession = true;
     bool m_mountBusy = false;
+    bool m_upgraded = false;
+    QString m_installedVersion;
+    QProcess *m_versionProbe = nullptr;
 };

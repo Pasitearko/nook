@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <utility>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <cmath>
 #include <QtConcurrent>
 
@@ -93,7 +94,7 @@ QStringList quickAccessState(AppSettings *settings) {
 }
 } // namespace
 Application::Application(SearchIndex *search, Operations *ops, AppSettings *settings, bool restore,
-                         QObject *parent)
+                         QObject *parent, const QJsonObject &state)
     : QObject(parent), m_search(search), m_ops(ops), m_settings(settings), m_preview(this) {
     m_search = search->createSession(this);
     // Migrate away from visit tracking; executable undo history stays in memory.
@@ -109,19 +110,20 @@ Application::Application(SearchIndex *search, Operations *ops, AppSettings *sett
                 tab.right->refresh();
         }
     });
-    if (restore) {
-        auto array = QJsonDocument::fromJson(settings->store().value("session").toByteArray()).array();
-        for (const auto &value : array) {
-            auto object = value.toObject();
-            addTab(object["left"].toString());
-            m_tabs.last().right->navigate(object["right"].toString(home()));
-            m_tabs.last().dual = object["dual"].toBool();
-            m_tabs.last().grid = object["grid"].toBool();
-        }
+    m_installedVersion = QCoreApplication::applicationVersion();
+    const QJsonArray saved = !state.isEmpty() ? state["tabs"].toArray()
+                             : restore ? QJsonDocument::fromJson(settings->store().value("session").toByteArray()).array()
+                                       : QJsonArray();
+    for (const auto &value : saved) {
+        auto object = value.toObject();
+        addTab(object["left"].toString());
+        m_tabs.last().right->navigate(object["right"].toString(home()));
+        m_tabs.last().dual = object["dual"].toBool();
+        m_tabs.last().grid = object["grid"].toBool();
     }
     if (m_tabs.isEmpty())
         addTab(settings->values()["startFolder"].toString());
-    m_active = 0;
+    m_active = qBound(0, state["active"].toInt(), int(m_tabs.size()) - 1);
     connect(&m_diskMounts, &DiskMounts::mountedChanged, this, &Application::refreshPlaces);
     connect(&m_properties, &FileProperties::error, this, &Application::notice);
     connect(&m_properties, &FileProperties::hiddenApplied, this, [this](bool hidden) {
@@ -820,21 +822,61 @@ void Application::openWith(const QString &uri, const QString &applicationId) {
     if (!found)
         Q_EMIT notice(QStringLiteral("此应用已不可用，请重新选择打开方式"));
 }
-void Application::saveSession() {
-    if (!m_remembersSession)
-        return;
+QJsonObject Application::state() const {
     QJsonArray array;
     for (const auto &tab : m_tabs)
         array.append(QJsonObject{
             {"left", tab.left->uri()}, {"right", tab.right->uri()}, {"dual", tab.dual}, {"grid", tab.grid}});
-    auto data = QJsonDocument(array).toJson(QJsonDocument::Compact);
+    return {{"tabs", array}, {"active", m_active}};
+}
+void Application::saveSession() {
+    if (!m_remembersSession)
+        return;
+    auto data = QJsonDocument(state()["tabs"].toArray()).toJson(QJsonDocument::Compact);
     if (m_settings->store().value("session").toByteArray() != data)
         m_settings->store().setValue("session", data);
+}
+void Application::checkInstalledVersion() {
+    const bool upgraded = nook::executableReplaced();
+    if (!upgraded) {
+        if (m_upgraded || m_installedVersion != QCoreApplication::applicationVersion()) {
+            m_upgraded = false;
+            m_installedVersion = QCoreApplication::applicationVersion();
+            Q_EMIT installedVersionChanged();
+        }
+        return;
+    }
+    if (m_versionProbe)
+        return;
+    m_versionProbe = new QProcess(this);
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("offscreen"));
+    m_versionProbe->setProcessEnvironment(environment);
+    connect(m_versionProbe, &QProcess::finished, this, [this] {
+        // `nook --version` prints "nook 0.4".
+        const auto words = QString::fromUtf8(m_versionProbe->readAllStandardOutput()).simplified().split(' ');
+        m_versionProbe->deleteLater();
+        m_versionProbe = nullptr;
+        m_upgraded = true;
+        m_installedVersion = words.size() == 2 && words.first() == QLatin1String("nook") ? words.last() : QString();
+        Q_EMIT installedVersionChanged();
+    });
+    m_versionProbe->start(nook::executablePath(), {QStringLiteral("--version")});
 }
 void Application::requestWindow() {
     Q_EMIT windowRequested();
 }
 namespace nook {
+QString executablePath() {
+    static const QString path = QCoreApplication::applicationFilePath();
+    return path;
+}
+bool executableReplaced() {
+    // pacman installs a new file over the old name; the kernel then marks our link "(deleted)".
+    char target[4096];
+    const auto length = ::readlink("/proc/self/exe", target, sizeof target - 1);
+    return length > 0 && QByteArray(target, length).endsWith(" (deleted)");
+}
 void syncAutostart(bool enabled) {
     if (customProfile())
         return;

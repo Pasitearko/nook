@@ -55,10 +55,10 @@
 
 ## 下载与安装
 
-在 [Releases](https://github.com/Pasitearko/nook/releases/latest) 下载 `nook-0.3-1-x86_64.pkg.tar.zst`，然后运行：
+在 [Releases](https://github.com/Pasitearko/nook/releases/latest) 下载 `nook-0.3.1-1-x86_64.pkg.tar.zst`，然后运行：
 
 ```bash
-sudo pacman -U ./nook-0.3-1-x86_64.pkg.tar.zst
+sudo pacman -U ./nook-0.3.1-1-x86_64.pkg.tar.zst
 nook            # 文件管理器
 nook-archive    # nook解压缩
 ```
@@ -68,6 +68,8 @@ nook-archive    # nook解压缩
 ```bash
 sudo pacman -S --needed poppler ffmpeg
 ```
+
+升级：装好新包后，在正在使用的 nook 里打开 设置 →“关于应用”，点“重启”即可换成新版本，所有窗口和标签页会原样恢复（0.3.1 起提供；更早的版本需先 `pkill -x nook` 再重新打开）。后台常驻且没有窗口时，nook 会自行切换到新版本。
 
 ### 设为默认（可选）
 
