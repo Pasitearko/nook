@@ -436,3 +436,27 @@ Q1～Q8 回答后重新计算问题依赖，不一次猜定所有细节。后续
 - **转换格式**：工具栏“转换格式…”打开压缩参数窗的转换模式（不显示项目列表和“删除源文件”）；旧编码 ZIP 默认转换为 ZIP，文件名按当前选择的编码读取并存为 UTF-8。加密的源压缩包沿用本次会话的密码。
 - **批量**：添加、拖入多个文件和文件夹一次完成；任务照常排队，可在任务抽屉查看。
 - **测试**：`archive` 覆盖四种可修改格式的增删改、加密 7z、拒绝修改时原文件不变、转换保持文件名并可加密；`archive-app` 覆盖主窗口删除确认、重命名、添加与同名询问、打开文件后写回／不写回、关窗时的未写回提示、只读压缩包另存为、拖出导出、转换窗口与旧编码 ZIP 转换、拒绝覆盖原文件。
+
+## 21. 第 6 阶段：关联与验收（进行中，尚未提交）
+
+本阶段的决策（已由用户确认）：
+
+- **Q40 关联范围**：能打开的全部类型都接管，包括 ISO、deb/rpm、jar/apk、dmg；不接管 exe、办公文档、epub、虚拟磁盘映像。
+- **Q41 入口**：空窗口顶部显示可关闭的横幅（带“不再提示”），设置页常驻按钮并显示当前默认程序；点击后先确认，写入 `~/.config/mimeapps.list` 前备份，设置页可“恢复之前的默认”。
+- **Q42 本机**：不替用户改本机关联；用户安装 0.1-16（`makepkg -si`）后自己在设置里点按钮。
+- **Q43 验收**：对比脚本（File Roller 用 `GDK_BACKEND=broadway` + `gtk4-broadwayd` 无界面运行），加验收清单 `docs/ARCHIVE-ACCEPTANCE.md`，加需在真实桌面手动确认的项目；小差距本阶段补，大差距列出再问。
+
+已完成：
+
+- `packaging/local.nook.archive.desktop` 的 MimeType 扩充为 52 个名称（去掉别名后 39 种），补上了此前漏掉的规范名 `application/vnd.efi.iso`（ISO）和 `application/java-archive`（jar）。
+- `archivenames.cpp`：识别 .tar.lz、.tlz、.lz、.tar.Z、.taz、.Z、.gtar、.arj、.dmg、.war、.ear、.udeb、.ar、.squashfs、.sv4cpio、.sv4crc。
+- `archive_test` 新增 `readsEveryClaimedFormat`：用样本验证 cpio、ISO、xar、ar、deb、tar.Z、tar.lz、tar.lz4、tar.lzma、apk、jar、gtar、wim，以及 .Z、.lz、.lz4、.lzma、.ps.gz 单文件都能列出和解压，并且系统识别出的类型都在声明的类型里。没有样本、未验证的格式：rpm、cab、lha、arj、dmg、squashfs、sv4crc。
+- `src/archive/app/defaultapps.{h,cpp}`（GIO）：负责状态（unavailable／none／some／all）、当前默认程序名、设为默认（先备份并记录原默认到 `~/.config/nook/archive-defaults.json`）和恢复（只恢复仍归 nook解压缩 的类型，原本无人选择的类型清除关联）。已接入 `ArchiveApp.defaults`，新增偏好项 `defaultBannerDismissed`。
+- `tests/archive_defaults_test.cpp`（ctest 名 `archive-defaults`，独立进程，使用隔离的 XDG 目录）：覆盖未安装、接管、备份、用户中途改动后的恢复，已通过。
+
+接下来：
+
+1. 界面：新建 `qml/ArchiveDefaultDialog.qml`（确认框，列出类型和当前默认程序），加入 CMake 的 NookArchive QML 列表；`ArchiveMain` 空状态顶部的横幅；`ArchiveSettings` 增加“默认压缩软件”一节（状态、设为默认…、恢复之前的默认），并通过信号请主窗口打开确认框；窗口激活和打开设置时调用 `defaults.refresh()`；在 archive-app 测试里补上横幅和设置项。
+2. PKGBUILD：核对依赖（gio-unix 属于 glib2），把 pkgrel 升到 16。注意工作区里另有撤销功能的改动也碰了 PKGBUILD，要先和那边协调。
+3. 验收：写对比脚本（建议放 `tools/archive-acceptance.py`），覆盖大包、几万个小文件、坏包、攻击样本，比较结果和耗时；写 `docs/ARCHIVE-ACCEPTANCE.md`。
+4. 跑全部 ctest，更新 README 和本节，提交 nook 0.1-16。只暂存第 6 阶段自己的文件；CMakeLists.txt 里 undorecord 那一处不是本阶段的。

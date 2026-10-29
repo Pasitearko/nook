@@ -103,6 +103,8 @@ Rectangle {
     signal blankContextRequested(var model, real x, real y)
     signal focused()
     signal hovered(var entry)
+    // View delegates survive removal in the reuse pool. Hover belongs only to a live row.
+    property Item hoverOwner: null
     signal springRequested(string uri)
     color: theme.pane
     radius: 10
@@ -595,7 +597,9 @@ Rectangle {
             // Highlights live in the view's contentItem, whose parent is the view itself.
             readonly property var view: parent ? parent.parent : null
             readonly property Item target: view ? view.currentItem : null
-            readonly property bool shown: !!target && target.selected === true && view.currentIndex === pane.currentRow
+            readonly property bool shown: !!target && target.live && target.selected === true && view.currentIndex >= 0 && view.currentIndex < directoryModel.count && view.currentIndex === pane.currentRow
+            // Retirement is immediate; ordinary selection changes still glide/fade.
+            visible: !!target && target.live
             readonly property real inset: pane.gridMode ? 4 : 1
             x: target ? target.x + inset : 0
             y: target ? target.y + inset : 0
@@ -629,8 +633,19 @@ Rectangle {
             required property bool selected
             required property double bytes
             required property bool hiddenItem
-            readonly property bool current: pane.currentRow === index
-            readonly property bool dropTarget: pane.dropRow === index
+            property bool removing: false
+            property bool pooled: false
+            readonly property bool live: !removing && !pooled && index >= 0
+            readonly property bool hovered: live && mouse.containsMouse && !pane.covered
+            enabled: live
+            function clearHover() {
+                if (pane.hoverOwner === item) { pane.hoverOwner = null; pane.hovered(({})) }
+            }
+            onLiveChanged: if (!live) clearHover()
+            onHoveredChanged: if (!hovered) clearHover()
+            Component.onDestruction: clearHover()
+            readonly property bool current: live && pane.currentRow === index
+            readonly property bool dropTarget: live && pane.dropRow === index
             // Hidden entries read as "ghosted", like Windows: dimmed icon and text, same layout.
             readonly property real ghost: hiddenItem ? 0.5 : 1
             objectName: "fileEntry"
@@ -640,7 +655,7 @@ Rectangle {
             // other folders mid-drag, which recycles or destroys the row that started it.
             DragHandler {
                 id: dragHandler; target: null; acceptedButtons: Qt.LeftButton
-                enabled: !pane.covered && !pane.pickMode
+                enabled: item.live && !pane.covered && !pane.pickMode
                 onActiveChanged: {
                     if (active && pane.host)
                         Qt.callLater(pane.host.startFileDrag, directoryModel.selectedUris.slice(), item.iconName)
@@ -649,7 +664,15 @@ Rectangle {
             // Pooled rows may come back mid-fade from a remove transition, and must take their
             // new row's hover/selection state at once instead of fading from the old row's.
             property bool settled: true
-            function recycle() { opacity = 1; scale = 1; settled = false; Qt.callLater(() => item.settled = true) }
+            function recycle() {
+                clearHover()
+                opacity = 1; scale = 1; removing = false; pooled = false
+                settled = false; Qt.callLater(() => item.settled = true)
+            }
+            ListView.onRemove: { removing = true; clearHover() }
+            GridView.onRemove: { removing = true; clearHover() }
+            ListView.onPooled: { pooled = true; clearHover() }
+            GridView.onPooled: { pooled = true; clearHover() }
             ListView.onReused: recycle()
             GridView.onReused: recycle()
             // Each state is its own constant-colour layer and only its opacity animates.
@@ -660,7 +683,8 @@ Rectangle {
                 Rectangle {
                     anchors.fill: parent; radius: 6
                     color: pane.theme.hover
-                    opacity: mouse.containsMouse && !item.dropTarget && !(item.selected && !item.current) ? 1 : 0
+                    visible: item.live
+                    opacity: item.hovered && !item.dropTarget && !(item.selected && !item.current) ? 1 : 0
                     Behavior on opacity { enabled: pane.animated && item.settled; NumberAnimation { duration: 90 } }
                 }
                 // The current selected row is painted by the sliding highlight; this covers the others.
@@ -670,7 +694,7 @@ Rectangle {
                     border.width: 1; border.color: pane.theme.selectionBorder
                     // Selection changes apply instantly (as in Windows): fading a whole list in on
                     // Select All reads as a flash. Only single-item motion (the glide) animates.
-                    opacity: item.selected && !item.current && !item.dropTarget ? 1 : 0
+                    opacity: item.live && item.selected && !item.current && !item.dropTarget ? 1 : 0
                 }
                 Rectangle {
                     anchors.fill: parent; radius: 6
@@ -680,8 +704,10 @@ Rectangle {
                 }
             }
             Spotlight {
+                objectName: "fileEntrySpotlight"
+                visible: item.live && supported && opacity > 0.01
                 anchors.fill: parent; anchors.margins: pane.gridMode ? 4 : 1
-                active: pane.animated && mouse.containsMouse && !dragHandler.active && !item.dropTarget
+                active: pane.animated && item.hovered && !dragHandler.active && !item.dropTarget
                 center: Qt.point(mouse.mouseX - (pane.gridMode ? 4 : 1), mouse.mouseY - (pane.gridMode ? 4 : 1))
                 radius: pane.gridMode ? 130 : 190
                 strength: item.selected ? 0.3 : 0.42
@@ -749,10 +775,10 @@ Rectangle {
                     if (event.button === Qt.RightButton) { let p = mapToItem(pane, event.x, event.y); pane.contextRequested(directoryModel, p.x, p.y) }
                 }
                 onDoubleClicked: event => { if (event.button === Qt.LeftButton) pane.activated(directoryModel.entry(item.index)) }
-                onEntered: pane.hovered(directoryModel.entry(item.index))
-                onExited: pane.hovered(({}))
+                onEntered: if (item.live) { pane.hoverOwner = item; pane.hovered(directoryModel.entry(item.index)) }
+                onExited: item.clearHover()
             }
-            NookToolTip { visible: mouse.containsMouse && !dragHandler.active; text: item.fileName + "\n" + item.fullPath; delay: 1000 }
+            NookToolTip { objectName: "fileEntryToolTip"; visible: item.hovered && !dragHandler.active; text: item.fileName + "\n" + item.fullPath; delay: 1000 }
         }
     }
 }

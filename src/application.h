@@ -29,7 +29,6 @@ class AppSettings : public QObject {
   Q_SIGNALS:
     void changed();
     void columnWidthsReset();
-    void recentLocationsChanged();
     void systemDarkChanged();
 
   private:
@@ -51,7 +50,6 @@ class Application : public QObject {
     Q_PROPERTY(bool grid READ grid WRITE setGrid NOTIFY tabsChanged)
     Q_PROPERTY(int activeSide READ activeSide WRITE setActiveSide NOTIFY activePaneChanged)
     Q_PROPERTY(QVariantList places READ places NOTIFY placesChanged)
-    Q_PROPERTY(QVariantList recentLocations READ recentLocations NOTIFY recentLocationsChanged)
     Q_PROPERTY(Operations *operations READ operations CONSTANT)
     Q_PROPERTY(SearchIndex *search READ search CONSTANT)
     Q_PROPERTY(Preview *preview READ preview CONSTANT)
@@ -119,8 +117,6 @@ class Application : public QObject {
     Q_INVOKABLE QString localPath(const QString &uri) const { return uri.startsWith("trash:") ? QStringLiteral("回收站") : nook::localPath(uri); }
     Q_INVOKABLE QString parentUri(const QString &uri) const { return nook::parentUri(uri); }
     Q_INVOKABLE bool nameAvailable(const QString &directoryUri, const QString &name) const;
-    QVariantList recentLocations() const;
-    Q_INVOKABLE void clearRecentLocations();
     Q_INVOKABLE void resetQuickAccess();
     Q_INVOKABLE void refreshPlaces();
     Q_INVOKABLE void activatePlace(const QVariantMap &place);
@@ -154,7 +150,6 @@ class Application : public QObject {
     void tabsChanged();
     void activePaneChanged();
     void placesChanged();
-    void recentLocationsChanged();
     void windowRequested();
     void notice(const QString &message);
     void ntfsBusyChanged();
@@ -165,14 +160,10 @@ class Application : public QObject {
         bool dual = false, grid = false;
     };
     void connectPane(DirectoryModel *pane);
-    void rememberLocation(const QString &uri);
-    void loadRecentLocations();
     QStringList dropSources(const QStringList &uris, const QString &destination) const;
     QList<Tab> m_tabs;
     int m_active = 0, m_side = 0;
     QVariantList m_places;
-    QStringList m_recentLocations;
-    bool m_restoring = true;
     SearchIndex *m_search;
     Operations *m_ops;
     AppSettings *m_settings;

@@ -116,7 +116,7 @@ QString stemOf(const QString &fileName) {
     name.remove(numbered);
     static const QStringList compound{".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz4",
                                       ".tar.lzma", ".tar.lz", ".tar.z", ".tgz", ".tbz2", ".tbz",
-                                      ".txz", ".tzst", ".tlz"};
+                                      ".txz", ".tzst", ".tlz", ".taz"};
     for (const auto &suffix : compound) {
         if (name.endsWith(suffix, Qt::CaseInsensitive) && name.size() > suffix.size())
             return name.chopped(suffix.size());
@@ -248,7 +248,8 @@ const QStringList &archivePatterns() {
         "*.tar.xz", "*.txz", "*.tar.zst", "*.tzst", "*.tar.lz4", "*.tar.lzma", "*.gz", "*.bz2", "*.xz",
         "*.zst",  "*.lzma",  "*.lz4",   "*.iso",  "*.cab",    "*.cpio", "*.deb",     "*.rpm",  "*.xar",
         "*.lzh",  "*.lha",   "*.wim",   "*.jar",  "*.apk",    "*.001",  "*.r00",     "*.z01",  "*.zipx",
-        "*.epub"};
+        "*.epub", "*.tar.lz", "*.tlz",  "*.lz",   "*.tar.z",  "*.taz",  "*.z",       "*.gtar", "*.arj",
+        "*.dmg",  "*.war",   "*.ear",   "*.udeb", "*.ar",     "*.squashfs", "*.sv4cpio", "*.sv4crc"};
     return patterns;
 }
 

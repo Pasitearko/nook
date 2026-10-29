@@ -30,7 +30,7 @@ constexpr int RecentLimit = 12;
 const QVariantMap PrefDefaults{{"concurrency", 1},       {"conflict", "ask"},      {"subfolder", "smart"},
                                 {"notify", true},         {"autoTryPasswords", false}, {"openAfter", false},
                                 {"format", "zip"},        {"levelStep", 3},          {"testAfter", false},
-                                {"encryptNames", true},   {"zipCrypto", false}};
+                                {"encryptNames", true},   {"zipCrypto", false},      {"defaultBannerDismissed", false}};
 
 // What each format calls its suffix, in the order the compression window offers them.
 const QList<QPair<QString, QString>> Formats{{"zip", ".zip"},         {"7z", ".7z"},          {"tar.gz", ".tar.gz"},

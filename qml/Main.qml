@@ -652,7 +652,6 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.preferredHeight: implicitHeight
                         Layout.maximumHeight: implicitHeight
-                        onActivate: uri => { searchBox.clear(); app.navigate(uri) }
                         onShowErrors: errorsDialog.open()
                     }
                 }
@@ -760,6 +759,7 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+A"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: currentModel().selectAll() }
     Shortcut { sequence: "Ctrl+C"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: app.copy(false, currentModel()) }
     Shortcut { sequence: "Ctrl+X"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: app.copy(true, currentModel()) }
+    Shortcut { sequence: "Ctrl+Z"; enabled: app.operations.canUndo && !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText; autoRepeat: false; onActivated: app.operations.undo() }
     Shortcut { sequence: "Ctrl+V"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: app.paste() }
     Shortcut { sequence: "Ctrl+Shift+C"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive) && currentModel().selectedCount > 0; onActivated: app.copyPaths(currentModel().selectedUris) }
     Shortcut { sequence: "F2"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive) && currentModel().selectedCount === 1; onActivated: window.openInput("rename") }
@@ -816,6 +816,8 @@ ApplicationWindow {
     NookMenu {
         id: blankMenu
         objectName: "blankContextMenu"
+        NookMenuItem { objectName: "undoFileOperationMenuItem"; text: app.operations.undoText; iconName: "undo"; shortcutText: "Ctrl Z"; enabled: app.operations.canUndo; onTriggered: app.operations.undo() }
+        MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
         NookMenu {
             title: "新建"; objectName: "createSubmenu"
             enabled: !window.searching && contextModel && !contextModel.uri.startsWith("trash:")

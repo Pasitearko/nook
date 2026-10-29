@@ -1,6 +1,9 @@
 #include "operations.h"
 #include "files.h"
 #include <QCoreApplication>
+#include <QFile>
+#include <QFileInfo>
+#include <QUrl>
 #include <QUuid>
 #include <algorithm>
 #include <cstdlib>
@@ -18,6 +21,35 @@ struct FileRef {
         return p;
     }
 };
+// Search results/API callers can select both a folder and its descendants.
+// Operate only on the outermost selections, independent of input order.
+QStringList topLevelSelections(const QStringList &uris, GCancellable *cancel) {
+    QStringList directories, result;
+    for (const auto &uri : uris) {
+        if (g_cancellable_is_cancelled(cancel))
+            return {};
+        FileRef file(g_file_new_for_uri(uri.toUtf8().constData()));
+        if (g_file_query_file_type(file, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, cancel) ==
+            G_FILE_TYPE_DIRECTORY)
+            directories.append(uri);
+    }
+    for (const auto &uri : uris) {
+        if (g_cancellable_is_cancelled(cancel))
+            return {};
+        FileRef file(g_file_new_for_uri(uri.toUtf8().constData()));
+        bool nested = false;
+        for (const auto &directory : directories) {
+            FileRef parent(g_file_new_for_uri(directory.toUtf8().constData()));
+            if (g_file_has_prefix(file, parent)) {
+                nested = true;
+                break;
+            }
+        }
+        if (!nested && !result.contains(uri))
+            result.append(uri);
+    }
+    return result;
+}
 QString fileLabel(GFile *file) {
     char *name = g_file_get_parse_name(file);
     QString result = QString::fromUtf8(name);
@@ -51,6 +83,29 @@ Operations::Operations(QObject *parent) : QObject(parent) {
     m_errorNotifyTimer.setSingleShot(true);
     m_errorNotifyTimer.setInterval(100);
     connect(&m_errorNotifyTimer, &QTimer::timeout, this, &Operations::errorsChanged);
+}
+QVariantList Operations::undoHistory() const {
+    QVariantList result;
+    for (const auto &record : m_undo)
+        result.append(QVariantMap{{"title", record.title},
+                                  {"detail", record.detail},
+                                  {"kind", record.kind},
+                                  {"count", record.items.size()}});
+    return result;
+}
+QString Operations::undoText() const {
+    return m_undo.isEmpty() ? QStringLiteral("撤销") : QStringLiteral("撤销") + m_undo.first().title;
+}
+void Operations::undo() {
+    if (canUndo())
+        run("undo", {});
+}
+void Operations::clearUndoHistory() {
+    if (m_busy || m_undo.isEmpty())
+        return;
+    m_undo.clear();
+    Q_EMIT undoChanged();
+    Q_EMIT changed();
 }
 Operations::~Operations() {
     cancel();
@@ -137,7 +192,8 @@ bool Operations::removeTree(GFile *file, GError **error) {
     return g_file_delete(file, m_cancel, error);
 }
 bool Operations::transfer(GFile *source, GFile *destination, bool move, GError **error,
-                          const TransferProgress *progress) {
+                          const TransferProgress *progress, QString *actualUri, bool *replaced,
+                          bool allowConflict) {
     if (m_cancelled)
         return false;
     if (g_file_equal(source, destination)) {
@@ -165,6 +221,10 @@ bool Operations::transfer(GFile *source, GFile *destination, bool move, GError *
     FileRef target(G_FILE(g_object_ref(destination)));
     bool overwrite = false;
     if (g_file_query_exists(target, m_cancel)) {
+        if (!allowConflict) {
+            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_EXISTS, "原位置已被占用，未覆盖现有文件");
+            return false;
+        }
         int choice = conflict(fileLabel(target),
                               directory || g_file_query_file_type(target, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
                                                                   m_cancel) == G_FILE_TYPE_DIRECTORY);
@@ -192,6 +252,13 @@ bool Operations::transfer(GFile *source, GFile *destination, bool move, GError *
             g_free(base);
         }
     }
+    if (actualUri) {
+        char *uri = g_file_get_uri(target);
+        *actualUri = QString::fromUtf8(uri);
+        g_free(uri);
+    }
+    if (replaced)
+        *replaced = overwrite;
     auto flags =
         static_cast<GFileCopyFlags>(G_FILE_COPY_NOFOLLOW_SYMLINKS | (overwrite ? G_FILE_COPY_OVERWRITE : 0));
     // Nested files have no known weight within their selected directory. Do
@@ -243,7 +310,7 @@ bool Operations::transfer(GFile *source, GFile *destination, bool move, GError *
             FileRef child(g_file_enumerator_get_child(iter, childInfo));
             FileRef dest(g_file_get_child(target, g_file_info_get_name(childInfo)));
             g_object_unref(childInfo);
-            if (!transfer(child, dest, false, error)) {
+            if (!transfer(child, dest, false, error, nullptr, nullptr, nullptr, allowConflict)) {
                 success = false;
                 break;
             }
@@ -280,6 +347,10 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
                      const QString &name) {
     if (m_busy)
         return;
+    const QStringList supported{"copy",  "move",   "rename",  "mkdir", "touch",
+                                "trash", "delete", "restore", "undo"};
+    if (!supported.contains(kind) || (kind == "undo" && m_undo.isEmpty()))
+        return;
     if ((kind == "mkdir" || kind == "touch" || kind == "rename") && !nook::validName(name)) {
         m_errors = {QStringLiteral("名称无效：不能包含 /、空字符，或超过文件系统名称长度")};
         Q_EMIT errorsChanged();
@@ -297,31 +368,113 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
     m_status = QStringLiteral("正在准备…");
     m_kind = kind;
     m_completedItems = 0;
-    m_totalItems = kind == "mkdir" || kind == "touch" ? 1 : int(uris.size());
+    m_totalItems = kind == "undo"                       ? m_undo.first().items.size()
+                   : kind == "mkdir" || kind == "touch" ? 1
+                                                        : int(uris.size());
     m_progress = -1;
     m_lastReport = {};
     Q_EMIT changed();
-    m_thread = std::thread([this, kind, uris, destination, name, total = m_totalItems] {
+    const auto undoRecord = kind == "undo" ? m_undo.first() : nook::UndoRecord{};
+    m_thread = std::thread([this, kind, uris, destination, name, total = m_totalItems, undoRecord]() mutable {
+        const auto sources = kind == "move" || kind == "trash" ? topLevelSelections(uris, m_cancel) : uris;
+        if (sources.size() != uris.size()) {
+            total = sources.size();
+            QMetaObject::invokeMethod(
+                this,
+                [this, total] {
+                    m_totalItems = total;
+                    Q_EMIT changed();
+                },
+                Qt::QueuedConnection);
+        }
         QStringList failures;
-        int completed = 0, skipped = 0;
+        int completed = 0, skipped = 0, untracked = 0;
+        nook::UndoRecord journal;
+        journal.kind = kind;
+        auto remaining = undoRecord;
+        auto remember = [&](nook::UndoItem item) {
+            if (item.fingerprint.isEmpty()) {
+                ++untracked;
+                return;
+            }
+            journal.items.append(item);
+        };
         auto record = [&](const QString &uri, GError *error) {
             if (error) {
-                const auto failure = nook::localPath(uri) + ": " + QString::fromUtf8(error->message);
+                const auto label = QUrl(uri).isLocalFile() ? nook::localPath(uri) : uri;
+                const auto failure = label + ": " + QString::fromUtf8(error->message);
                 failures.append(failure);
                 g_error_free(error);
                 // Queue only the new error, never a growing implicitly-shared list.
                 // The first error is immediate; later UI rebuilds are coalesced.
-                QMetaObject::invokeMethod(this, [this, failure] {
-                    const bool first = m_errors.isEmpty();
-                    m_errors.append(failure);
-                    if (first)
-                        Q_EMIT errorsChanged();
-                    else if (!m_errorNotifyTimer.isActive())
-                        m_errorNotifyTimer.start();
-                }, Qt::QueuedConnection);
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, failure] {
+                        const bool first = m_errors.isEmpty();
+                        m_errors.append(failure);
+                        if (first)
+                            Q_EMIT errorsChanged();
+                        else if (!m_errorNotifyTimer.isActive())
+                            m_errorNotifyTimer.start();
+                    },
+                    Qt::QueuedConnection);
             }
         };
-        if (kind == "mkdir" || kind == "touch") {
+        if (kind == "undo") {
+            // Preflight the entire batch before touching anything. No conflict
+            // dialog on undo: replacing unrelated data is never an option.
+            bool safe = true;
+            for (const auto &item : remaining.items) {
+                if (m_cancelled) {
+                    safe = false;
+                    break;
+                }
+                if (nook::undoParentIdentity(item.current) != item.currentParent ||
+                    nook::undoFingerprint(item.current, m_cancel) != item.fingerprint ||
+                    (!item.original.isEmpty() &&
+                     (nook::undoParentIdentity(item.original) != item.originalParent ||
+                      nook::undoPathExists(item.original)))) {
+                    GError *error = nullptr;
+                    g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                                        "无法安全撤销：文件已变化、已不存在，或原位置已被占用。未覆盖任何文件"
+                                        "；可处理后重试，或清空撤销历史。");
+                    record(item.current, error);
+                    safe = false;
+                    break;
+                }
+            }
+            while (safe && !remaining.items.isEmpty() && !m_cancelled) {
+                const auto item = remaining.items.last();
+                FileRef source(g_file_new_for_path(QFile::encodeName(item.current).constData()));
+                GError *error = nullptr;
+                bool ok;
+                report(QStringLiteral("正在撤销 · %1").arg(QFileInfo(item.current).fileName()));
+                if (item.original.isEmpty())
+                    ok = g_file_trash(source, m_cancel, &error);
+                else {
+                    // GIO's check + rename is not atomic no-replace on Linux.
+                    // Never fall back to copy/delete during an undo.
+                    ok = nook::undoMove(item, &error);
+                }
+                if (ok) {
+                    if (!item.trashInfo.isEmpty())
+                        QFile::remove(item.trashInfo);
+                    remaining.items.removeLast();
+                    ++completed;
+                    QMetaObject::invokeMethod(
+                        this,
+                        [this, completed, total] {
+                            m_completedItems = completed;
+                            m_progress = activeProgress(completed, total);
+                            Q_EMIT changed();
+                        },
+                        Qt::QueuedConnection);
+                }
+                record(item.current, error);
+                if (!ok)
+                    break;
+            }
+        } else if (kind == "mkdir" || kind == "touch") {
             GError *error = nullptr;
             FileRef child(g_file_new_for_uri(nook::childUri(destination, name).toUtf8().constData()));
             bool ok = false;
@@ -331,12 +484,13 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
                 ok = g_output_stream_close(G_OUTPUT_STREAM(stream), m_cancel, &error);
                 g_object_unref(stream);
             }
-            if (ok)
+            if (ok) {
                 ++completed;
-            else
+                remember(nook::undoItem(nook::undoLocalPath(nook::childUri(destination, name)), {}, nullptr));
+            } else
                 record(destination, error);
         } else
-            for (const auto &uri : uris) {
+            for (const auto &uri : sources) {
                 if (m_cancelled)
                     break;
                 FileRef source(g_file_new_for_uri(uri.toUtf8().constData()));
@@ -352,9 +506,14 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
                     },
                     Qt::QueuedConnection);
                 report(QStringLiteral("正在处理 %1").arg(fileLabel(source)));
-                if (kind == "trash")
+                QString actualUri;
+                bool replaced = false;
+                const auto localSource = nook::undoLocalPath(uri);
+                QByteArray beforeTrash;
+                if (kind == "trash") {
+                    beforeTrash = nook::undoFingerprint(localSource, m_cancel);
                     ok = g_file_trash(source, m_cancel, &error);
-                else if (kind == "delete")
+                } else if (kind == "delete")
                     ok = removeTree(source, &error);
                 else if (kind == "restore") {
                     GFileInfo *info = g_file_query_info(
@@ -363,7 +522,7 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
                         const char *path = g_file_info_get_attribute_byte_string(info, "trash::orig-path");
                         if (path) {
                             FileRef target(g_file_new_for_path(path));
-                            ok = transfer(source, target, true, &error, &progress);
+                            ok = transfer(source, target, true, &error, &progress, &actualUri, &replaced);
                         } else
                             g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                                                 "无法确定回收站项目的原始位置");
@@ -376,10 +535,19 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
                     QByteArray raw = kind == "rename" ? name.toUtf8() : QByteArray(base);
                     FileRef target(g_file_get_child(parent, raw.constData()));
                     g_free(base);
-                    ok = transfer(source, target, kind == "move" || kind == "rename", &error, &progress);
+                    ok = transfer(source, target, kind == "move" || kind == "rename", &error, &progress,
+                                  &actualUri, &replaced);
                 }
                 if (ok) {
                     ++completed;
+                    if (kind == "trash")
+                        remember(nook::trashedUndoItem(localSource, beforeTrash, nullptr));
+                    else if (kind != "delete" && kind != "restore" && !replaced && !localSource.isEmpty() &&
+                             !nook::undoLocalPath(actualUri).isEmpty())
+                        remember(nook::undoItem(nook::undoLocalPath(actualUri),
+                                                kind == "copy" ? QString{} : localSource, nullptr));
+                    else
+                        ++untracked;
                     QMetaObject::invokeMethod(
                         this,
                         [this, completed, total] {
@@ -392,10 +560,34 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
                     ++skipped;
                 record(uri, error);
             }
+        if (!journal.items.isEmpty()) {
+            const QMap<QString, QString> labels{{"copy", "粘贴"},        {"move", "移动"},
+                                                {"rename", "重命名"},    {"trash", "删除"},
+                                                {"mkdir", "新建文件夹"}, {"touch", "新建文件"}};
+            const auto &item = journal.items.first();
+            const auto labelPath = item.original.isEmpty() ? item.current : item.original;
+            const auto title = QFileInfo(labelPath).fileName();
+            journal.title = labels.value(kind, kind) + QStringLiteral("“%1”").arg(title);
+            if (journal.items.size() > 1)
+                journal.title += QStringLiteral("等 %1 项").arg(journal.items.size());
+            journal.detail = item.original.isEmpty() ? item.current
+                                                     : item.original + QStringLiteral("\n→ ") + item.current;
+        }
         bool cancelled = m_cancelled;
         QMetaObject::invokeMethod(
             this,
-            [this, failures, completed, skipped, cancelled, total] {
+            [this, failures, completed, skipped, cancelled, total, journal, remaining, kind, untracked] {
+                if (kind == "undo") {
+                    if (remaining.items.isEmpty())
+                        m_undo.removeFirst();
+                    else
+                        m_undo.first() = remaining;
+                } else if (!journal.items.isEmpty()) {
+                    m_undo.prepend(journal);
+                    if (m_undo.size() > 5)
+                        m_undo.removeLast();
+                }
+                Q_EMIT undoChanged();
                 m_busy = false;
                 m_waiting = false;
                 m_errorNotifyTimer.stop();
@@ -408,6 +600,8 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
                                .arg(completed)
                                .arg(skipped)
                                .arg(failures.size());
+                if (untracked > 0)
+                    m_status += QStringLiteral(" · %1 项不支持安全撤销").arg(untracked);
                 Q_EMIT changed();
                 Q_EMIT conflictChanged();
                 Q_EMIT finished();

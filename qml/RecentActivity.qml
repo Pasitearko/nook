@@ -6,15 +6,14 @@ Rectangle {
     id: activity
     required property var controller
     required property var host
-    signal activate(string uri)
     signal showErrors()
     readonly property var theme: host.theme
     readonly property bool taskActive: controller.operations.busy
-    readonly property var locations: controller.recentLocations
-    onLocationsChanged: if (recentScroll.contentItem) recentScroll.contentItem.contentY = 0
+    readonly property var history: controller.operations.undoHistory
+    onHistoryChanged: if (recentScroll.contentItem) recentScroll.contentItem.contentY = 0
     readonly property var task: controller.operations
     property real maximumRecentHeight: 260
-    visible: taskActive || locations.length > 0
+    visible: taskActive || history.length > 0
     implicitHeight: content.implicitHeight + 24
     radius: 10
     color: theme.sunken
@@ -28,24 +27,24 @@ Rectangle {
             Layout.fillWidth: true; spacing: 8
             Icon { name: activity.taskActive ? "copy" : "undo"; tint: activity.theme.icon; Layout.preferredWidth: 15; Layout.preferredHeight: 15 }
             Text {
-                text: activity.taskActive ? ({copy: "正在复制", move: "正在移动", rename: "正在重命名", delete: "正在永久删除", trash: "正在移入回收站", restore: "正在恢复"}[activity.task.kind] || "正在处理文件") : "最近位置"
+                text: activity.taskActive ? ({copy: "正在复制", move: "正在移动", rename: "正在重命名", delete: "正在永久删除", trash: "正在移入回收站", restore: "正在恢复", undo: "正在撤销"}[activity.task.kind] || "正在处理文件") : "撤销历史"
                 color: activity.theme.ink; font.pixelSize: 13; font.weight: Font.Medium
                 Layout.fillWidth: true; elide: Text.ElideRight
             }
             ActionButton {
-                objectName: "clearRecentLocationsButton"
-                visible: !activity.taskActive
-                iconName: "trash"; hint: "清空最近位置"
+                objectName: "clearUndoHistoryButton"
+                visible: !activity.taskActive && activity.history.length > 0
+                iconName: "close"; hint: "清空撤销记录（不删除文件）"
                 implicitWidth: 26; implicitHeight: 26
                 leftPadding: 5; rightPadding: 5; topPadding: 5; bottomPadding: 5
                 foreground: activity.theme.muted
-                onClicked: activity.controller.clearRecentLocations()
+                onClicked: activity.task.clearUndoHistory()
             }
         }
         ScrollView {
             id: recentScroll
-            objectName: "recentLocationsScroll"
-            visible: !activity.taskActive
+            objectName: "undoHistoryScroll"
+            visible: !activity.taskActive && activity.history.length > 0
             Layout.fillWidth: true
             Layout.preferredHeight: Math.min(recentRows.implicitHeight, Math.max(32, activity.maximumRecentHeight - 57))
             contentWidth: availableWidth
@@ -56,24 +55,33 @@ Rectangle {
                 width: recentScroll.availableWidth
                 spacing: 7
                 Repeater {
-                    model: activity.taskActive ? [] : activity.locations
+                    model: activity.taskActive ? [] : activity.history
                     delegate: ActionButton {
                         required property var modelData
-                        objectName: "recentLocationRow"
+                        required property int index
+                        objectName: "undoHistoryRow"
                         width: recentRows.width; height: 32
                         leftPadding: 4; rightPadding: 4
-                        iconName: "folder"; text: modelData.title
-                        hint: modelData.path
+                        iconName: "undo"; text: modelData.title
+                        enabled: index === 0 && activity.task.canUndo
+                        hint: (index === 0 ? "点击撤销 · " : "请先撤销较新的操作 · ") + modelData.detail
                         foreground: activity.theme.inkSoft
                         contentItem: RowLayout {
                             spacing: 8
-                            Icon { name: "folder"; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
-                            Text { text: modelData.title; color: activity.theme.inkSoft; font.pixelSize: 13; Layout.fillWidth: true; elide: Text.ElideRight }
+                            Icon { name: "undo"; tint: index === 0 ? activity.theme.accent : activity.theme.muted; Layout.preferredWidth: 16; Layout.preferredHeight: 16 }
+                            Text { text: modelData.title; color: index === 0 ? activity.theme.inkSoft : activity.theme.muted; font.pixelSize: 13; Layout.fillWidth: true; elide: Text.ElideRight }
                         }
-                        onClicked: activity.activate(modelData.uri)
+                        onClicked: activity.task.undo()
                     }
                 }
             }
+        }
+        Text {
+            objectName: "undoHistoryHint"
+            visible: !activity.taskActive
+            text: "最近 5 次 · 从上往下依次撤销"
+            color: activity.theme.muted; font.pixelSize: 11
+            Layout.fillWidth: true; wrapMode: Text.Wrap
         }
         Text {
             objectName: "sidebarTaskStatus"

@@ -1,7 +1,9 @@
 #pragma once
+#include "undorecord.h"
 #include <QObject>
 #include <QStringList>
 #include <QTimer>
+#include <QVariantList>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -12,6 +14,9 @@
 class Operations : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
+    Q_PROPERTY(QVariantList undoHistory READ undoHistory NOTIFY undoChanged)
+    Q_PROPERTY(QString undoText READ undoText NOTIFY undoChanged)
+    Q_PROPERTY(bool canUndo READ canUndo NOTIFY changed)
     Q_PROPERTY(QString status READ status NOTIFY changed)
     Q_PROPERTY(QStringList errors READ errors NOTIFY errorsChanged)
     Q_PROPERTY(QString kind READ kind NOTIFY changed)
@@ -57,10 +62,18 @@ class Operations : public QObject {
     }
     Q_INVOKABLE void run(const QString &kind, const QStringList &uris, const QString &destination = {},
                          const QString &name = {});
+    QVariantList undoHistory() const;
+    QString undoText() const;
+    bool canUndo() const {
+        return !m_busy && !m_undo.isEmpty();
+    }
+    Q_INVOKABLE void undo();
+    Q_INVOKABLE void clearUndoHistory();
     Q_INVOKABLE void cancel();
     Q_INVOKABLE void resolveConflict(int choice);
   Q_SIGNALS:
     void changed();
+    void undoChanged();
     void errorsChanged();
     void conflictChanged();
     void finished();
@@ -72,9 +85,11 @@ class Operations : public QObject {
         int total;
     };
     bool transfer(GFile *source, GFile *destination, bool move, GError **error,
-                  const TransferProgress *progress = nullptr);
+                  const TransferProgress *progress = nullptr, QString *actualUri = nullptr,
+                  bool *replaced = nullptr, bool allowConflict = true);
     bool removeTree(GFile *file, GError **error);
     void report(QString message, double progress = -1, bool force = false);
+    QVector<nook::UndoRecord> m_undo;
     bool m_busy = false, m_waiting = false, m_conflictFolder = false;
     QString m_status, m_conflictName, m_kind;
     int m_completedItems = 0, m_totalItems = 0;

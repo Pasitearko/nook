@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Concurrent Network DBus Test ShaderTools)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
+pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0 gio-unix-2.0)
 pkg_check_modules(ICU REQUIRED IMPORTED_TARGET icu-i18n icu-uc)
 pkg_check_modules(LIBARCHIVE REQUIRED IMPORTED_TARGET libarchive)
 pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
@@ -14,7 +14,8 @@ qt_standard_project_setup(REQUIRES 6.8)
 add_library(nook_core STATIC
     src/files.cpp src/files.h src/storage.cpp src/storage.h
     src/directorymodel.cpp src/directorymodel.h
-    src/operations.cpp src/operations.h src/searchindex.cpp src/searchindex.h
+    src/operations.cpp src/operations.h src/undorecord.cpp src/undorecord.h
+    src/searchindex.cpp src/searchindex.h
     src/preview.cpp src/preview.h src/application.cpp src/application.h
     src/fileproperties.cpp src/fileproperties.h
     src/diskmounts.cpp src/diskmounts.h src/ntfs.cpp src/ntfs.h
@@ -78,7 +79,8 @@ set(NOOK_ARCHIVE_APP_SOURCES
     src/archive/app/taskqueue.cpp src/archive/app/taskqueue.h
     src/archive/app/passwordstore.cpp src/archive/app/passwordstore.h
     src/archive/app/notifier.cpp src/archive/app/notifier.h
-    src/archive/app/filesessions.cpp src/archive/app/filesessions.h)
+    src/archive/app/filesessions.cpp src/archive/app/filesessions.h
+    src/archive/app/defaultapps.cpp src/archive/app/defaultapps.h)
 qt_add_executable(nook-archive src/archive/app/main.cpp ${NOOK_ARCHIVE_APP_SOURCES})
 qt_add_qml_module(nook-archive URI NookArchive VERSION 1.0
     QML_FILES ${NOOK_SHARED_QML} qml/ArchiveMain.qml qml/ArchiveList.qml
@@ -109,6 +111,9 @@ if(BUILD_TESTING)
     qt_add_executable(nook-operations-progress-tests tests/operations_progress_test.cpp)
     target_link_libraries(nook-operations-progress-tests PRIVATE nook_core Qt6::Test)
     add_test(NAME operations-progress COMMAND nook-operations-progress-tests)
+    qt_add_executable(nook-undo-tests tests/undo_test.cpp)
+    target_link_libraries(nook-undo-tests PRIVATE nook_core Qt6::Test)
+    add_test(NAME undo COMMAND nook-undo-tests)
     qt_add_executable(nook-ntfs-tests tests/ntfs_test.cpp tests/ntfs_image.h)
     target_link_libraries(nook-ntfs-tests PRIVATE nook_core Qt6::Test)
     add_test(NAME ntfs COMMAND nook-ntfs-tests)
@@ -137,9 +142,16 @@ if(BUILD_TESTING)
     set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
     qt_add_executable(nook-archive-tests tests/archive_test.cpp)
     target_link_libraries(nook-archive-tests PRIVATE nook_archive Qt6::Test PkgConfig::LIBARCHIVE)
+    target_compile_definitions(nook-archive-tests PRIVATE NOOK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_dependencies(nook-archive-tests nook-archive-worker)
     add_test(NAME archive COMMAND nook-archive-tests)
     set_tests_properties(archive PROPERTIES ENVIRONMENT "NOOK_ARCHIVE_WORKER=$<TARGET_FILE:nook-archive-worker>;LANG=zh_CN.UTF-8")
+    # Its own process: the associations it changes live in a fixture set up before GIO starts.
+    qt_add_executable(nook-archive-defaults-tests tests/archive_defaults_test.cpp src/archive/app/defaultapps.cpp src/archive/app/defaultapps.h)
+    target_include_directories(nook-archive-defaults-tests PRIVATE src/archive/app)
+    target_link_libraries(nook-archive-defaults-tests PRIVATE Qt6::Test PkgConfig::GIO)
+    target_compile_definitions(nook-archive-defaults-tests PRIVATE QT_NO_KEYWORDS NOOK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" NOOK_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+    add_test(NAME archive-defaults COMMAND nook-archive-defaults-tests)
     qt_add_executable(nook-archive-app-tests tests/archive_app_test.cpp ${NOOK_ARCHIVE_APP_SOURCES})
     target_include_directories(nook-archive-app-tests PRIVATE src/archive/app)
     target_link_libraries(nook-archive-app-tests PRIVATE nook_core nook_archive Qt6::Test Qt6::QuickControls2 Qt6::DBus PkgConfig::LIBARCHIVE PkgConfig::LIBSECRET)
@@ -164,5 +176,5 @@ install(FILES qml/icons/folder.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hi
 install(FILES qml/icons/archive.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps RENAME nook-archive.svg)
 install(FILES LICENSE THIRD_PARTY.md DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/nook)
 install(FILES README.md LICENSE THIRD_PARTY.md packaging/niri.example.kdl DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook)
-install(FILES docs/VALIDATION.md docs/AUTOMOUNT-DESIGN.md docs/INPUT-METHOD.md docs/ARCHIVE-DESIGN.md docs/ARCHIVE-WORKER.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook/docs)
+install(FILES docs/VALIDATION.md docs/AUTOMOUNT-DESIGN.md docs/INPUT-METHOD.md docs/ARCHIVE-DESIGN.md docs/ARCHIVE-WORKER.md docs/UNDO.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook/docs)
 install(DIRECTORY docs/screenshots DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook/docs)

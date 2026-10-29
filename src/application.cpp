@@ -50,7 +50,6 @@ QVariantMap AppSettings::values() const {
             {"uiScale", m_store->value("uiScale", 1.0).toDouble()},
             {"startFolder", m_store->value("startFolder", QDir::homePath()).toString()},
             {"hiddenPlaces", list("hiddenPlaces")},
-            {"rememberRecentLocations", flag("rememberRecentLocations", true)},
             {"backgroundIndex", flag("backgroundIndex", true)},
             {"ntfsJournal", flag("ntfsJournal", false)},
             {"chooserGrid", flag("chooserGrid", false)},
@@ -97,13 +96,9 @@ Application::Application(SearchIndex *search, Operations *ops, AppSettings *sett
                          QObject *parent)
     : QObject(parent), m_search(search), m_ops(ops), m_settings(settings), m_preview(this) {
     m_search = search->createSession(this);
-    loadRecentLocations();
-    connect(m_settings, &AppSettings::recentLocationsChanged, this, [this] {
-        loadRecentLocations();
-        Q_EMIT recentLocationsChanged();
-    });
-    if (!settings->values()["rememberRecentLocations"].toBool())
-        clearRecentLocations();
+    // Migrate away from visit tracking; executable undo history stays in memory.
+    settings->store().remove("recentLocations");
+    settings->store().remove("rememberRecentLocations");
     m_saveTimer.setSingleShot(true);
     m_saveTimer.setInterval(800);
     connect(&m_saveTimer, &QTimer::timeout, this, &Application::saveSession);
@@ -151,12 +146,8 @@ Application::Application(SearchIndex *search, Operations *ops, AppSettings *sett
                     refreshPlaces();
                 }
             });
-    connect(m_settings, &AppSettings::changed, this, [this] {
-        if (!m_settings->values()["rememberRecentLocations"].toBool())
-            clearRecentLocations();
-    });
+
     refreshPlaces();
-    m_restoring = false;
 }
 Application::~Application() {
     for (auto *watcher : m_openWatchers) {
@@ -248,77 +239,11 @@ bool Application::dual() const {
 bool Application::grid() const {
     return !m_tabs.isEmpty() && m_tabs[m_active].grid;
 }
-QVariantList Application::recentLocations() const {
-    QVariantList result;
-    for (const auto &uri : m_recentLocations)
-        result.append(QVariantMap{{"uri", uri}, {"title", nook::displayName(uri)},
-                                  {"path", nook::localPath(uri)}});
-    return result;
-}
-void Application::loadRecentLocations() {
-    m_recentLocations.clear();
-    if (!m_settings->values()["rememberRecentLocations"].toBool())
-        return;
-    for (const auto &saved : m_settings->store().value("recentLocations").toStringList()) {
-        const QUrl url(saved);
-        if (!url.isLocalFile() || url.hasQuery() || url.hasFragment())
-            continue;
-        const auto uri = nook::normalizeUri(saved);
-        if (!m_recentLocations.contains(uri))
-            m_recentLocations.append(uri);
-        if (m_recentLocations.size() == 5)
-            break;
-    }
-}
-void Application::clearRecentLocations() {
-    if (m_recentLocations.isEmpty() && !m_settings->store().contains("recentLocations"))
-        return;
-    m_recentLocations.clear();
-    m_settings->store().remove("recentLocations");
-    m_settings->store().sync();
-    Q_EMIT m_settings->recentLocationsChanged();
-}
-void Application::rememberLocation(const QString &uri) {
-    const QUrl url(uri);
-    if (!m_settings->values()["rememberRecentLocations"].toBool() || !url.isLocalFile() ||
-        url.hasQuery() || url.hasFragment())
-        return;
-    const auto normalized = nook::normalizeUri(uri);
-    if (!m_recentLocations.isEmpty() && m_recentLocations.first() == normalized)
-        return;
-    m_recentLocations.removeAll(normalized);
-    m_recentLocations.prepend(normalized);
-    while (m_recentLocations.size() > 5)
-        m_recentLocations.removeLast();
-    m_settings->store().setValue("recentLocations", m_recentLocations);
-    m_settings->store().sync();
-    Q_EMIT m_settings->recentLocationsChanged();
-}
 void Application::connectPane(DirectoryModel *pane) {
-    // Only successful navigations count. Watcher refreshes, sorting and session
-    // restoration must not reshuffle history or repopulate a cleared list.
-    const auto pending = std::make_shared<QString>();
-    connect(pane, &DirectoryModel::locationChanged, this, [this, pane, pending] {
-        *pending = !m_restoring && m_settings->values()["rememberRecentLocations"].toBool()
-                       ? pane->uri() : QString{};
+    connect(pane, &DirectoryModel::locationChanged, this, [this] {
         Q_EMIT tabsChanged();
         Q_EMIT activePaneChanged();
         m_saveTimer.start();
-    });
-    connect(pane, &DirectoryModel::statusChanged, this, [this, pane, pending] {
-        if (pane->loading() || pending->isEmpty())
-            return;
-        const auto uri = std::exchange(*pending, QString{});
-        if (pane->error().isEmpty() && pane->uri() == uri)
-            rememberLocation(uri);
-    });
-    connect(m_settings, &AppSettings::changed, pane, [this, pending] {
-        if (!m_settings->values()["rememberRecentLocations"].toBool())
-            pending->clear();
-    });
-    connect(this, &Application::recentLocationsChanged, pane, [this, pending] {
-        if (m_recentLocations.isEmpty())
-            pending->clear();
     });
 }
 void Application::addTab(const QString &uri) {

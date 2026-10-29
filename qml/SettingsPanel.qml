@@ -197,19 +197,14 @@ Dialog {
                     Field { Layout.fillWidth: true; text: panel.prefs.startFolder; onEditingFinished: panel.controller.settings.set("startFolder", text) }
                 }
                 Card {
-                    visible: panel.category === 1; heading: "最近位置与隐私"
-                    ToggleRow {
-                        objectName: "rememberRecentLocationsToggle"
-                        title: "记录最近访问的文件夹"
-                        checked: panel.prefs.rememberRecentLocations
-                        onToggled: value => panel.controller.settings.set("rememberRecentLocations", value)
-                    }
-                    Label { text: "侧栏最多显示 5 个最近位置，仅保存在本机。关闭此选项会同时清空记录。"; color: panel.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                    visible: panel.category === 1; heading: "撤销与隐私"
+                    Label { text: "侧栏保留本次运行最近 5 次可撤销操作，按从新到旧依次撤销。也可以在空白处右键，或按 Ctrl+Z。关闭应用后记录不保留，不再记录最近访问的文件夹。"; color: panel.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                    Label { text: "支持本地文件的粘贴、移动、重命名、新建与移入回收站。永久删除、覆盖替换、跨盘移动、特殊字节文件名、回收站手动恢复及远程操作不支持撤销；文件变化或原位置被占用时会停止，绝不覆盖。"; color: panel.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.Wrap }
                     ActionButton {
-                        objectName: "clearRecentLocationsSettingsButton"
-                        text: "清空最近位置"; iconName: "trash"; foreground: panel.ink
-                        enabled: panel.controller.recentLocations.length > 0
-                        onClicked: panel.controller.clearRecentLocations()
+                        objectName: "clearUndoHistorySettingsButton"
+                        text: "清空撤销记录"; iconName: "close"; foreground: panel.ink
+                        enabled: panel.controller.operations.canUndo
+                        onClicked: panel.controller.operations.clearUndoHistory()
                     }
                 }
                 Card {

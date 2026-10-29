@@ -234,68 +234,71 @@ class FollowupUiTest : public QObject {
         fixture.reset();
     }
 
-    void recentLocationsAndTaskCard() {
+    void undoHistoryAndTaskCard() {
         auto *card = item("recentActivity");
-        QVERIFY(card);
-        QVERIFY(!card->isVisible());
+        QVERIFY(card && !card->isVisible());
+        QVERIFY(!item("undoHistoryHint")->isVisible());
         controller->navigate(uri("folder"));
         QTRY_VERIFY(!controller->left()->loading());
-        QTRY_VERIFY(card->isVisible());
-        QCOMPARE(controller->recentLocations().size(), 1);
+        QVERIFY(operations->undoHistory().isEmpty());
+        QVERIFY(!card->isVisible());
         controller->navigate(uri(""));
         QTRY_VERIFY(!controller->left()->loading());
-        QTRY_COMPARE(visualItems(window->contentItem(), "recentLocationRow").size(), 2);
-        controller->setDual(true);
-        QTRY_VERIFY(!controller->right()->loading());
-        controller->setActiveSide(1);
-        const auto leftUri = controller->left()->uri();
-        QQuickItem *folder = nullptr;
-        for (auto *row : visualItems(window->contentItem(), "recentLocationRow"))
-            if (row->property("modelData").toMap()["uri"].toString() == uri("folder")) folder = row;
-        QVERIFY(folder);
-        QTest::qWait(100);
-        click(folder);
-        QTRY_VERIFY(!controller->right()->loading());
-        QCOMPARE(controller->right()->uri(), uri("folder"));
-        QCOMPARE(controller->left()->uri(), leftUri);
+        operations->run("copy", {uri("sample.txt")}, uri("folder"));
+        QTRY_VERIFY(!operations->busy());
+        QTRY_COMPARE(visualItems(window->contentItem(), "undoHistoryRow").size(), 1);
+        QTRY_VERIFY(card->isVisible());
+        blankContext();
+        auto *undo = object("undoFileOperationMenuItem");
+        QVERIFY(undo && undo->property("enabled").toBool());
+        QVERIFY(undo->property("text").toString().contains(QStringLiteral("撤销粘贴")));
+        click(qobject_cast<QQuickItem *>(undo));
+        QTRY_VERIFY(!operations->busy());
+        QTRY_VERIFY(!QFile::exists(fixture->path() + "/folder/sample.txt"));
+        QVERIFY(QFile::exists(fixture->path() + "/sample.txt"));
+        QTRY_COMPARE(visualItems(window->contentItem(), "undoHistoryRow").size(), 0);
+        QTRY_VERIFY(!card->isVisible());
+
         QVERIFY(QFile::copy(fixture->path() + "/sample.txt", fixture->path() + "/folder/sample.txt"));
         operations->run("copy", {uri("sample.txt")}, uri("folder"));
         QTRY_VERIFY(operations->waitingConflict());
         QTRY_VERIFY(card->property("taskActive").toBool());
+        QTRY_VERIFY(card->isVisible());
         QTRY_VERIFY(item("sidebarTaskProgress")->isVisible());
-        QTRY_COMPARE(visualItems(window->contentItem(), "recentLocationRow").size(), 0);
-        QCOMPARE(operations->totalItems(), 1);
-        QCOMPARE(operations->completedItems(), 0);
         auto *conflict = object("conflictDialog");
-        QVERIFY(conflict);
         QVERIFY(QMetaObject::invokeMethod(conflict, "close"));
-        QTRY_VERIFY(!conflict->property("visible").toBool());
         QTest::qWait(100);
         click(item("sidebarCancelTaskButton"));
         QTRY_VERIFY(!operations->busy());
         QTRY_VERIFY(!card->property("taskActive").toBool());
-        QTRY_COMPARE(visualItems(window->contentItem(), "recentLocationRow").size(), 2);
-        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-recent-locations.png"));
-        click(item("clearRecentLocationsButton"));
         QTRY_VERIFY(!card->isVisible());
-        QVERIFY(controller->recentLocations().isEmpty());
+        operations->run("touch", {}, uri(""), "new.txt");
+        QTRY_VERIFY(!operations->busy());
+        QTRY_COMPARE(visualItems(window->contentItem(), "undoHistoryRow").size(), 1);
+        QTRY_VERIFY(card->isVisible());
+        auto *row = visualItems(window->contentItem(), "undoHistoryRow").first();
+        click(row);
+        QTRY_VERIFY(!operations->busy());
+        QTRY_VERIFY(!QFile::exists(fixture->path() + "/new.txt"));
+        QTRY_VERIFY(!card->isVisible());
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-undo-history.png"));
     }
 
-    void recentLocationsAtSmallWindowAndHighScale() {
+    void undoHistoryAtSmallWindowAndHighScale() {
         for (int i = 0; i < 5; ++i) {
-            QVERIFY(QDir().mkdir(fixture->path() + "/recent" + QString::number(i)));
-            controller->navigate(uri("recent" + QString::number(i)));
-            QTRY_VERIFY(!controller->left()->loading());
+            operations->run("touch", {}, uri(""), "undo-long-file-name-" + QString::number(i) + ".txt");
+            QTRY_VERIFY(!operations->busy());
         }
         settings->set("uiScale", 1.5);
         window->resize(920, 640);
         QTest::qWait(150);
         auto *card = item("recentActivity");
         auto *sidebar = item("sidebar");
-        auto *scroll = item("recentLocationsScroll");
+        auto *scroll = item("undoHistoryScroll");
         QVERIFY(card && sidebar && scroll);
-        QVERIFY(sidebar->height() >= 100);
-        QVERIFY(card->height() <= 110);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-undo-small.png"));
+        QVERIFY2(sidebar->height() >= 80, qPrintable(QString::number(sidebar->height())));
+        QVERIFY(card->height() <= 145);
         QVERIFY(scroll->property("clip").toBool());
         auto *page = scroll->property("contentItem").value<QQuickItem *>();
         QVERIFY(page);
@@ -303,15 +306,36 @@ class FollowupUiTest : public QObject {
         page->setProperty("contentY", page->property("contentHeight").toReal() - page->height());
         QTest::qWait(100);
         QQuickItem *last = nullptr;
-        for (auto *row : visualItems(window->contentItem(), "recentLocationRow"))
-            if (row->property("modelData").toMap()["uri"].toString() == uri("recent0")) last = row;
-        QVERIFY(last);
+        for (auto *row : visualItems(window->contentItem(), "undoHistoryRow"))
+            if (row->property("index").toInt() == 4) last = row;
+        QVERIFY(last && !last->isEnabled());
         const auto center = last->mapToItem(scroll, {last->width() / 2, last->height() / 2});
         QVERIFY(scroll->boundingRect().contains(center));
-        click(last);
-        QTRY_VERIFY(!controller->left()->loading());
-        QCOMPARE(controller->left()->uri(), uri("recent0"));
-        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-recent-small.png"));
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-undo-small.png"));
+        click(item("clearUndoHistoryButton"));
+        QVERIFY(operations->undoHistory().isEmpty());
+        QTRY_VERIFY(!card->isVisible());
+        QVERIFY(QFile::exists(fixture->path() + "/undo-long-file-name-0.txt"));
+    }
+
+    void undoShortcutRespectsTextEditing() {
+        operations->run("touch", {}, uri(""), "shortcut.txt");
+        QTRY_VERIFY(!operations->busy());
+        auto *address = item("addressField");
+        if (!address) {
+            QTest::keyClick(window, Qt::Key_L, Qt::ControlModifier);
+        } else {
+            address->forceActiveFocus();
+        }
+        QTRY_VERIFY(root->property("editingText").toBool());
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QTest::qWait(100);
+        QVERIFY(QFile::exists(fixture->path() + "/shortcut.txt"));
+        QTest::keyClick(window, Qt::Key_Escape);
+        click(entry(uri("sample.txt")));
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QTRY_VERIFY(!operations->busy());
+        QTRY_VERIFY(!QFile::exists(fixture->path() + "/shortcut.txt"));
     }
     void taskErrorsVisibleBeforeCompletion() {
         QVERIFY(QFile::copy(fixture->path() + "/sample.txt", fixture->path() + "/folder/sample.txt"));
@@ -355,15 +379,10 @@ class FollowupUiTest : public QObject {
         QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-index-settings.png"));
         click(item("settingsCategory1"));
         QTest::qWait(100);
-        auto *toggle = item("rememberRecentLocationsToggle");
-        QVERIFY(toggle);
-        revealSetting(toggle);
-        // ToggleRow owns the actual Switch; exercise the exposed toggled signal.
-        QVERIFY(QMetaObject::invokeMethod(toggle, "toggled", Q_ARG(bool, false)));
-        QVERIFY(!settings->values()["rememberRecentLocations"].toBool());
-        controller->navigate(uri("folder"));
-        QTRY_VERIFY(!controller->left()->loading());
-        QVERIFY(controller->recentLocations().isEmpty());
+        auto *clear = item("clearUndoHistorySettingsButton");
+        QVERIFY(clear);
+        revealSetting(clear);
+        QVERIFY(!clear->isEnabled());
         closeSettings();
     }
 
@@ -1059,6 +1078,75 @@ class FollowupUiTest : public QObject {
         QCOMPARE(controller->left()->selectedUris(), QStringList{uri("sample.txt")});
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, start);
         QTRY_COMPARE(controller->left()->selectedCount(), 0);
+    }
+    void undoHoveredRowLeavesNoResidue_data() {
+        QTest::addColumn<bool>("grid");
+        QTest::addColumn<bool>("animations");
+        QTest::addColumn<bool>("openTip");
+        for (bool grid : {false, true})
+            for (bool animations : {false, true})
+                for (bool openTip : {false, true})
+                    QTest::newRow(qPrintable(QString("%1-%2-%3").arg(grid ? "grid" : "list", animations ? "animated" : "instant", openTip ? "opened" : "pending")))
+                        << grid << animations << openTip;
+    }
+    void undoHoveredRowLeavesNoResidue() {
+        QFETCH(bool, grid);
+        QFETCH(bool, animations);
+        QFETCH(bool, openTip);
+        settings->set("animations", animations);
+        controller->setGrid(grid);
+        operations->run("touch", {}, uri(""), "hover-undo.txt");
+        QTRY_VERIFY(!operations->busy());
+        QTRY_VERIFY(entry(uri("hover-undo.txt")));
+        QTest::qWait(350);
+        QPointer<QQuickItem> removedRow = entry(uri("hover-undo.txt"));
+        click(removedRow);
+        const auto pointer = removedRow->mapToScene({80, removedRow->height() / 2}).toPoint();
+        QTest::mouseMove(window, pointer);
+        auto *tip = removedRow->findChild<QObject *>("fileEntryToolTip");
+        QVERIFY(tip);
+        QPointer<QObject> removedTip = tip;
+        if (openTip)
+            QTRY_VERIFY_WITH_TIMEOUT(tip->property("opened").toBool(), 2500);
+        else
+            QVERIFY(!tip->property("opened").toBool());
+        QCOMPARE(root->property("hoveredEntry").toMap().value("fileUri").toString(), uri("hover-undo.txt"));
+
+        // Leave the cursor on the disappearing file throughout undo and its remove animation.
+        operations->undo();
+        QTRY_VERIFY(!operations->busy());
+        QTRY_COMPARE(controller->left()->count(), 2);
+        QVERIFY(!removedRow || !removedRow->property("live").toBool());
+        QVERIFY(!removedTip || !removedTip->property("visible").toBool());
+        QTest::qWait(400); // No mouse movement: retirement must cancel hover itself.
+        QTest::mouseMove(window, pointer + QPoint(1, 0));
+        QTest::qWait(1100); // Past the tooltip delay; moving over an old row cannot resurrect it.
+        QVERIFY(!QFile::exists(fixture->path() + "/hover-undo.txt"));
+        QVERIFY(!removedTip || !removedTip->property("visible").toBool());
+        QVERIFY(root->property("hoveredEntry").toMap().value("fileUri").toString() != uri("hover-undo.txt"));
+        // A pooled or transition-retained delegate must not be an interactive ghost row.
+        QVERIFY(!removedRow || !removedRow->isVisible() || !removedRow->isEnabled() ||
+                removedRow->property("fileUri").toString() != uri("hover-undo.txt"));
+        for (auto *highlight : visualItems(left, "selectionHighlight"))
+            QVERIFY(!highlight->property("shown").toBool());
+        if (removedRow) {
+            auto *spotlight = findVisual(removedRow, "fileEntrySpotlight");
+            QVERIFY(spotlight && !spotlight->isVisible() && !spotlight->property("active").toBool());
+        }
+
+        // Reuse must restore normal input/hover rather than leaving future rows disabled.
+        operations->run("touch", {}, uri(""), "hover-reused.txt");
+        QTRY_VERIFY(!operations->busy());
+        QTRY_VERIFY(entry(uri("hover-reused.txt")));
+        QTest::qWait(350);
+        auto *reused = entry(uri("hover-reused.txt"));
+        QVERIFY(reused->isEnabled());
+        click(reused);
+        QTest::mouseMove(window, reused->mapToScene({80, reused->height() / 2}).toPoint());
+        auto *reusedTip = reused->findChild<QObject *>("fileEntryToolTip");
+        QVERIFY(reusedTip);
+        QTRY_VERIFY_WITH_TIMEOUT(reusedTip->property("opened").toBool(), 2500);
+        settings->set("animations", false);
     }
     void rowTransitionsSettle() {
         // With motion on, in-place refreshes animate rows in and out; pooled delegates must

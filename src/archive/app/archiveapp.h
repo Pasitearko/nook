@@ -1,5 +1,6 @@
 #pragma once
 #include "application.h"
+#include "defaultapps.h"
 #include "filesessions.h"
 #include "notifier.h"
 #include "passwordstore.h"
@@ -24,6 +25,7 @@ class ArchiveApp : public QObject {
     Q_PROPERTY(TaskQueue *queue READ queue CONSTANT)
     Q_PROPERTY(PasswordStore *passwords READ passwords CONSTANT)
     Q_PROPERTY(FileSessions *files READ files CONSTANT)
+    Q_PROPERTY(DefaultApps *defaults READ defaults CONSTANT)
     // concurrency, conflict, subfolder, notify, autoTryPasswords, openAfter, format, level …
     Q_PROPERTY(QVariantMap prefs READ prefs NOTIFY prefsChanged)
   public:
@@ -41,6 +43,7 @@ class ArchiveApp : public QObject {
     TaskQueue *queue() { return &m_queue; }
     PasswordStore *passwords() { return &m_passwords; }
     FileSessions *files() { return &m_files; }
+    DefaultApps *defaults() { return &m_defaults; }
     Notifier *notifier() { return &m_notifier; }
     QVariantMap prefs() const;
 
@@ -115,6 +118,7 @@ class ArchiveApp : public QObject {
     PasswordStore m_passwords;
     TaskQueue m_queue;
     FileSessions m_files{&m_queue};
+    DefaultApps m_defaults;
     Notifier m_notifier;
     int m_requests = 0;
     int m_choosing = 0;

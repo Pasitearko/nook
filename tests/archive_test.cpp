@@ -5,6 +5,7 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QMimeDatabase>
 #include <QRandomGenerator>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -145,6 +146,45 @@ Outcome runJob(const QVariantMap &request, const Handler &handler = {}) {
 }
 
 bool sevenZipAvailable() { return !QStandardPaths::findExecutable("7z").isEmpty(); }
+
+// A package in any format libarchive writes: format and filter by name ("raw" holds one stream).
+bool writeWith(const QString &file, const char *format, const char *filter, const QList<QPair<QByteArray, QByteArray>> &files) {
+    struct archive *a = archive_write_new();
+    bool ok = archive_write_set_format_by_name(a, format) == ARCHIVE_OK
+              && (!filter || archive_write_add_filter_by_name(a, filter) == ARCHIVE_OK)
+              && archive_write_open_filename(a, QFile::encodeName(file).constData()) == ARCHIVE_OK;
+    for (const auto &[name, data] : files) {
+        if (!ok)
+            break;
+        archive_entry *entry = archive_entry_new();
+        archive_entry_copy_pathname(entry, name.constData());
+        archive_entry_set_filetype(entry, AE_IFREG);
+        archive_entry_set_perm(entry, 0644);
+        archive_entry_set_mtime(entry, 1700000000, 0);
+        archive_entry_set_size(entry, data.size());
+        ok = archive_write_header(a, entry) == ARCHIVE_OK
+             && archive_write_data(a, data.constData(), size_t(data.size())) == data.size();
+        archive_entry_free(entry);
+    }
+    ok = archive_write_close(a) == ARCHIVE_OK && ok;
+    archive_write_free(a);
+    return ok;
+}
+
+// The MIME types nook解压缩 says it opens (and so takes as the default compression software).
+QStringList claimedTypes() {
+    QFile desktop(QString(NOOK_SOURCE_DIR) + "/packaging/local.nook.archive.desktop");
+    if (!desktop.open(QIODevice::ReadOnly))
+        return {};
+    QString line;
+    for (const auto &each : QString::fromUtf8(desktop.readAll()).split(u'\n'))
+        if (each.startsWith("MimeType="))
+            line = each.mid(9);
+    QStringList types;
+    for (const auto &type : line.split(u';', Qt::SkipEmptyParts))
+        types << QMimeDatabase().mimeTypeForName(type).name(); // aliases resolved
+    return types;
+}
 
 }
 
@@ -702,6 +742,78 @@ class ArchiveTest : public QObject {
         QVERIFY(runJob({{"op", "create"}, {"format", "tar.gz"}, {"output", folder + "/t.tar.gz"}, {"items", QStringList{source + "/x.txt"}}}).done.value("ok").toBool());
         QVERIFY(runJob({{"op", "convert"}, {"archive", folder + "/t.tar.gz"}, {"format", "zip"}, {"output", folder + "/t.zip"}}).done.value("ok").toBool());
         QCOMPARE(listed(folder + "/t.zip"), QStringList({"x.txt"}));
+    }
+
+    // Every format the desktop file claims that can be made here opens, and the type the desktop
+    // gives such a file is among the claimed ones (so "设为默认" covers it).
+    void readsEveryClaimedFormat() {
+        const QStringList claimed = claimedTypes();
+        QVERIFY(claimed.size() > 40);
+        const QByteArray text = "内容 " + noise(3000).toBase64();
+        const QList<QPair<QByteArray, QByteArray>> files{{"docs/说明.txt", text}, {"docs/b.txt", "b"}};
+        struct Sample {
+            QString name;
+            const char *format;
+            const char *filter;
+        };
+        const QString base = fresh("claimed");
+        const QList<Sample> samples{
+            {"a.cpio", "newc", nullptr},   {"odc.cpio", "odc", nullptr}, {"a.iso", "iso9660", nullptr},
+            {"a.xar", "xar", nullptr},     {"a.tar.Z", "pax", "compress"},  {"a.taz", "ustar", "compress"},
+            {"a.tar.lz", "pax", "lzip"},   {"a.tar.lz4", "pax", "lz4"},     {"a.tar.lzma", "pax", "lzma"},
+            {"a.apk", "zip", nullptr},     {"a.jar", "zip", nullptr},       {"a.gtar", "gnutar", nullptr},
+            {"a.ar", "arsvr4", nullptr},
+        };
+        const auto check = [&](const QString &file, const QStringList &expected, const QString &member, const QByteArray &data) {
+            const QString type = QMimeDatabase().mimeTypeForFile(file).name();
+            QVERIFY2(claimed.contains(type), qPrintable(QFileInfo(file).fileName() + " is " + type + ", not claimed"));
+            Outcome listed = runJob({{"op", "list"}, {"archive", file}});
+            QVERIFY2(listed.done.value("ok").toBool(), qPrintable(file + ": " + listed.done.value("error").toMap().value("message").toString()));
+            for (const auto &path : expected)
+                QVERIFY2(listed.paths().contains(path), qPrintable(QFileInfo(file).fileName() + ": " + listed.paths().join(", ")));
+            const QString out = fresh("claimed-out/" + QFileInfo(file).fileName());
+            QVERIFY(runJob(extract(file, out, {{"subfolder", "never"}})).done.value("ok").toBool());
+            QCOMPARE(read(out + "/" + member), data);
+        };
+        for (const auto &sample : samples) {
+            const QString file = base + "/" + sample.name;
+            // ar holds no directories.
+            const bool flat = QByteArray(sample.format) == "arsvr4";
+            const QList<QPair<QByteArray, QByteArray>> flatFiles{{"b.txt", "b"}, {"c.txt", text}};
+            QVERIFY2(writeWith(file, sample.format, sample.filter, flat ? flatFiles : files), qPrintable(sample.name));
+            if (flat)
+                check(file, {"b.txt", "c.txt"}, "c.txt", text);
+            else
+                check(file, {"docs/说明.txt", "docs/b.txt"}, "docs/说明.txt", text);
+        }
+        // A Debian package is an ar archive of tarballs.
+        const QString control = base + "/control.tar.gz", data = base + "/data.tar.xz";
+        QVERIFY(writeWith(control, "ustar", "gzip", {{"./control", "Package: nook\n"}}));
+        QVERIFY(writeWith(data, "ustar", "xz", {{"./usr/bin/nook", "binary"}}));
+        QFile controlFile(control), dataFile(data);
+        QVERIFY(controlFile.open(QIODevice::ReadOnly) && dataFile.open(QIODevice::ReadOnly));
+        QVERIFY(writeWith(base + "/nook.deb", "arsvr4", nullptr,
+                          {{"debian-binary", "2.0\n"}, {"control.tar.gz", controlFile.readAll()}, {"data.tar.xz", dataFile.readAll()}}));
+        check(base + "/nook.deb", {"debian-binary", "control.tar.gz", "data.tar.xz"}, "debian-binary", "2.0\n");
+        // Single compressed streams.
+        const QList<QPair<QString, const char *>> streams{
+            {"notes.txt.Z", "compress"}, {"notes.txt.lz", "lzip"}, {"notes.txt.lz4", "lz4"}, {"notes.txt.lzma", "lzma"}, {"page.ps.gz", "gzip"}};
+        for (const auto &[name, filter] : streams) {
+            const QString file = base + "/" + name;
+            const QString inner = QFileInfo(name).completeBaseName();
+            QVERIFY2(writeWith(file, "raw", filter, {{inner.toUtf8(), text}}), qPrintable(name));
+            check(file, {inner}, inner, text);
+        }
+        if (sevenZipAvailable()) {
+            const QString wim = base + "/a.wim";
+            const QString source = fresh("claimed-wim");
+            put(source + "/docs/说明.txt", text);
+            QProcess sevenZip;
+            sevenZip.setWorkingDirectory(source);
+            sevenZip.start("7z", {"a", "-twim", "-bso0", "-bsp0", wim, "docs"});
+            QVERIFY(sevenZip.waitForFinished(30000) && sevenZip.exitCode() == 0);
+            check(wim, {"docs/说明.txt"}, "docs/说明.txt", text);
+        }
     }
 };
 
