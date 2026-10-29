@@ -35,16 +35,28 @@ int main(int argc, char **argv) {
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addPositionalArgument("archives", "压缩包路径或 file:// URI", "[archives…]");
+    // What nook's right-click menu runs.
     parser.addOption({"compress", "打开压缩窗口，压缩给出的文件和文件夹"});
+    parser.addOption({"compress-zip", "直接压缩为 ZIP（名称取自项目），显示进度小窗"});
+    parser.addOption({"extract-here", "解压到压缩包所在的文件夹，显示进度小窗"});
+    parser.addOption({"extract-to", "先选择位置再解压，显示进度小窗"});
     parser.addOption({"isolated", "独立实例，不转发给已运行的窗口（开发验证）"});
     parser.addOption({"capture", "窗口显示后保存截图（开发验证）", "path"});
     parser.addOption({"quit-after", "指定毫秒后退出（开发验证）", "milliseconds"});
     parser.process(app);
 
+    QString action = "open";
+    for (const char *name : {"compress", "compress-zip", "extract-here", "extract-to"})
+        if (parser.isSet(name))
+            action = name;
     QStringList archives;
     for (const auto &argument : parser.positionalArguments()) {
         const QUrl url(argument);
         archives << QFileInfo(url.isLocalFile() ? url.toLocalFile() : argument).absoluteFilePath();
+    }
+    if (action != "open" && archives.isEmpty()) {
+        QTextStream(stderr) << "--" << action << " 需要至少一个文件或文件夹。" << Qt::endl;
+        return 1;
     }
 
     const QString socketPath = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation) +
@@ -65,8 +77,7 @@ int main(int argc, char **argv) {
                 QTextStream(stderr) << "nook解压缩已在启动或无响应，请稍后重试。" << Qt::endl;
                 return 1;
             }
-            const char *key = parser.isSet("compress") ? "compress" : "archives";
-            socket.write(QJsonDocument(QJsonObject{{key, QJsonArray::fromStringList(archives)}})
+            socket.write(QJsonDocument(QJsonObject{{"action", action}, {"items", QJsonArray::fromStringList(archives)}})
                              .toJson(QJsonDocument::Compact) + '\n');
             socket.flush();
             socket.waitForBytesWritten(500);
@@ -90,7 +101,7 @@ int main(int argc, char **argv) {
     QList<QQuickWindow *> others; // compression and task windows
     bool backgroundNoticeShown = false;
     const auto maybeQuit = [&] {
-        if (!windows.isEmpty() || !others.isEmpty())
+        if (!windows.isEmpty() || !others.isEmpty() || archiveApp.choosing())
             return;
         const int active = archiveApp.queue()->activeCount();
         if (active == 0) {
@@ -112,6 +123,7 @@ int main(int argc, char **argv) {
         });
     };
     QObject::connect(archiveApp.queue(), &TaskQueue::idle, &app, [&] { QTimer::singleShot(0, &app, maybeQuit); });
+    QObject::connect(&archiveApp, &ArchiveApp::choosingDone, &app, [&] { QTimer::singleShot(0, &app, maybeQuit); });
     // Declared last, destroyed first: its windows go while everything they use still exists.
     QQmlApplicationEngine engine;
     archiveApp.setWindowFactory([&](const QString &component, const QVariantMap &properties) -> QObject * {
@@ -155,42 +167,38 @@ int main(int argc, char **argv) {
         if (!path.isEmpty())
             document->open(path);
     };
+    const auto dispatch = [&](const QString &what, const QStringList &items) {
+        if (what == "compress")
+            archiveApp.openCompose(items);
+        else if (what == "compress-zip")
+            archiveApp.compressNow(items);
+        else if (what == "extract-here")
+            archiveApp.extractHere(items);
+        else if (what == "extract-to")
+            archiveApp.extractTo(items);
+        else if (items.isEmpty())
+            openWindow({});
+        else
+            for (const auto &item : items)
+                openWindow(item);
+    };
     QObject::connect(&server, &QLocalServer::newConnection, &app, [&] {
         while (auto *socket = server.nextPendingConnection()) {
             QObject::connect(socket, &QLocalSocket::readyRead, socket, [&, socket] {
                 while (socket->canReadLine()) {
                     const auto request = QJsonDocument::fromJson(socket->readLine()).object();
-                    if (request.contains("compress")) {
-                        QStringList items;
-                        for (const auto &value : request.value("compress").toArray())
-                            items << value.toString();
-                        archiveApp.openCompose(items);
-                        continue;
-                    }
-                    const auto list = request.value("archives").toArray();
-                    if (list.isEmpty())
-                        openWindow({});
-                    for (const auto &value : list)
-                        openWindow(value.toString());
+                    QStringList items;
+                    for (const auto &value : request.value("items").toArray())
+                        items << value.toString();
+                    dispatch(request.value("action").toString(), items);
                 }
             });
             QObject::connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
         }
     });
 
-    if (parser.isSet("compress")) {
-        if (archives.isEmpty()) {
-            QTextStream(stderr) << "--compress 需要至少一个文件或文件夹。" << Qt::endl;
-            return 1;
-        }
-        archiveApp.openCompose(archives);
-    } else {
-        if (archives.isEmpty())
-            openWindow({});
-        for (const auto &archive : std::as_const(archives))
-            openWindow(archive);
-    }
-    if (windows.isEmpty() && others.isEmpty())
+    dispatch(action, archives);
+    if (windows.isEmpty() && others.isEmpty() && !archiveApp.choosing() && archiveApp.queue()->activeCount() == 0)
         return 1;
 
     if (parser.isSet("capture")) {

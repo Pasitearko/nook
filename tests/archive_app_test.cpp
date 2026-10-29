@@ -5,6 +5,7 @@
 #include "passwordstore.h"
 #include "taskqueue.h"
 #include <QDir>
+#include <QRandomGenerator>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
@@ -615,6 +616,95 @@ class ArchiveAppTest : public QObject {
         QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-settings.png"));
         t.app.passwords()->remove("网盘");
         QCOMPARE(t.app.passwords()->entries().size(), 1);
+    }
+
+    // Phase 4: what nook's right-click menu runs.
+    void nookMenuActionsUseProgressWindows() {
+        TestApp t;
+        QQmlEngine engine;
+        std::vector<std::unique_ptr<QObject>> windows;
+        t.app.setWindowFactory([&](const QString &type, const QVariantMap &properties) -> QObject * {
+            QVariantMap initial = properties;
+            initial.insert("app", QVariant::fromValue(&t.app));
+            QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/" + type + ".qml"));
+            if (!component.isReady())
+                qWarning() << component.errorString();
+            windows.emplace_back(component.createWithInitialProperties(initial));
+            return windows.back().get();
+        });
+        const QString base = fixture->path() + "/menu";
+        put(base + "/旅行/1.jpg", "one");
+        put(base + "/旅行/2.jpg", "two");
+        put(base + "/旅行.zip", "taken"); // the one-click name is taken: it gets a number
+
+        // "压缩为 旅行.zip"
+        QList<int> ids = t.app.compressNow({base + "/旅行"});
+        QCOMPARE(ids.size(), 1);
+        QCOMPARE(windows.size(), size_t(1));
+        auto *progress = qobject_cast<QQuickWindow *>(windows.back().get());
+        QVERIFY(progress && t.queue()->ownedBy(ids.first(), progress));
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), ids.first()), QStringLiteral("done"), 15000);
+        QVERIFY(QFileInfo(base + "/旅行 (2).zip").size() > 100);
+        QCOMPARE(read(base + "/旅行.zip"), QStringLiteral("taken"));
+        QTRY_VERIFY_WITH_TIMEOUT(!progress->isVisible(), 5000);
+
+        // "解压到当前文件夹" on two packages (one split into volumes, chosen by every part): each
+        // goes into a folder of its own, the split one once.
+        const QString first = base + "/甲.zip";
+        writeZip(first, {{"a.txt", "A"}});
+        TestApp maker;
+        QByteArray noise(300000, 0);
+        for (auto &byte : noise)
+            byte = char(QRandomGenerator::global()->generate());
+        put(base + "/大/blob.bin", noise);
+        const int split = maker.queue()->start({{"op", "create"}, {"format", "7z"}, {"output", base + "/乙.7z"},
+                                                {"items", QStringList{base + "/大"}},
+                                                {"options", QVariantMap{{"volumeSize", 100 * 1024.0}, {"level", 0}}}}, {}, nullptr);
+        QTRY_COMPARE_WITH_TIMEOUT(status(maker.queue(), split), QStringLiteral("done"), 15000);
+        QStringList parts = QDir(base).entryList({"乙.7z.*"}, QDir::Files, QDir::Name);
+        QVERIFY2(parts.size() > 1, qPrintable(QDir(base).entryList(QDir::Files).join(", ") + " / " + maker.queue()->task(split).value("message").toString()));
+        QStringList chosen{first};
+        for (const auto &part : parts)
+            chosen << base + "/" + part;
+        QCOMPARE(t.app.firstParts(chosen).size(), 2);
+        put(base + "/out/keep.txt", "k");
+        ids = t.app.extractInto(chosen, base + "/out");
+        QCOMPARE(ids.size(), 2);
+        progress = qobject_cast<QQuickWindow *>(windows.back().get());
+        QVERIFY(QTest::qWaitForWindowExposed(progress));
+        QTest::qWait(200);
+        QVERIFY(progress->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-progress.png"));
+        for (int id : ids)
+            QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("done"), 15000);
+        QCOMPARE(read(base + "/out/甲/a.txt"), QStringLiteral("A"));
+        QCOMPARE(QFileInfo(base + "/out/乙/大/blob.bin").size(), 300000);
+        QTRY_VERIFY_WITH_TIMEOUT(!progress->isVisible(), 5000);
+
+        // A single package "here" follows the folder rule (smart): one top-level item, no extra folder.
+        ids = t.app.extractInto({first}, {});
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), ids.first()), QStringLiteral("done"), 15000);
+        QCOMPARE(read(base + "/a.txt"), QStringLiteral("A"));
+    }
+
+    void progressWindowStaysOnFailure() {
+        TestApp t;
+        QQmlEngine engine;
+        std::vector<std::unique_ptr<QObject>> windows;
+        t.app.setWindowFactory([&](const QString &type, const QVariantMap &properties) -> QObject * {
+            QVariantMap initial = properties;
+            initial.insert("app", QVariant::fromValue(&t.app));
+            QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/" + type + ".qml"));
+            windows.emplace_back(component.createWithInitialProperties(initial));
+            return windows.back().get();
+        });
+        const QString broken = fixture->path() + "/broken-menu.zip";
+        put(broken, "PK\x03\x04 not really");
+        const QList<int> ids = t.app.extractInto({broken}, {});
+        auto *progress = qobject_cast<QQuickWindow *>(windows.back().get());
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), ids.first()), QStringLiteral("failed"), 15000);
+        QTest::qWait(900);
+        QVERIFY(progress->isVisible());
+        QVERIFY(progress->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-failed.png"));
     }
 };
 

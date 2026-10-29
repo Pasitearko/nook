@@ -241,4 +241,35 @@ QString decodeName(const QByteArray &raw, const QString &encoding, bool *ok) {
     return QString::fromUtf8(raw);
 }
 
+
+const QStringList &archivePatterns() {
+    static const QStringList patterns{
+        "*.zip",  "*.7z",    "*.rar",   "*.tar",  "*.tar.gz", "*.tgz",  "*.tar.bz2", "*.tbz2", "*.tbz",
+        "*.tar.xz", "*.txz", "*.tar.zst", "*.tzst", "*.tar.lz4", "*.tar.lzma", "*.gz", "*.bz2", "*.xz",
+        "*.zst",  "*.lzma",  "*.lz4",   "*.iso",  "*.cab",    "*.cpio", "*.deb",     "*.rpm",  "*.xar",
+        "*.lzh",  "*.lha",   "*.wim",   "*.jar",  "*.apk",    "*.001",  "*.r00",     "*.z01",  "*.zipx",
+        "*.epub"};
+    return patterns;
+}
+
+bool looksLikeArchive(const QString &fileName) {
+    const QString name = fileName.toLower();
+    for (const auto &pattern : archivePatterns())
+        if (name.endsWith(QStringView(pattern).mid(1)) && name.size() > pattern.size() - 1)
+            return true;
+    // Later volumes: name.7z.002, name.part3.rar, name.r01, name.z02.
+    static const QRegularExpression volume(R"(\.(\d{3}|r\d{2}|z\d{2})$)");
+    return volume.match(name).hasMatch() && volumesOf(fileName).split;
+}
+
+QString suggestedName(const QStringList &paths) {
+    if (paths.isEmpty())
+        return {};
+    const QFileInfo first(paths.first());
+    if (paths.size() == 1)
+        return first.isDir() || first.completeBaseName().isEmpty() ? first.fileName() : first.completeBaseName();
+    const QString folder = QFileInfo(first.absolutePath()).fileName();
+    return folder.isEmpty() ? QStringLiteral("压缩包") : folder;
+}
+
 }

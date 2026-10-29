@@ -50,6 +50,18 @@ class ArchiveApp : public QObject {
     Q_INVOKABLE void openCompose(const QStringList &items);
     // A small window that follows one task and asks its questions.
     Q_INVOKABLE void openTaskWindow(int id);
+    // nook's menu: each runs in a small progress window that closes on success.
+    // Extracts each package into its own folder (several: always a folder each).
+    Q_INVOKABLE void extractHere(const QStringList &archives);
+    // Asks where with the Nook chooser first.
+    Q_INVOKABLE void extractTo(const QStringList &archives);
+    // "压缩为 <名称>.zip": ZIP at the standard level, next to the first item.
+    Q_INVOKABLE QList<int> compressNow(const QStringList &items);
+    QList<int> extractInto(const QStringList &archives, const QString &destination);
+    QList<int> runInProgressWindow(const QVariantList &requests, const QVariantMap &extras);
+    QStringList firstParts(const QStringList &archives) const;
+    // A destination chooser is open with nothing else to show for it yet.
+    bool choosing() const { return m_choosing > 0; }
     Q_INVOKABLE QString formatSize(double bytes) const;
     Q_INVOKABLE bool isFile(const QString &location) const;
     Q_INVOKABLE bool exists(const QString &path) const;
@@ -80,6 +92,7 @@ class ArchiveApp : public QObject {
     void prefsChanged();
     void notice(const QString &message);
     void chosen(QObject *requester, const QString &purpose, const QStringList &paths);
+    void choosingDone();
 
   private:
     void finished(int id);
@@ -93,4 +106,6 @@ class ArchiveApp : public QObject {
     TaskQueue m_queue;
     Notifier m_notifier;
     int m_requests = 0;
+    int m_choosing = 0;
+    QStringList m_pendingExtract;
 };

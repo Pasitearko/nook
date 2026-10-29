@@ -21,6 +21,14 @@ QString stemOf(const QString &fileName);
 // "report.txt" -> "report (2).txt"; directories keep their whole name before the counter.
 QString numberedName(const QString &name, int number, bool directory);
 
+// The glob patterns of packages by name ("*.zip", "*.tar.gz", "*.part1.rar" …).
+const QStringList &archivePatterns();
+// Whether a file name looks like a package (by its suffix; the worker decides by content).
+bool looksLikeArchive(const QString &fileName);
+// The name, without suffix, of a new package for these items: a single item's own name (a file
+// without its extension), or for several the name of the folder that holds the first.
+QString suggestedName(const QStringList &paths);
+
 bool isUtf8(const QByteArray &bytes);
 // Encodings offered for filenames, as ICU converter names; "UTF-8" first.
 QStringList filenameEncodings();

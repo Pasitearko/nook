@@ -1,4 +1,5 @@
 #include "application.h"
+#include "archivenames.h"
 #include "storage.h"
 #include <QClipboard>
 #include <QDesktopServices>
@@ -816,6 +817,45 @@ QVariantList Application::openWithApplications(const QString &uri) const {
     g_free(type);
     return result;
 }
+QVariantMap Application::archiveActions(const QStringList &uris) const {
+    bool local = !uris.isEmpty(), packages = !uris.isEmpty();
+    QStringList paths;
+    for (const auto &uri : uris) {
+        const QString path = uri.startsWith("trash:") ? QString() : nook::localPath(uri);
+        if (path.isEmpty() || !QFileInfo::exists(path)) {
+            local = packages = false;
+            break;
+        }
+        paths << path;
+        packages = packages && QFileInfo(path).isFile() && nook::archive::looksLikeArchive(QFileInfo(path).fileName());
+    }
+    return {{"extract", packages},
+            {"compress", local},
+            {"single", paths.size() == 1},
+            {"zipName", local ? nook::archive::suggestedName(paths) + ".zip" : QString()},
+            {"folderName", packages && paths.size() == 1 ? nook::archive::stemOf(QFileInfo(paths.first()).fileName()) : QString()}};
+}
+
+QStringList Application::archiveCommand(const QString &action, const QStringList &uris) const {
+    const QString beside = QCoreApplication::applicationDirPath() + "/nook-archive";
+    QStringList command{QFileInfo(beside).isExecutable() ? beside : QStringLiteral("nook-archive")};
+    if (action != "open")
+        command << "--" + action;
+    command << "--";
+    for (const auto &uri : uris)
+        command << nook::localPath(uri);
+    return command;
+}
+
+void Application::archive(const QString &action, const QStringList &uris) {
+    if (uris.isEmpty())
+        return;
+    QStringList command = archiveCommand(action, uris);
+    const QString program = command.takeFirst();
+    if (!QProcess::startDetached(program, command))
+        Q_EMIT notice(QStringLiteral("无法启动 nook解压缩，请检查安装"));
+}
+
 void Application::openWith(const QString &uri, const QString &applicationId) {
     if (!QUrl(uri).isLocalFile())
         return;

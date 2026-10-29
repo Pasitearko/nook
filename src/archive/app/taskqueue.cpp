@@ -402,8 +402,11 @@ void TaskQueue::finish(Task *task, const QVariantMap &result) {
         notes << QStringLiteral("%1 条提醒").arg(task->warnings.size());
     const QString tail = notes.isEmpty() ? QString() : "（" + notes.join("，") + "）";
     if (ok && task->kind == "extract") {
-        task->message = task->created.isEmpty() ? "没有解压任何项目" + tail
-                                                : QStringLiteral("已解压 %1 个项目到%2").arg(task->created.size()).arg(quoted(QFileInfo(task->destination).fileName().isEmpty() ? task->destination : QFileInfo(task->destination).fileName())) + tail;
+        const QString folder = QFileInfo(task->destination).fileName().isEmpty() ? task->destination : QFileInfo(task->destination).fileName();
+        // One top-level item (often the folder made for the package): name it rather than count.
+        task->message = task->created.isEmpty()     ? "没有解压任何项目" + tail
+                        : task->created.size() == 1 ? QStringLiteral("已解压为%1，位于%2").arg(quoted(task->created.first()), quoted(folder)) + tail
+                                                    : QStringLiteral("已解压 %1 个项目到%2").arg(task->created.size()).arg(quoted(folder)) + tail;
     } else if (ok && task->kind == "test") {
         const int tested = result.value("tested").toInt();
         task->message = tested > 0 ? QStringLiteral("测试通过：%1 个文件都没有错误").arg(tested) : QStringLiteral("测试通过，没有发现错误");

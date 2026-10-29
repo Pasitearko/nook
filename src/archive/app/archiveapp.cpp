@@ -1,6 +1,7 @@
 #include "archiveapp.h"
 #include "application.h"
 #include "archivedocument.h"
+#include "archivenames.h"
 #include "filechooser.h"
 #include "files.h"
 #include <QDBusConnection>
@@ -16,18 +17,14 @@
 #include <QUrl>
 #include <QWindow>
 #include <array>
+#include <utility>
 #include <limits>
 #include <unistd.h>
 
 namespace {
 constexpr int RecentLimit = 12;
 
-// The patterns the chooser offers under "压缩包"; the worker still decides by content.
-const QStringList ArchivePatterns{"*.zip", "*.7z", "*.rar", "*.tar", "*.tar.gz", "*.tgz", "*.tar.bz2", "*.tbz2",
-                                  "*.tbz", "*.tar.xz", "*.txz", "*.tar.zst", "*.tzst", "*.tar.lz4", "*.tar.lzma",
-                                  "*.gz", "*.bz2", "*.xz", "*.zst", "*.lzma", "*.lz4", "*.iso", "*.cab", "*.cpio",
-                                  "*.deb", "*.rpm", "*.xar", "*.lzh", "*.lha", "*.wim", "*.jar", "*.apk",
-                                  "*.001", "*.r00", "*.z01", "*.zipx", "*.epub"};
+
 
 
 const QVariantMap PrefDefaults{{"concurrency", 1},       {"conflict", "ask"},      {"subfolder", "smart"},
@@ -50,6 +47,15 @@ ArchiveApp::ArchiveApp(AppSettings *settings, std::function<void(const QString &
     connect(&m_queue, &TaskQueue::taskFinished, this, &ArchiveApp::finished);
     connect(&m_queue, &TaskQueue::attention, this, &ArchiveApp::needsAnswer);
     connect(&m_passwords, &PasswordStore::failed, this, &ArchiveApp::notice);
+    connect(this, &ArchiveApp::chosen, this, [this](QObject *requester, const QString &purpose, const QStringList &paths) {
+        if (requester != this || purpose != "destination")
+            return;
+        --m_choosing;
+        const QStringList packages = std::exchange(m_pendingExtract, {});
+        if (!paths.isEmpty())
+            extractInto(packages, paths.first());
+        Q_EMIT choosingDone();
+    });
     if (prefs().value("autoTryPasswords").toBool())
         m_passwords.load();
     // nook writes its preferences from another process; pick its changes up as they land.
@@ -139,7 +145,7 @@ void ArchiveApp::choose(QObject *requester, const QString &purpose, const QStrin
     QString title;
     if (purpose == "archives") {
         Filter archives{"压缩包", {}};
-        for (const auto &pattern : ArchivePatterns)
+        for (const auto &pattern : nook::archive::archivePatterns())
             archives.rules.append(FilterRule{0, pattern});
         options.insert("filters", QVariant::fromValue(QList<Filter>{archives, Filter{"所有文件", {FilterRule{0, "*"}}}}));
         options.insert("multiple", true);
@@ -244,7 +250,75 @@ void ArchiveApp::openCompose(const QStringList &items) {
 
 void ArchiveApp::openTaskWindow(int id) {
     if (m_factory && !m_queue.task(id).isEmpty())
-        m_factory("ArchiveTaskWindow", {{"taskId", id}});
+        m_factory("ArchiveTaskWindow", {{"taskIds", QVariantList{id}}});
+}
+
+QList<int> ArchiveApp::runInProgressWindow(const QVariantList &requests, const QVariantMap &extras) {
+    QList<int> ids;
+    if (requests.isEmpty())
+        return ids;
+    // The window comes first so that it owns the tasks and asks their questions.
+    QObject *window = m_factory ? m_factory("ArchiveTaskWindow", {{"taskIds", QVariantList{}}}) : nullptr;
+    QVariantMap options = extras;
+    options.insert("closesOnSuccess", true);
+    QVariantList list;
+    for (const auto &request : requests) {
+        ids << m_queue.start(request.toMap(), options, window);
+        list << ids.last();
+    }
+    if (window)
+        window->setProperty("taskIds", list);
+    return ids;
+}
+
+QStringList ArchiveApp::firstParts(const QStringList &archives) const {
+    // Choosing every part of a split package still extracts it once, from its first part.
+    QStringList result;
+    for (const auto &archive : archives) {
+        const QString path = QFileInfo(localPath(archive)).absoluteFilePath();
+        const auto volumes = nook::archive::volumesOf(path);
+        const QString first = volumes.split && !volumes.first.isEmpty() ? volumes.first : path;
+        if (!result.contains(first))
+            result << first;
+    }
+    return result;
+}
+
+QList<int> ArchiveApp::extractInto(const QStringList &archives, const QString &destination) {
+    const QStringList packages = firstParts(archives);
+    const QVariantMap values = prefs();
+    QVariantList requests;
+    for (const auto &archive : packages)
+        requests << QVariantMap{{"op", "extract"},
+                                {"archive", archive},
+                                {"destination", destination.isEmpty() ? folderOf(archive) : destination},
+                                // Several packages at once: each in a folder of its own.
+                                {"subfolder", packages.size() > 1 ? QStringLiteral("always") : values.value("subfolder").toString()},
+                                {"conflict", values.value("conflict")}};
+    return runInProgressWindow(requests, {});
+}
+
+void ArchiveApp::extractHere(const QStringList &archives) { extractInto(archives, {}); }
+
+void ArchiveApp::extractTo(const QStringList &archives) {
+    const QStringList packages = firstParts(archives);
+    if (packages.isEmpty())
+        return;
+    ++m_choosing;
+    m_pendingExtract = packages;
+    choose(this, "destination", folderOf(packages.first()));
+}
+
+QList<int> ArchiveApp::compressNow(const QStringList &items) {
+    if (items.isEmpty())
+        return {};
+    const QVariantMap defaults = compressDefaults(items);
+    const QString folder = defaults.value("folder").toString();
+    // One click, no questions: the name gets a number when it is taken.
+    const QString name = freeName(folder, defaults.value("name").toString() + ".zip");
+    QVariantMap choices{{"name", name}, {"folder", folder}, {"format", "zip"}, {"levelStep", 3}};
+    QVariantList requests = compressRequests(items, choices);
+    return runInProgressWindow(requests, {});
 }
 
 void ArchiveApp::needsAnswer(int id) {
@@ -292,11 +366,8 @@ QString ArchiveApp::localPath(const QString &location) const {
 }
 
 bool ArchiveApp::looksLikeArchive(const QString &location) const {
-    const QString name = QFileInfo(localPath(location)).fileName().toLower();
-    for (const auto &pattern : ArchivePatterns)
-        if (name.endsWith(QStringView(pattern).mid(1)))
-            return QFileInfo(localPath(location)).isFile();
-    return false;
+    const QFileInfo info(localPath(location));
+    return info.isFile() && nook::archive::looksLikeArchive(info.fileName());
 }
 
 QString ArchiveApp::folderOf(const QString &path) const { return QFileInfo(localPath(path)).absolutePath(); }
@@ -363,11 +434,10 @@ QVariantMap ArchiveApp::compressDefaults(const QStringList &items) const {
         return {};
     const QFileInfo first(localPath(items.first()));
     const QString folder = first.absolutePath();
-    QString name;
-    if (items.size() == 1)
-        name = first.isDir() || first.completeBaseName().isEmpty() ? first.fileName() : first.completeBaseName();
-    else
-        name = QFileInfo(folder).fileName().isEmpty() ? QStringLiteral("压缩包") : QFileInfo(folder).fileName();
+    QStringList paths;
+    for (const auto &item : items)
+        paths << localPath(item);
+    const QString name = nook::archive::suggestedName(paths);
     return {{"name", name},
             {"folder", folder},
             {"single", items.size() == 1 && first.isFile()},

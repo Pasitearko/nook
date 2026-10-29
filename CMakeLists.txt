@@ -20,7 +20,7 @@ add_library(nook_core STATIC
     src/diskmounts.cpp src/diskmounts.h src/ntfs.cpp src/ntfs.h
     src/filemanager1.cpp src/filemanager1.h src/filechooser.cpp src/filechooser.h src/appearance.cpp src/appearance.h)
 target_link_libraries(nook_core PUBLIC Qt6::Core Qt6::Gui Qt6::Quick Qt6::Concurrent Qt6::Network Qt6::DBus
-    PkgConfig::GIO PkgConfig::ICU SQLite3::SQLite3)
+    PkgConfig::GIO PkgConfig::ICU SQLite3::SQLite3 nook_archive)
 target_include_directories(nook_core PUBLIC src)
 target_compile_definitions(nook_core PUBLIC QT_NO_KEYWORDS)
 target_compile_options(nook_core PRIVATE -Wall -Wextra -Wpedantic)

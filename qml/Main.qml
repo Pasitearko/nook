@@ -23,6 +23,7 @@ ApplicationWindow {
     property var contextModel: null
     property var contextEntry: ({})
     property var contextApps: []
+    property var contextArchive: ({})
     property var deleteUris: []
     property string quickAccessUri: ""
     property string inputKind: "mkdir"
@@ -177,6 +178,7 @@ ApplicationWindow {
         contextModel = model
         contextEntry = selectedEntry(model)
         contextApps = contextEntry.fileUri && !contextEntry.folder ? app.openWithApplications(contextEntry.fileUri) : []
+        contextArchive = app.archiveActions(model.selectedUris)
         let pos = item.mapToItem(workspace, x, y)
         contextMenu.x = Math.max(8, Math.min(pos.x, window.layoutWidth - contextMenu.width - 8))
         contextMenu.y = Math.max(8, Math.min(pos.y, window.layoutHeight - contextMenu.implicitHeight - 8))
@@ -794,6 +796,12 @@ ApplicationWindow {
         NookMenuItem { text: "打开所在位置"; iconName: "folder"; visible: window.searching; onTriggered: { let uri = contextEntry.fileUri; searchBox.clear(); app.reveal(uri) } }
         NookMenuItem { objectName: "copyPathMenuItem"; text: contextModel && contextModel.selectedCount > 1 ? "复制完整路径（" + contextModel.selectedCount + " 项）" : "复制完整路径"; iconName: "copy"; shortcutText: "Ctrl Shift C"; enabled: contextModel && contextModel.selectedCount > 0; onTriggered: app.copyPaths(contextModel.selectedUris) }
         MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
+        NookMenuItem { objectName: "extractHereMenuItem"; text: contextArchive.single ? "解压到当前文件夹" : "解压到当前文件夹（各自的文件夹）"; iconName: "extract"; visible: !!contextArchive.extract; onTriggered: app.archive("extract-here", contextModel.selectedUris) }
+        NookMenuItem { objectName: "extractToMenuItem"; text: "解压到…"; iconName: "extract"; visible: !!contextArchive.extract; onTriggered: app.archive("extract-to", contextModel.selectedUris) }
+        NookMenuItem { objectName: "openArchiveMenuItem"; text: "用 nook解压缩 打开"; iconName: "archive"; visible: !!contextArchive.extract && !!contextArchive.single; onTriggered: app.archive("open", contextModel.selectedUris) }
+        NookMenuItem { objectName: "compressMenuItem"; text: "压缩…"; iconName: "compress"; visible: !!contextArchive.compress; onTriggered: app.archive("compress", contextModel.selectedUris) }
+        NookMenuItem { objectName: "compressZipMenuItem"; text: "压缩为“" + (contextArchive.zipName || "") + "”"; iconName: "compress"; visible: !!contextArchive.compress; onTriggered: app.archive("compress-zip", contextModel.selectedUris) }
+        MenuSeparator { visible: !!contextArchive.compress; height: visible ? implicitHeight : 0; contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
         NookMenuItem { text: "复制"; iconName: "copy"; shortcutText: "Ctrl C"; onTriggered: app.copy(false, contextModel) }
         NookMenuItem { text: "剪切"; iconName: "cut"; shortcutText: "Ctrl X"; onTriggered: app.copy(true, contextModel) }
         NookMenuItem { text: "粘贴到此处"; iconName: "paste"; shortcutText: "Ctrl V"; enabled: !window.searching; onTriggered: app.paste() }

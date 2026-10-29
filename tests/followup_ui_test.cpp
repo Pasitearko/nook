@@ -519,6 +519,37 @@ class FollowupUiTest : public QObject {
         closeSettings();
     }
 
+    void archiveMenuItems() {
+        // A plain file can be compressed, not extracted; the one-click name comes from it.
+        click(entry(uri("sample.txt")), Qt::RightButton);
+        auto *menu = object("fileContextMenu");
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QVERIFY(item("compressMenuItem")->isVisible());
+        QCOMPARE(item("compressZipMenuItem")->property("text").toString(), QStringLiteral("压缩为“sample.zip”"));
+        QVERIFY(!item("extractHereMenuItem")->isVisible());
+        QMetaObject::invokeMethod(menu, "close");
+        QTRY_VERIFY(!menu->property("visible").toBool());
+
+        QTemporaryDir other(QString(NOOK_BINARY_DIR) + "/archive-menu-XXXXXX");
+        for (const char *name : {"相册.zip", "data.7z.001", "notes.txt"}) {
+            QFile file(other.path() + "/" + name);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("x");
+        }
+        const auto at = [&](const char *name) { return QUrl::fromLocalFile(other.path() + "/" + name).toString(); };
+        QVariantMap actions = controller->archiveActions({at("相册.zip")});
+        QVERIFY(actions.value("extract").toBool());
+        QCOMPARE(actions.value("folderName").toString(), QStringLiteral("相册"));
+        actions = controller->archiveActions({at("相册.zip"), at("data.7z.001")});
+        QVERIFY(actions.value("extract").toBool());
+        QCOMPARE(actions.value("zipName").toString(), other.path().section('/', -1) + ".zip");
+        QVERIFY(!controller->archiveActions({at("相册.zip"), at("notes.txt")}).value("extract").toBool());
+        QVERIFY(!controller->archiveActions({"trash:///x"}).value("compress").toBool());
+        const QStringList command = controller->archiveCommand("extract-here", {at("相册.zip")});
+        QVERIFY(command.first().endsWith("nook-archive"));
+        QCOMPARE(command.mid(1), (QStringList{"--extract-here", "--", other.path() + "/相册.zip"}));
+    }
+
     void propertiesApplyRealPermissions() {
         const auto path = fixture->path() + "/sample.txt";
         QCOMPARE(::chmod(QFile::encodeName(path).constData(), 0600), 0);

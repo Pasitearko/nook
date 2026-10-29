@@ -129,6 +129,13 @@ class Application : public QObject {
     Q_INVOKABLE void reorderQuickAccess(const QString &sourceUri, const QString &targetUri);
     Q_INVOKABLE QVariantList openWithApplications(const QString &uri) const;
     Q_INVOKABLE void openWith(const QString &uri, const QString &applicationId);
+    // nook解压缩 from the right-click menu. archiveActions says what the selection allows:
+    // extract (every item is a local package), compress (every item is local), zipName.
+    Q_INVOKABLE QVariantMap archiveActions(const QStringList &uris) const;
+    // action: open, compress, compress-zip, extract-here, extract-to.
+    Q_INVOKABLE void archive(const QString &action, const QStringList &uris);
+    // The program and arguments archive() starts (nook-archive next to nook, else from PATH).
+    QStringList archiveCommand(const QString &action, const QStringList &uris) const;
     Q_INVOKABLE void saveSession();
     // A file chooser browses with the same controller but must never replace the saved tabs.
     void setRemembersSession(bool remember) {
