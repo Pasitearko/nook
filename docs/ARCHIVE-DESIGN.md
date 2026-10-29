@@ -260,7 +260,7 @@ Q1～Q8 回答后重新计算问题依赖，不一次猜定所有细节。后续
 - `/tmp/acp-delegate/del_mvt2e8kk_u2xf.out`：右键调用链、多选语义、portal 选择器及父窗限制、niri 浮动、desktop/MIME、FileManager1 和接入边界。
 - `/tmp/acp-delegate/del_mvt2e8kl_427w.out`：技术栈、共享 UI 约束、现有线程／worker 模式、Operations 限制、本机依赖、测试和打包调查。
 
-项目根目录为当前 Nook 仓库（目录名 `pulse Linux`）。关键项目内相对路径：
+项目根目录为当前 Nook 仓库（目录名 `nook`）。关键项目内相对路径：
 
 - `CMakeLists.txt`、`README.md`、`THIRD_PARTY.md`
 - `qml/Main.qml`、`qml/FileChooser.qml`、`qml/Theme.qml`

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import "palette.js" as Palette
+import "motion.js" as Motion
 
 Menu {
     id: menu
@@ -32,15 +33,21 @@ Menu {
             readonly property Item target: rows.currentItem
             readonly property bool shown: !!target && target.highlighted === true && target.enabled
             readonly property bool danger: !!target && target.danger === true
+            // Slides between visible rows on the plate spring; appearing from nothing snaps.
+            Glide {
+                id: follow
+                animated: menu.animated
+                shown: glide.opacity > 0.4
+                key: rows.currentIndex
+                targetY: glide.target ? glide.target.y : 0
+                targetHeight: glide.target ? glide.target.height : 0
+            }
             width: rows.width
-            y: target ? target.y : 0
-            height: target ? target.height : 0
+            y: follow.y
+            height: follow.height
             radius: 7
             color: danger ? menu.theme.dangerSoft : menu.theme.menuHighlight
             opacity: shown ? 1 : 0
-            // Slide only between visible rows; appearing from nothing snaps into place.
-            Behavior on y { enabled: menu.animated && glide.opacity > 0.4; NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
-            Behavior on height { enabled: menu.animated && glide.opacity > 0.4; NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
             Behavior on opacity { enabled: menu.animated; NumberAnimation { duration: 90 } }
             Behavior on color { enabled: menu.animated; ColorAnimation { duration: 120 } }
             Rectangle {
@@ -58,11 +65,22 @@ Menu {
         border.width: 1
         Rectangle { anchors.fill: parent; anchors.topMargin: 3; anchors.margins: -2; z: -1; radius: 15; color: menu.theme.shadow }
     }
+    // The card pops in on the Pop spring; its rows follow one after another (NookMenuItem).
     enter: Transition {
         ParallelAnimation {
             NumberAnimation { property: "opacity"; from: 0; to: 1; duration: menu.animated ? 120 : 0; easing.type: Easing.OutCubic }
-            NumberAnimation { property: "scale"; from: 0.97; to: 1; duration: menu.animated ? 140 : 0; easing.type: Easing.OutCubic }
+            NumberAnimation { property: "scale"; from: 0.94; to: 1; duration: menu.animated ? Motion.pop.ms : 0; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.pop.curve }
         }
     }
     // No exit fade: a still-fading menu would swallow an immediate right-click elsewhere.
+    // A menu asked to open while it is open (a right click on another file) would only move;
+    // these close it first, so it pops in again at its new place.
+    function reopen() {
+        if (visible) close()
+        open()
+    }
+    function popupAgain(item, x, y) {
+        if (visible) close()
+        popup(item, x, y)
+    }
 }

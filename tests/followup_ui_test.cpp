@@ -1095,6 +1095,66 @@ class FollowupUiTest : public QObject {
         }
         settings->set("animations", false);
     }
+    // Frames of the list motions (view morph, re-sort reflow, entering a folder) for a look.
+    void motionFrames() {
+        if (qEnvironmentVariableIsEmpty("NOOK_FRAME_DUMP"))
+            QSKIP("diagnostic only");
+        settings->set("animations", true);
+        settings->set("theme", qEnvironmentVariable("NOOK_FRAME_THEME", "light"));
+        for (int i = 0; i < 10; ++i) {
+            QFile file(fixture->path() + QStringLiteral("/motion-%1.txt").arg(i));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write(QByteArray((i * 7919) % 10 * 1000, 'x'));
+        }
+        controller->left()->refresh();
+        QTRY_VERIFY(!controller->left()->loading());
+        QTest::qWait(600);
+        const QString out = qEnvironmentVariable("NOOK_FRAME_DUMP");
+        auto frames = [&](const QString &name, const std::function<void()> &act) {
+            act();
+            QElapsedTimer t;
+            t.start();
+            for (int i = 0; i < 10; ++i) {
+                window->grabWindow().save(out + QStringLiteral("/%1-%2-%3ms.png").arg(name).arg(i, 2, 10, QChar('0')).arg(t.elapsed()));
+                QTest::qWait(40);
+            }
+            QTest::qWait(500);
+        };
+        frames("morph-grid", [&] { controller->setGrid(true); });
+        frames("morph-list", [&] { controller->setGrid(false); });
+        frames("reflow", [&] { controller->left()->sortBy("size", true); });
+        frames("preview-open", [&] { controller->preview()->open(uri("motion-3.txt")); });
+        frames("preview-close", [&] { controller->preview()->close(); });
+        frames("menu", [&] { click(entry(uri("motion-2.txt")), Qt::RightButton); });
+        frames("menu-again", [&] { click(entry(uri("motion-6.txt")), Qt::RightButton); });
+        QTest::keyClick(window, Qt::Key_Escape);
+        frames("enter", [&] { controller->left()->navigate(uri("folder")); });
+        settings->set("animations", false);
+    }
+    // Every settings page, for a look at the layout.
+    void settingsShots() {
+        if (qEnvironmentVariableIsEmpty("NOOK_FRAME_DUMP"))
+            QSKIP("diagnostic only");
+        const QString out = qEnvironmentVariable("NOOK_FRAME_DUMP");
+        settings->set("theme", qEnvironmentVariable("NOOK_FRAME_THEME", "light"));
+        auto *panel = object("settingsDialog");
+        QVERIFY(panel);
+        QMetaObject::invokeMethod(panel, "open");
+        QTRY_VERIFY(panel->property("opened").toBool());
+        for (int page = 0; page < 5; ++page) {
+            panel->setProperty("category", page);
+            QTest::qWait(250);
+            window->grabWindow().save(out + QStringLiteral("/settings-%1.png").arg(page));
+            auto *scroll = item("settingsScroll");
+            auto *flick = scroll ? scroll->property("contentItem").value<QQuickItem *>() : nullptr;
+            if (flick && flick->property("contentHeight").toReal() > flick->height() + 4) {
+                flick->setProperty("contentY", flick->property("contentHeight").toReal() - flick->height());
+                QTest::qWait(150);
+                window->grabWindow().save(out + QStringLiteral("/settings-%1-end.png").arg(page));
+            }
+        }
+        QMetaObject::invokeMethod(panel, "close");
+    }
     void rubberBandSelection() {
         auto *list = item("fileList");
         QVERIFY(list);

@@ -89,7 +89,7 @@ FocusScope {
                     currentIndex: pane.model.currentRow
                     highlightFollowsCurrentItem: false
                     highlight: glideComponent
-                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    ScrollBar.vertical: NookScrollBar {}
                     keyNavigationEnabled: false
                     Keys.onPressed: event => {
                         const row = pane.model.currentRow

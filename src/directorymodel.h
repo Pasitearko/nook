@@ -121,6 +121,9 @@ class DirectoryModel : public QAbstractListModel {
 
   Q_SIGNALS:
     void locationChanged();
+    // The same listing is about to come back in another order or with other rows (sort, filter,
+    // hidden files), so views can move their rows from where they were.
+    void rearranging();
     void statusChanged();
     void countChanged();
     void showHiddenChanged();

@@ -418,7 +418,7 @@ ArchiveWindow {
                         visible: window.ready
                         model: window.model
                         onActivated: row => window.activate(row)
-                        onContextRequested: (row, x, y) => { contextMenu.row = row; contextMenu.popup(fileList, x, y) }
+                        onContextRequested: (row, x, y) => { contextMenu.row = row; contextMenu.popupAgain(fileList, x, y) }
                         onDragStarted: window.dragOut()
                         onDragReleased: if (!dragSource.Drag.active) window.draggingOut = false
                     }

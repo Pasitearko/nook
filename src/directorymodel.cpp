@@ -112,6 +112,7 @@ void DirectoryModel::setShowHidden(bool value) {
         return;
     m_hidden = value;
     Q_EMIT showHiddenChanged();
+    Q_EMIT rearranging();
     refresh();
 }
 void DirectoryModel::navigate(const QString &input) {
@@ -296,6 +297,7 @@ void DirectoryModel::setFilter(const QVariantList &rules, bool foldersOnly) {
                 QRegularExpression::CaseInsensitiveOption));
     }
     m_filter = std::move(filter);
+    Q_EMIT rearranging();
     refresh();
 }
 QList<nook::Entry> DirectoryModel::filtered(QList<nook::Entry> entries) const {
@@ -520,5 +522,6 @@ void DirectoryModel::selectRows(const QList<int> &rows, const QStringList &base,
 void DirectoryModel::sortBy(const QString &key, bool descending) {
     m_sort = key;
     m_descending = descending;
+    Q_EMIT rearranging();
     refresh();
 }

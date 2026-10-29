@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
     QGuiApplication app(argc, argv);
     app.setApplicationName("nook");
     app.setOrganizationName("nook");
-    app.setApplicationVersion("0.2");
+    app.setApplicationVersion("0.3");
     app.setDesktopFileName("local.nook");
     QImageReader::setAllocationLimit(96);
     if (worker) {

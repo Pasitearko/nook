@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(nook VERSION 0.2 LANGUAGES CXX)
+project(nook VERSION 0.3 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -47,7 +47,8 @@ qt_add_executable(nook src/main.cpp)
 set(NOOK_SHARED_QML
     qml/ActionButton.qml qml/Icon.qml qml/NookMenu.qml qml/NookMenuItem.qml qml/NookToolTip.qml
     qml/NookComboBox.qml qml/Spotlight.qml qml/Theme.qml qml/palette.js qml/TextMenu.qml
-    qml/TextMenuArea.qml qml/WindowCloseButton.qml qml/NookDialog.qml)
+    qml/TextMenuArea.qml qml/WindowCloseButton.qml qml/NookDialog.qml qml/motion.js qml/Glide.qml
+    qml/HoverPlate.qml qml/NookScrollBar.qml)
 set(NOOK_ICONS
     qml/icons/folder.svg qml/icons/file.svg qml/icons/image.svg
     qml/icons/code.svg qml/icons/document.svg qml/icons/video.svg qml/icons/music.svg

@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
+import "motion.js" as Motion
 
 ApplicationWindow {
     id: window
@@ -74,6 +75,8 @@ ApplicationWindow {
     }
     function toast(message) {
         toastLeave.stop()
+        // A toast still showing steps back behind the new one and fades away.
+        if (prefs.animations && toastMessage !== "" && toastMessage !== message) { toastGhostLabel.text = toastMessage; toastBack.restart() }
         toastMessage = message; toastTimer.restart()
         if (prefs.animations) toastEnter.restart()
     }
@@ -179,17 +182,18 @@ ApplicationWindow {
         contextEntry = selectedEntry(model)
         contextApps = contextEntry.fileUri && !contextEntry.folder ? app.openWithApplications(contextEntry.fileUri) : []
         contextArchive = app.archiveActions(model.selectedUris)
+        blankMenu.close()
         let pos = item.mapToItem(workspace, x, y)
         contextMenu.x = Math.max(8, Math.min(pos.x, window.layoutWidth - contextMenu.width - 8))
         contextMenu.y = Math.max(8, Math.min(pos.y, window.layoutHeight - contextMenu.implicitHeight - 8))
-        contextMenu.open()
+        contextMenu.reopen()
     }
     function showBlankContext(model, item, x, y) {
-        hoverTimer.stop(); contextModel = model; contextEntry = ({})
+        hoverTimer.stop(); contextMenu.close(); contextModel = model; contextEntry = ({})
         const p = item.mapToItem(workspace, x, y)
         blankMenu.x = Math.max(8, Math.min(p.x, layoutWidth - blankMenu.width - 8))
         blankMenu.y = Math.max(8, Math.min(p.y, layoutHeight - blankMenu.implicitHeight - 8))
-        blankMenu.open()
+        blankMenu.reopen()
     }
     function inspectProperties(uri) { app.properties.inspect(uri); propertiesDialog.open() }
     function runSearch() {
@@ -344,11 +348,14 @@ ApplicationWindow {
         radius: 12
         color: theme.window
         border.width: 1; border.color: line
+        // Hover plates shared by the toolbar buttons and by the title bar's, gliding between them.
+        HoverPlate { id: toolPlate; objectName: "toolPlate"; animated: prefs.animations; color: theme.hover }
         ColumnLayout {
             anchors.fill: parent; anchors.margins: 1; spacing: 0
             Rectangle {
                 Layout.fillWidth: true; Layout.preferredHeight: 48
                 color: theme.chrome
+                HoverPlate { id: chromePlate; animated: prefs.animations; color: theme.hover }
                 // Dragging files over a tab switches to it after a moment; dropping puts them in its folder.
                 DropArea {
                     id: tabDrop
@@ -395,16 +402,84 @@ ApplicationWindow {
                     }
                     Text { text: "nook"; color: ink; font.pixelSize: 16; font.weight: Font.DemiBold }
                     Rectangle { width: 1; height: 18; color: line; Layout.leftMargin: 4; Layout.rightMargin: 4 }
+                    // The tabs as a ListModel kept in step with app.tabs, so a new tab can pop in
+                    // and a closed one fade out while its neighbours slide over.
+                    ListModel { id: tabModel }
+                    function syncTabs() {
+                        const next = app.tabs
+                        const same = (i, j) => tabModel.get(i).uri === next[j].uri && tabModel.get(i).title === next[j].title
+                        let head = 0, tail = 0
+                        while (head < tabModel.count && head < next.length && same(head, head)) ++head
+                        while (tail < tabModel.count - head && tail < next.length - head && same(tabModel.count - 1 - tail, next.length - 1 - tail)) ++tail
+                        const removed = tabModel.count - head - tail, added = next.slice(head, next.length - tail)
+                        if (removed === added.length) {
+                            added.forEach((tab, i) => tabModel.set(head + i, {uri: tab.uri, title: tab.title}))
+                        } else {
+                            if (removed > 0) tabModel.remove(head, removed)
+                            added.forEach((tab, i) => tabModel.insert(head + i, {uri: tab.uri, title: tab.title}))
+                        }
+                        // Set after the rows changed: removals shift the view's own current index.
+                        tabsList.currentIndex = app.activeTab
+                    }
+                    Connections { target: app; function onTabsChanged() { tabBar.syncTabs() } }
                     ListView {
                         id: tabsList
                         Layout.fillWidth: true; Layout.fillHeight: true
                         orientation: ListView.Horizontal
                         spacing: 4; clip: true
-                        model: app.tabs
+                        model: tabModel
+                        highlightFollowsCurrentItem: false
+                        // Tabs restored at start-up appear at once; later ones animate.
+                        property bool settled: false
+                        Component.onCompleted: { tabBar.syncTabs(); Qt.callLater(() => settled = true) }
+                        readonly property bool animated: prefs.animations && settled
+                        add: Transition {
+                            enabled: tabsList.animated
+                            ParallelAnimation {
+                                OpacityAnimator { from: 0; to: 1; duration: 140; easing.type: Easing.OutCubic }
+                                ScaleAnimator { from: 0.86; to: 1; duration: Motion.pop.ms; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.pop.curve }
+                            }
+                        }
+                        remove: Transition {
+                            enabled: tabsList.animated
+                            ParallelAnimation {
+                                OpacityAnimator { to: 0; duration: 120; easing.type: Easing.InCubic }
+                                ScaleAnimator { to: 0.86; duration: 120; easing.type: Easing.InCubic }
+                            }
+                        }
+                        displaced: Transition {
+                            enabled: tabsList.animated
+                            NumberAnimation { property: "x"; duration: Motion.smooth.ms; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.smooth.curve }
+                            NumberAnimation { property: "opacity"; to: 1; duration: 120 }
+                            NumberAnimation { property: "scale"; to: 1; duration: 120 }
+                        }
+                        // The active tab's card glides to the tab that becomes active.
+                        Rectangle {
+                            id: activeCard
+                            objectName: "activeTabCard"
+                            parent: tabsList.contentItem // under the tabs (z 1), which a view does not do itself
+                            readonly property Item target: tabsList.currentItem
+                            Glide {
+                                id: activeGlide
+                                animated: tabsList.animated
+                                shown: !!activeCard.target
+                                key: tabsList.currentIndex
+                                stiffness: Motion.snappy.k; damping: Motion.snappy.c
+                                targetX: activeCard.target ? activeCard.target.x : 0
+                                targetWidth: activeCard.target ? activeCard.target.width : 0
+                            }
+                            visible: !!target
+                            x: activeGlide.x; width: activeGlide.width
+                            height: 36; y: (tabsList.height - height) / 2
+                            radius: 7
+                            color: theme.tab
+                            border.width: 1; border.color: theme.line
+                        }
                         delegate: Item {
+                            id: tabItem
                             required property int index
-                            required property var modelData
-                            width: Math.min(190, Math.max(110, tabsList.width / Math.max(3, app.tabs.length)))
+                            required property string title
+                            width: Math.min(190, Math.max(110, tabsList.width / Math.max(3, tabModel.count)))
                             height: tabsList.height
                             Rectangle {
                                 objectName: "tabCard"
@@ -412,8 +487,9 @@ ApplicationWindow {
                                 anchors.verticalCenter: parent.verticalCenter
                                 radius: 7
                                 readonly property bool dropTarget: tabDrop.index === index
-                                color: dropTarget ? theme.dropFill : app.activeTab === index ? theme.tab : tabMouse.containsMouse ? theme.hover : "transparent"
-                                border.width: dropTarget || app.activeTab === index ? 1 : 0; border.color: dropTarget ? accent : theme.line
+                                // The active tab's own card is activeCard, which glides between tabs.
+                                color: dropTarget ? theme.dropFill : app.activeTab !== index && tabMouse.containsMouse ? theme.hover : "transparent"
+                                border.width: dropTarget ? 1 : 0; border.color: accent
                                 SpringProgress { running: parent.dropTarget && tabSpring.running; color: accent; duration: window.springDelay }
                                 MouseArea {
                                     id: tabMouse; anchors.fill: parent; hoverEnabled: true
@@ -424,25 +500,25 @@ ApplicationWindow {
                                 RowLayout {
                                     anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 5; spacing: 7
                                     Icon { name: "folder"; Layout.preferredWidth: 18; Layout.preferredHeight: 18 }
-                                    Text { text: modelData.title; color: app.activeTab === index ? ink : muted; font.pixelSize: 14; elide: Text.ElideRight; Layout.fillWidth: true; Layout.minimumWidth: 0 }
+                                    Text { text: tabItem.title; color: app.activeTab === index ? ink : muted; font.pixelSize: 14; elide: Text.ElideRight; Layout.fillWidth: true; Layout.minimumWidth: 0 }
                                     ActionButton { iconName: "close"; hint: "关闭标签"; implicitWidth: 28; implicitHeight: 28; leftPadding: 5; rightPadding: 5; topPadding: 5; bottomPadding: 5; foreground: muted; onClicked: app.closeTab(index) }
                                 }
                             }
                         }
                     }
                     Rectangle { width: 1; height: 18; color: line }
-                    ActionButton { iconName: dark ? "sun" : "moon"; hint: "切换深浅主题"; foreground: ink; onClicked: app.settings.set("theme", dark ? "light" : "dark") }
-                    ActionButton { objectName: "settingsButton"; iconName: "settings"; hint: "设置"; onClicked: settingsDialog.open() }
+                    ActionButton { plate: chromePlate; iconName: dark ? "sun" : "moon"; hint: "切换深浅主题"; foreground: ink; onClicked: app.settings.set("theme", dark ? "light" : "dark") }
+                    ActionButton { plate: chromePlate; objectName: "settingsButton"; iconName: "settings"; hint: "设置"; onClicked: settingsDialog.open() }
                     WindowCloseButton { objectName: "windowCloseButton"; hint: "关闭窗口 · Ctrl+W"; Layout.leftMargin: 2; onClicked: window.close() }
                 }
             }
             RowLayout {
                 Layout.fillWidth: true; Layout.preferredHeight: 57
                 Layout.leftMargin: 15; Layout.rightMargin: 17; spacing: 7
-                ActionButton { iconName: "back"; hint: "后退 · Alt+←"; enabled: app.activePane.canBack; foreground: ink; onClicked: app.activePane.back() }
-                ActionButton { iconName: "forward"; hint: "前进 · Alt+→"; enabled: app.activePane.canForward; foreground: ink; onClicked: app.activePane.forward() }
-                ActionButton { objectName: "upButton"; iconName: "up"; hint: "上一级 · Backspace / Alt+↑"; foreground: ink; onClicked: app.activePane.up() }
-                ActionButton { objectName: "refreshButton"; iconName: "refresh"; hint: "刷新 · F5"; foreground: ink; onClicked: { app.activePane.refresh(); app.refreshPlaces() } }
+                ActionButton { plate: toolPlate; iconName: "back"; hint: "后退 · Alt+←"; enabled: app.activePane.canBack; foreground: ink; onClicked: app.activePane.back() }
+                ActionButton { plate: toolPlate; iconName: "forward"; hint: "前进 · Alt+→"; enabled: app.activePane.canForward; foreground: ink; onClicked: app.activePane.forward() }
+                ActionButton { plate: toolPlate; objectName: "upButton"; iconName: "up"; hint: "上一级 · Backspace / Alt+↑"; foreground: ink; onClicked: app.activePane.up() }
+                ActionButton { plate: toolPlate; objectName: "refreshButton"; iconName: "refresh"; hint: "刷新 · F5"; foreground: ink; onClicked: { app.activePane.refresh(); app.refreshPlaces() } }
                 TextField {
                     id: address; objectName: "addressField"
                     ContextMenu.menu: null
@@ -579,7 +655,7 @@ ApplicationWindow {
                         }
                     }
                 }
-                ActionButton { objectName: "newTabButton"; iconName: "add"; hint: "新标签页 · Ctrl+T"; foreground: ink; onClicked: app.addTab(app.activePane.uri) }
+                ActionButton { plate: toolPlate; objectName: "newTabButton"; iconName: "add"; hint: "新标签页 · Ctrl+T"; foreground: ink; onClicked: app.addTab(app.activePane.uri) }
                 TextField {
                     id: searchBox; objectName: "searchField"
                     ContextMenu.menu: null
@@ -602,28 +678,28 @@ ApplicationWindow {
                 Layout.fillWidth: true; Layout.preferredHeight: 51; Layout.leftMargin: 18; Layout.rightMargin: 18; spacing: 5
                 ActionButton { text: window.layoutWidth < 1050 ? "新建" : "新建文件夹"; iconName: "add"; accent: true; enabled: !searching && !app.activePane.uri.startsWith("trash:"); onClicked: window.openInput("mkdir") }
                 Rectangle { width: 1; height: 19; color: line; Layout.leftMargin: 9; Layout.rightMargin: 9 }
-                ActionButton { iconName: "cut"; hint: "剪切 · Ctrl+X"; foreground: ink; enabled: currentModel().selectedCount > 0; onClicked: app.copy(true, currentModel()) }
-                ActionButton { iconName: "copy"; hint: "复制 · Ctrl+C"; foreground: ink; enabled: currentModel().selectedCount > 0; onClicked: app.copy(false, currentModel()) }
-                ActionButton { iconName: "paste"; hint: "粘贴 · Ctrl+V"; foreground: ink; enabled: !searching; onClicked: app.paste() }
-                ActionButton { iconName: "rename"; hint: "重命名 · F2"; foreground: ink; enabled: currentModel().selectedCount === 1 && !app.activePane.uri.startsWith("trash:"); onClicked: window.openInput("rename") }
-                ActionButton { iconName: "trash"; hint: "移入回收站 · Delete"; enabled: currentModel().selectedCount > 0; onClicked: window.removeSelection(false) }
+                ActionButton { plate: toolPlate; iconName: "cut"; hint: "剪切 · Ctrl+X"; foreground: ink; enabled: currentModel().selectedCount > 0; onClicked: { app.copy(true, currentModel()); confirm() } }
+                ActionButton { plate: toolPlate; iconName: "copy"; hint: "复制 · Ctrl+C"; foreground: ink; enabled: currentModel().selectedCount > 0; onClicked: { app.copy(false, currentModel()); confirm() } }
+                ActionButton { plate: toolPlate; iconName: "paste"; hint: "粘贴 · Ctrl+V"; foreground: ink; enabled: !searching; onClicked: app.paste() }
+                ActionButton { plate: toolPlate; iconName: "rename"; hint: "重命名 · F2"; foreground: ink; enabled: currentModel().selectedCount === 1 && !app.activePane.uri.startsWith("trash:"); onClicked: window.openInput("rename") }
+                ActionButton { plate: toolPlate; iconName: "trash"; hint: "移入回收站 · Delete"; enabled: currentModel().selectedCount > 0; onClicked: window.removeSelection(false) }
                 Rectangle { width: 1; height: 19; color: line; Layout.leftMargin: 9; Layout.rightMargin: 9 }
                 NookComboBox { id: sortBox; Layout.preferredWidth: 108; Layout.preferredHeight: 36; font.pixelSize: 13; model: ["名称排序", "大小排序", "日期排序", "类型排序"]; enabled: !searching; onActivated: app.activePane.sortBy(["name", "size", "date", "type"][currentIndex], currentIndex === 2) }
-                ActionButton { text: window.layoutWidth < 1100 ? "" : "隐藏文件"; iconName: "hidden"; hint: "显示/隐藏点文件 · Ctrl+H"; foreground: ink; active: app.activePane.showHidden; onClicked: app.activePane.showHidden = !app.activePane.showHidden }
-                ActionButton { text: window.layoutWidth < 1050 ? "" : "筛选"; iconName: "filter"; hint: "搜索筛选"; foreground: ink; active: filtersVisible; onClicked: filtersVisible = !filtersVisible }
+                ActionButton { plate: toolPlate; text: window.layoutWidth < 1100 ? "" : "隐藏文件"; iconName: "hidden"; hint: "显示/隐藏点文件 · Ctrl+H"; foreground: ink; active: app.activePane.showHidden; onClicked: app.activePane.showHidden = !app.activePane.showHidden }
+                ActionButton { plate: toolPlate; text: window.layoutWidth < 1050 ? "" : "筛选"; iconName: "filter"; hint: "搜索筛选"; foreground: ink; active: filtersVisible; onClicked: filtersVisible = !filtersVisible }
                 ActionButton {
-                    objectName: "selectionModeButton"
+                    objectName: "selectionModeButton"; plate: toolPlate
                     text: window.layoutWidth < 1050 ? "" : "选择"; iconName: "select"; foreground: ink
                     hint: selectionMode ? "退出选择模式 · Esc（保留已选项目）" : "选择模式：单击逐个勾选，任意处拖动框选"
                     active: selectionMode
                     onClicked: { selectionMode = !selectionMode; window.focusActivePane() }
                 }
                 Item { Layout.fillWidth: true }
-                ActionButton { iconName: "list"; hint: "列表视图"; active: !app.grid; foreground: ink; onClicked: app.grid = false }
-                ActionButton { iconName: "grid"; hint: "网格视图"; active: app.grid; foreground: ink; onClicked: app.grid = true }
+                ActionButton { plate: toolPlate; iconName: "list"; hint: "列表视图"; active: !app.grid; foreground: ink; onClicked: app.grid = false }
+                ActionButton { plate: toolPlate; iconName: "grid"; hint: "网格视图"; active: app.grid; foreground: ink; onClicked: app.grid = true }
                 Rectangle { width: 1; height: 19; color: line; Layout.leftMargin: 4; Layout.rightMargin: 4 }
-                ActionButton { objectName: "dualPaneButton"; iconName: "split"; hint: "左右双栏 · Ctrl+2"; active: app.dual; foreground: ink; onClicked: app.dual = !app.dual }
-                ActionButton { iconName: "terminal"; hint: "在此处打开 kitty"; foreground: ink; onClicked: app.terminal() }
+                ActionButton { plate: toolPlate; objectName: "dualPaneButton"; iconName: "split"; hint: "左右双栏 · Ctrl+2"; active: app.dual; foreground: ink; onClicked: app.dual = !app.dual }
+                ActionButton { plate: toolPlate; iconName: "terminal"; hint: "在此处打开 kitty"; foreground: ink; onClicked: app.terminal() }
             }
             RowLayout {
                 Layout.fillWidth: true; Layout.fillHeight: true
@@ -874,7 +950,7 @@ ApplicationWindow {
         enter: Transition {
             ParallelAnimation {
                 NumberAnimation { property: "opacity"; from: 0; to: 1; duration: prefs.animations ? 150 : 0; easing.type: Easing.OutCubic }
-                NumberAnimation { property: "scale"; from: 0.94; to: 1; duration: prefs.animations ? 190 : 0; easing.type: Easing.OutBack; easing.overshoot: 1.1 }
+                NumberAnimation { property: "scale"; from: 0.94; to: 1; duration: prefs.animations ? Motion.pop.ms : 0; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.pop.curve }
             }
         }
         exit: Transition { NumberAnimation { property: "opacity"; to: 0; duration: prefs.animations ? 90 : 0 } }
@@ -1039,7 +1115,10 @@ ApplicationWindow {
     Rectangle {
         id: previewOverlay
         anchors.fill: parent; z: 20
-        visible: app.preview.visible
+        // Kept on screen (but inert) while it shrinks back into the file.
+        readonly property bool shown: app.preview.visible
+        visible: shown || previewLeave.running
+        enabled: shown
         color: theme.scrim
         function constrainPanel() {
             previewPanel.width = Math.max(440, Math.min(previewPanel.width, width - 32))
@@ -1049,27 +1128,61 @@ ApplicationWindow {
         }
         onWidthChanged: if (visible) constrainPanel()
         onHeightChanged: if (visible) constrainPanel()
-        // The preview worker starts in the same moment; render-thread animators keep the
-        // open transition smooth even while the GUI thread handles the incoming result.
+        // The preview opens out of the file's icon (Open spring) and shrinks back into it when
+        // closed (Close spring). With the icon off screen it grows a little in place. The zoom is
+        // a transform, so the panel's own place and size (moved, resized) are never touched.
+        property real zoom: 1          // 0: at the icon, 1: where the panel sits
+        property real zoomFrom: 0.965  // the panel's scale at the icon
+        property point zoomShift: Qt.point(0, 0) // the icon's centre from the panel's
+        function aimAtIcon() {
+            const uri = app.preview.uri
+            let icon = null
+            for (const pane of [app.activeSide === 1 ? rightPane : leftPane, leftPane, rightPane])
+                if (!icon && pane && pane.visible) icon = pane.iconRectOf(uri, previewOverlay)
+            if (!icon) { zoomFrom = 0.965; zoomShift = Qt.point(0, 0); return }
+            zoomFrom = Math.max(0.04, Math.max(icon.width / previewPanel.width, icon.height / previewPanel.height))
+            zoomShift = Qt.point(icon.x + icon.width / 2 - previewPanel.x - previewPanel.width / 2,
+                                 icon.y + icon.height / 2 - previewPanel.y - previewPanel.height / 2)
+        }
         ParallelAnimation {
             id: previewEnter
             OpacityAnimator { target: previewOverlay; from: 0; to: 1; duration: 150; easing.type: Easing.OutCubic }
-            OpacityAnimator { target: previewPanel; from: 0; to: 1; duration: 170; easing.type: Easing.OutCubic }
-            ScaleAnimator { target: previewPanel; from: 0.965; to: 1; duration: 210; easing.type: Easing.OutCubic }
+            OpacityAnimator { target: previewPanel; from: 0; to: 1; duration: 110; easing.type: Easing.OutCubic }
+            NumberAnimation { target: previewOverlay; property: "zoom"; from: 0; to: 1; duration: Motion.open.ms; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.open.curve }
         }
-        onVisibleChanged: {
+        SequentialAnimation {
+            id: previewLeave
+            ParallelAnimation {
+                OpacityAnimator { target: previewOverlay; to: 0; duration: Motion.close.ms; easing.type: Easing.OutCubic }
+                OpacityAnimator { target: previewPanel; to: 0; duration: Motion.close.ms; easing.type: Easing.InCubic }
+                NumberAnimation { target: previewOverlay; property: "zoom"; to: 0; duration: Motion.close.ms; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.close.curve }
+            }
+            ScriptAction { script: { previewOverlay.opacity = 1; previewPanel.opacity = 1; previewOverlay.zoom = 1 } }
+        }
+        onShownChanged: {
             hoverTimer.stop()
-            if (visible && prefs.animations) previewEnter.restart()
-            if (visible) constrainPanel()
-            else {
+            previewEnter.stop(); previewLeave.stop()
+            opacity = 1; previewPanel.opacity = 1; zoom = 1
+            if (shown) {
+                constrainPanel()
+                if (prefs.animations) { aimAtIcon(); previewEnter.restart() }
+            } else {
                 suppressedHoverUri = app.preview.uri
                 if (app.activeSide === 1 && rightPane.visible) rightPane.focusFiles()
                 else leftPane.focusFiles()
+                if (prefs.animations) { aimAtIcon(); previewLeave.restart() }
             }
         }
         MouseArea { anchors.fill: parent; onClicked: app.preview.close() }
         Rectangle {
             id: previewPanel; objectName: "previewPanel"
+            transform: [
+                Scale {
+                    origin.x: previewPanel.width / 2; origin.y: previewPanel.height / 2
+                    xScale: previewOverlay.zoomFrom + (1 - previewOverlay.zoomFrom) * previewOverlay.zoom; yScale: xScale
+                },
+                Translate { x: previewOverlay.zoomShift.x * (1 - previewOverlay.zoom); y: previewOverlay.zoomShift.y * (1 - previewOverlay.zoom) }
+            ]
             width: Math.min(910, window.layoutWidth - 100); height: Math.min(650, window.layoutHeight - 90)
             x: (previewOverlay.width - width) / 2; y: (previewOverlay.height - height) / 2
             radius: 14; color: surface; border.width: 1; border.color: theme.lineStrong
@@ -1293,7 +1406,7 @@ ApplicationWindow {
         ParallelAnimation {
             id: toastEnter
             OpacityAnimator { target: toastCard; from: 0; to: 1; duration: 160; easing.type: Easing.OutCubic }
-            ScaleAnimator { target: toastCard; from: 0.94; to: 1; duration: 200; easing.type: Easing.OutBack }
+            ScaleAnimator { target: toastCard; from: 0.94; to: 1; duration: Motion.pop.ms; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.pop.curve }
         }
         SequentialAnimation {
             id: toastLeave
@@ -1303,6 +1416,22 @@ ApplicationWindow {
         width: Math.min(window.layoutWidth - 70, toastLabel.implicitWidth + 36); height: toastLabel.implicitHeight + 24; radius: 9
         color: theme.raised; border.color: theme.lineStrong
         Text { id: toastLabel; anchors.centerIn: parent; text: toastMessage; color: ink; font.pixelSize: 15; width: Math.min(implicitWidth, window.layoutWidth - 106); wrapMode: Text.Wrap }
+    }
+    // The previous toast, one step back: a little smaller and higher, fading out.
+    Rectangle {
+        id: toastGhost
+        anchors.horizontalCenter: parent.horizontalCenter; anchors.bottom: parent.bottom; anchors.bottomMargin: 45
+        z: 99; visible: toastBack.running
+        width: Math.min(window.layoutWidth - 70, toastGhostLabel.implicitWidth + 36); height: toastGhostLabel.implicitHeight + 24; radius: 9
+        color: theme.raised; border.color: theme.lineStrong
+        transform: Translate { id: toastGhostShift }
+        Text { id: toastGhostLabel; anchors.centerIn: parent; color: ink; font.pixelSize: 15; width: Math.min(implicitWidth, window.layoutWidth - 106); wrapMode: Text.Wrap }
+        ParallelAnimation {
+            id: toastBack
+            NumberAnimation { target: toastGhostShift; property: "y"; from: 0; to: -14; duration: Motion.pop.ms; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.pop.curve }
+            ScaleAnimator { target: toastGhost; from: 1; to: 0.92; duration: Motion.pop.ms; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.pop.curve }
+            OpacityAnimator { target: toastGhost; from: 0.9; to: 0; duration: Motion.pop.ms; easing.type: Easing.InQuad }
+        }
     }
     }
 }

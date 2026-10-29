@@ -1,12 +1,14 @@
 import QtQuick
 import QtQuick.Controls
 import "palette.js" as Palette
+import "motion.js" as Motion
 
 ComboBox {
     id: control
     property var hostWindow: ApplicationWindow.window
     readonly property var theme: hostWindow && hostWindow.theme ? hostWindow.theme : Palette.fallback()
     readonly property color ink: theme.ink
+    readonly property bool animated: hostWindow ? hostWindow.animations === true : false
     implicitWidth: 120
     implicitHeight: 34
     leftPadding: 12
@@ -23,7 +25,7 @@ ComboBox {
         color: control.theme.muted
         font.pixelSize: 17
         x: control.width - width - 12; anchors.verticalCenter: parent.verticalCenter
-        Behavior on rotation { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+        Behavior on rotation { enabled: control.animated; NumberAnimation { duration: Motion.snappy.ms; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.snappy.curve } }
     }
     // Same surface as the address, search and filter fields.
     background: Rectangle {
@@ -33,8 +35,22 @@ ComboBox {
         border.color: control.activeFocus || control.popup.visible ? control.theme.accent : control.hovered ? control.theme.lineStrong : control.theme.line
     }
     popup: Popup {
+        id: drop
         y: control.height + 5
-        enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 110; easing.type: Easing.OutCubic } }
+        // The list grows out of the box itself (Open spring) and its rows wait for the card.
+        enter: Transition {
+            ParallelAnimation {
+                NumberAnimation { property: "y"; from: 0; to: control.height + 5; duration: control.animated ? Motion.open.ms : 0; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.open.curve }
+                NumberAnimation { property: "height"; from: control.height; to: drop.implicitHeight; duration: control.animated ? Motion.open.ms : 0; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.open.curve }
+                NumberAnimation { property: "opacity"; from: 0.4; to: 1; duration: control.animated ? 90 : 0 }
+                SequentialAnimation {
+                    PropertyAction { target: drop.contentItem; property: "opacity"; value: control.animated ? 0 : 1 }
+                    PauseAnimation { duration: control.animated ? 110 : 0 }
+                    NumberAnimation { target: drop.contentItem; property: "opacity"; to: 1; duration: control.animated ? 120 : 0; easing.type: Easing.OutCubic }
+                }
+            }
+        }
+        clip: true
         width: control.width
         padding: 5
         implicitHeight: contentItem.implicitHeight + 10

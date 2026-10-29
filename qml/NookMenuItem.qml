@@ -15,7 +15,29 @@ MenuItem {
     height: implicitHeight
     leftPadding: 11; rightPadding: 11
     topPadding: 5; bottomPadding: 5
-    opacity: enabled ? 1 : 0.38
+    opacity: (enabled ? 1 : 0.38) * reveal
+    // As the menu opens, rows fade in one after another: 20 ms, then 9 ms a row (at most 8
+    // rows apart), 120 ms each.
+    property real reveal: 1
+    Connections {
+        target: control.menu
+        function onAboutToShow() {
+            const menu = control.menu
+            appear.stop()
+            if (!menu || menu.animated !== true) { control.reveal = 1; return }
+            let row = 0
+            while (row < menu.count && menu.itemAt(row) !== control) ++row
+            appear.delay = 20 + 9 * Math.min(row, 8)
+            control.reveal = 0
+            appear.start()
+        }
+    }
+    SequentialAnimation {
+        id: appear
+        property int delay: 20
+        PauseAnimation { duration: appear.delay }
+        NumberAnimation { target: control; property: "reveal"; to: 1; duration: 120; easing.type: Easing.OutCubic }
+    }
     hoverEnabled: true
     // The highlight itself is drawn (and animated) once by NookMenu.
     background: Rectangle {
