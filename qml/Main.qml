@@ -318,7 +318,7 @@ ApplicationWindow {
     }
 
     Shortcut { sequence: "Space"; enabled: app.preview.visible || (!window.editingText && !window.dialogsOpen && !window.menusOpen && currentModel().selectedCount > 0); autoRepeat: false; onActivated: window.preview(window.selectedEntry()) }
-    Shortcut { sequence: "Ctrl+T"; onActivated: app.addTab(app.activePane.uri) }
+    Shortcut { sequence: "Ctrl+T"; onActivated: app.addTab() }
     Shortcut { sequence: "Ctrl+W"; onActivated: { if (app.preview.visible) app.preview.close(); else if (app.tabs.length > 1) app.closeTab(app.activeTab); else window.close() } }
     Shortcut { sequence: "Ctrl+N"; onActivated: app.requestWindow() }
     Shortcut { sequence: "Ctrl+L"; onActivated: { address.forceActiveFocus(); address.selectAll() } }
@@ -707,7 +707,7 @@ ApplicationWindow {
                         }
                     }
                 }
-                ActionButton { plate: toolPlate; objectName: "newTabButton"; iconName: "add"; hint: "新标签页 · Ctrl+T"; foreground: ink; onClicked: app.addTab(app.activePane.uri) }
+                ActionButton { plate: toolPlate; objectName: "newTabButton"; iconName: "add"; hint: "新标签页 · Ctrl+T"; foreground: ink; onClicked: app.addTab() }
                 TextField {
                     id: searchBox; objectName: "searchField"
                     ContextMenu.menu: null

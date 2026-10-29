@@ -770,6 +770,25 @@ class FollowupUiTest : public QObject {
         QTest::keyClick(window, Qt::Key_Escape);
     }
 
+    // A new tab opens at the start folder (home by default), not where the current tab is.
+    void newTabOpensStartFolder() {
+        controller->navigate(uri("folder"));
+        QTRY_COMPARE(controller->left()->uri(), uri("folder"));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+        QTest::keyClick(window, Qt::Key_T, Qt::ControlModifier);
+        QTRY_COMPARE(controller->tabs().size(), 2);
+        QCOMPARE(controller->activeTab(), 1);
+        QCOMPARE(controller->left()->uri(), nook::normalizeUri(fixture->path()));
+        click(item("newTabButton"));
+        QTRY_COMPARE(controller->tabs().size(), 3);
+        QCOMPARE(controller->left()->uri(), nook::normalizeUri(fixture->path()));
+        controller->closeTab(2);
+        controller->closeTab(1);
+        controller->navigate(nook::normalizeUri(fixture->path()));
+        QTRY_VERIFY(!controller->left()->loading());
+    }
+
     void middleClickClosesTab() {
         controller->addTab(uri("folder"));
         QTRY_COMPARE(controller->tabs().size(), 2);
