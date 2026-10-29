@@ -278,6 +278,19 @@ void Application::closeTab(int index) {
     Q_EMIT activePaneChanged();
     m_saveTimer.start();
 }
+void Application::moveTab(int from, int to) {
+    if (from < 0 || from >= m_tabs.size() || to < 0 || to >= m_tabs.size() || from == to)
+        return;
+    m_tabs.move(from, to);
+    if (m_active == from)
+        m_active = to;
+    else if (from < m_active && to >= m_active)
+        --m_active;
+    else if (from > m_active && to <= m_active)
+        ++m_active;
+    Q_EMIT tabsChanged();
+    m_saveTimer.start();
+}
 void Application::setActiveTab(int index) {
     if (index < 0 || index >= m_tabs.size())
         return;

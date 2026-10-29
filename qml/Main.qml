@@ -429,6 +429,17 @@ ApplicationWindow {
                         spacing: 4; clip: true
                         model: tabModel
                         highlightFollowsCurrentItem: false
+                        // A drag moves a tab, not the strip; the wheel scrolls a strip that overflows.
+                        interactive: false
+                        property bool dragging: false
+                        onCurrentIndexChanged: if (!dragging && currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Contain)
+                        WheelHandler {
+                            onWheel: event => {
+                                const delta = event.angleDelta.x !== 0 ? event.angleDelta.x : event.angleDelta.y
+                                tabsList.contentX = Math.max(tabsList.originX, Math.min(tabsList.originX + tabsList.contentWidth - tabsList.width,
+                                                                                        tabsList.contentX - delta / 2))
+                            }
+                        }
                         // Tabs restored at start-up appear at once; later ones animate.
                         property bool settled: false
                         Component.onCompleted: { tabBar.syncTabs(); Qt.callLater(() => settled = true) }
@@ -461,11 +472,12 @@ ApplicationWindow {
                             readonly property Item target: tabsList.currentItem
                             Glide {
                                 id: activeGlide
-                                animated: tabsList.animated
+                                // Held under the pointer while its tab is dragged.
+                                animated: tabsList.animated && !tabsList.dragging
                                 shown: !!activeCard.target
                                 key: tabsList.currentIndex
                                 stiffness: Motion.snappy.k; damping: Motion.snappy.c
-                                targetX: activeCard.target ? activeCard.target.x : 0
+                                targetX: activeCard.target ? activeCard.target.x + activeCard.target.drawnShift : 0
                                 targetWidth: activeCard.target ? activeCard.target.width : 0
                             }
                             visible: !!target
@@ -481,21 +493,61 @@ ApplicationWindow {
                             required property string title
                             width: Math.min(190, Math.max(110, tabsList.width / Math.max(3, tabModel.count)))
                             height: tabsList.height
+                            // Dragged: the card follows the pointer (pointerX, in the list's content
+                            // coordinates, held at grab from its left edge) and the others make room.
+                            property bool held: false
+                            property real grab: 0
+                            property real pointerX: 0
+                            readonly property real shift: held ? pointerX - grab - x : 0
+                            // Let go, the card settles into its place.
+                            property real drawnShift: shift
+                            Behavior on drawnShift { enabled: tabsList.animated && !tabItem.held; NumberAnimation { duration: Motion.smooth.ms; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.smooth.curve } }
+                            z: held ? 2 : 1
                             Rectangle {
                                 objectName: "tabCard"
+                                x: tabItem.drawnShift
                                 width: parent.width; height: 36
                                 anchors.verticalCenter: parent.verticalCenter
                                 radius: 7
                                 readonly property bool dropTarget: tabDrop.index === index
-                                // The active tab's own card is activeCard, which glides between tabs.
-                                color: dropTarget ? theme.dropFill : app.activeTab !== index && tabMouse.containsMouse ? theme.hover : "transparent"
-                                border.width: dropTarget ? 1 : 0; border.color: accent
+                                // The active tab's own card is activeCard, which glides between tabs; a
+                                // dragged tab draws its own, over the tabs it passes.
+                                color: tabItem.held ? theme.tab : dropTarget ? theme.dropFill : app.activeTab !== index && tabMouse.containsMouse ? theme.hover : "transparent"
+                                border.width: dropTarget || tabItem.held ? 1 : 0; border.color: tabItem.held ? theme.line : accent
                                 SpringProgress { running: parent.dropTarget && tabSpring.running; color: accent; duration: window.springDelay }
                                 MouseArea {
                                     id: tabMouse; anchors.fill: parent; hoverEnabled: true
                                     // Middle-click closes the tab, as in browsers and other file managers.
                                     acceptedButtons: Qt.LeftButton | Qt.MiddleButton
-                                    onClicked: mouse => { if (mouse.button === Qt.MiddleButton) app.closeTab(index); else app.activeTab = index }
+                                    preventStealing: true
+                                    property real pressX: 0
+                                    onClicked: mouse => { if (mouse.button === Qt.MiddleButton) app.closeTab(index) }
+                                    // As in browsers: a press picks the tab, dragging it sideways moves it.
+                                    onPressed: mouse => {
+                                        if (mouse.button !== Qt.LeftButton) return
+                                        const p = mapToItem(tabsList.contentItem, mouse.x, mouse.y)
+                                        pressX = p.x
+                                        tabItem.grab = p.x - tabItem.x
+                                        app.activeTab = index
+                                    }
+                                    onPositionChanged: mouse => {
+                                        if (!(mouse.buttons & Qt.LeftButton) || tabModel.count < 2) return
+                                        const p = mapToItem(tabsList.contentItem, mouse.x, mouse.y)
+                                        if (!tabItem.held && Math.abs(p.x - pressX) < Qt.styleHints.startDragDistance) return
+                                        tabItem.held = true
+                                        tabsList.dragging = true
+                                        // Kept within the strip.
+                                        tabItem.pointerX = Math.max(tabItem.grab, Math.min(tabsList.contentWidth - tabItem.width + tabItem.grab, p.x))
+                                        const over = tabsList.indexAt(tabItem.pointerX - tabItem.grab + tabItem.width / 2, tabItem.height / 2)
+                                        if (over >= 0 && over !== index) {
+                                            const from = index
+                                            tabModel.move(from, over, 1)
+                                            app.moveTab(from, over)
+                                        }
+                                    }
+                                    function drop() { tabItem.held = false; tabsList.dragging = false }
+                                    onReleased: drop()
+                                    onCanceled: drop()
                                 }
                                 RowLayout {
                                     anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 5; spacing: 7

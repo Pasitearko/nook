@@ -106,6 +106,8 @@ class Application : public QObject {
     void setGrid(bool grid);
     Q_INVOKABLE void addTab(const QString &uri = {});
     Q_INVOKABLE void closeTab(int index);
+    // Drag to reorder: the tab at from takes the place of the one at to; the active tab stays active.
+    Q_INVOKABLE void moveTab(int from, int to);
     Q_INVOKABLE void navigate(const QString &uri);
     Q_INVOKABLE void openItem(const QVariantMap &entry);
     Q_INVOKABLE void openExternal(const QString &uri);

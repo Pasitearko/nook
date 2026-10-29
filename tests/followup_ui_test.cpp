@@ -782,6 +782,48 @@ class FollowupUiTest : public QObject {
         QTRY_COMPARE(controller->tabs().size(), 1);
     }
 
+    // Dragging a tab sideways moves it among the others; the strip itself stays put.
+    void dragReordersTabs() {
+        controller->addTab(uri("folder"));
+        controller->addTab(nook::parentUri(nook::normalizeUri(fixture->path())));
+        QTRY_COMPARE(controller->tabs().size(), 3);
+        controller->setActiveTab(0);
+        QTest::qWait(50);
+        auto ordered = [this] {
+            auto cards = visualItems(window->contentItem(), "tabCard");
+            std::sort(cards.begin(), cards.end(), [](QQuickItem *a, QQuickItem *b) {
+                return a->mapToScene({0, 0}).x() < b->mapToScene({0, 0}).x();
+            });
+            return cards;
+        };
+        auto uris = [this] {
+            QStringList list;
+            for (const auto &tab : controller->tabs())
+                list << tab.toMap().value("uri").toString();
+            return list;
+        };
+        const QStringList before = uris();
+        const auto cards = ordered();
+        QCOMPARE(cards.size(), 3);
+        const QPointF start = cards[0]->mapToScene({30, cards[0]->height() / 2});
+        const qreal step = cards[1]->mapToScene({0, 0}).x() - cards[0]->mapToScene({0, 0}).x();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start.toPoint());
+        // Across the second tab, onto the third.
+        for (int i = 1; i <= 20; ++i) {
+            QTest::mouseMove(window, (start + QPointF(step * 2.2 * i / 20, 0)).toPoint());
+            QTest::qWait(10);
+        }
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, (start + QPointF(step * 2.2, 0)).toPoint());
+        QTRY_COMPARE(uris(), (QStringList{before[1], before[2], before[0]}));
+        QCOMPARE(controller->activeTab(), 2);
+        auto *strip = cards[0]->parentItem()->parentItem()->parentItem(); // card, tab, content, list
+        QCOMPARE(strip->property("contentX").toReal(), strip->property("originX").toReal());
+        // Back in place on the strip after letting go.
+        QTRY_COMPARE(ordered()[2]->property("x").toReal(), 0.0);
+        controller->closeTab(2);
+        controller->closeTab(1);
+    }
+
     // The window's ✕ sits in the top-right corner, beside the toolbar buttons, and closes it.
     void closeButtonClosesWindow() {
         auto *close = item("windowCloseButton");
