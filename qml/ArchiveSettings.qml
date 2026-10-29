@@ -10,11 +10,13 @@ NookDialog {
     required property var app
     readonly property var prefs: app.prefs
     readonly property var store: app.passwords
+    readonly property var defaults: app.defaults
+    signal defaultRequested(bool restoring)
     iconName: "settings"
     title: "nook解压缩 设置"
     message: "外观、缩放和动画跟随 nook 的设置。"
     width: Math.min(560, windowWidth - 40)
-    onAboutToShow: { store.load(); newName.text = ""; newPassword.text = "" }
+    onAboutToShow: { store.load(); defaults.refresh(); newName.text = ""; newPassword.text = "" }
 
     component Heading: Text { color: dialog.theme.ink; font.pixelSize: 14; font.weight: Font.DemiBold; Layout.topMargin: 6 }
     Flickable {
@@ -26,6 +28,38 @@ NookDialog {
         ColumnLayout {
             id: body
             width: parent.width - 10; spacing: 10
+            Heading { text: "默认压缩软件" }
+            Text {
+                objectName: "archiveDefaultStatus"
+                Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 13; color: dialog.theme.ink
+                text: dialog.defaults.state === "unavailable" ? "安装 nook解压缩 后才能设置默认程序。"
+                    : dialog.defaults.state === "all" ? "已是全部 " + dialog.defaults.typeCount + " 种类型的默认程序"
+                    : "已接管 " + dialog.defaults.ownedCount + " / " + dialog.defaults.typeCount + " 种类型"
+                        + (dialog.defaults.otherName !== "" ? "；其余主要由“" + dialog.defaults.otherName + "”打开" : "；其余未指定默认程序")
+            }
+            Text {
+                Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 12; color: dialog.theme.muted
+                text: "仅在你确认后更改；先备份，再记录原默认程序。恢复时保留你后来改给其他程序的类型。"
+            }
+            Flow {
+                Layout.fillWidth: true; spacing: 8
+                ActionButton {
+                    objectName: "archiveSetDefault"; text: "设为默认压缩软件…"; iconName: "archive"
+                    foreground: dialog.theme.ink; implicitHeight: 34
+                    enabled: dialog.defaults.state !== "unavailable" && dialog.defaults.state !== "all"
+                    onClicked: { dialog.close(); dialog.defaultRequested(false) }
+                }
+                ActionButton {
+                    objectName: "archiveRestoreDefaults"; text: "恢复之前的默认…"; implicitHeight: 34
+                    foreground: dialog.theme.ink; enabled: dialog.defaults.canRestore
+                    onClicked: { dialog.close(); dialog.defaultRequested(true) }
+                }
+            }
+            Text {
+                visible: dialog.defaults.lastBackup !== ""
+                text: "最近备份：" + dialog.defaults.lastBackup
+                Layout.fillWidth: true; wrapMode: Text.WrapAnywhere; font.pixelSize: 12; color: dialog.theme.muted
+            }
             Heading { text: "任务" }
             RowLayout {
                 Layout.fillWidth: true; spacing: 12

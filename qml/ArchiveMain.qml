@@ -14,10 +14,12 @@ ArchiveWindow {
     readonly property var queue: app.queue
     readonly property bool ready: document.state === "ready"
     readonly property bool dialogsOpen: passwordDialog.visible || infoDialog.visible || extractDialog.visible || settingsDialog.visible || prompts.busy
-                                        || deleteDialog.visible || renameDialog.visible || modifiedDialog.visible || unsavedDialog.visible
+                                        || deleteDialog.visible || renameDialog.visible || modifiedDialog.visible || unsavedDialog.visible || defaultDialog.visible
     readonly property var files: app.files
     readonly property bool writable: ready && !document.readOnly
     property bool dropping: false
+    property bool defaultBannerClosed: false
+    onActiveChanged: if (active) app.defaults.refresh()
     property string pendingSave: ""
     // Rows being dragged out of the window: the token of their extraction, while it runs.
     property int dragToken: 0
@@ -316,6 +318,47 @@ ArchiveWindow {
                     WindowCloseButton { objectName: "archiveClose"; hint: "关闭窗口 · Ctrl+W"; onClicked: window.close() }
                 }
                 Rectangle { Layout.fillWidth: true; height: 1; color: window.line; opacity: 0.7 }
+                Rectangle {
+                    objectName: "archiveDefaultBanner"
+                    visible: document.state === "empty" && !window.defaultBannerClosed
+                        && !window.app.prefs.defaultBannerDismissed && window.app.defaults.state !== "all"
+                        && window.app.defaults.state !== "unavailable"
+                    Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12
+                    Layout.topMargin: visible ? 10 : 0; Layout.bottomMargin: visible ? 10 : 0
+                    implicitHeight: bannerBody.implicitHeight + 20
+                    radius: 10; color: window.theme.accentSoft; border.color: window.line
+                    ColumnLayout {
+                        id: bannerBody
+                        anchors.fill: parent; anchors.margins: 10; spacing: 6
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 10
+                            Icon { name: "archive"; width: 20; height: 20 }
+                            Text {
+                                text: "让 nook解压缩 打开压缩包"
+                                Layout.fillWidth: true; wrapMode: Text.Wrap
+                                color: window.ink; font.pixelSize: 14; font.weight: Font.DemiBold
+                            }
+                            ActionButton {
+                                objectName: "archiveDefaultBannerClose"; iconName: "close"; hint: "本窗口暂不提示"
+                                foreground: window.muted; implicitWidth: 28; implicitHeight: 28
+                                onClicked: window.defaultBannerClosed = true
+                            }
+                        }
+                        Flow {
+                            Layout.fillWidth: true; spacing: 10
+                            ActionButton {
+                                objectName: "archiveDefaultBannerSet"; text: "设为默认压缩软件…"
+                                foreground: window.ink; implicitHeight: 32
+                                onClicked: defaultDialog.openFor(false)
+                            }
+                            ArchiveCheck {
+                                objectName: "archiveDefaultDismiss"; text: "不再提示"
+                                checked: window.app.prefs.defaultBannerDismissed === true
+                                onToggled: window.app.setPref("defaultBannerDismissed", checked)
+                            }
+                        }
+                    }
+                }
                 // What: the actions on the package, then how it is read.
                 RowLayout {
                     visible: window.ready
@@ -584,7 +627,14 @@ ArchiveWindow {
         selectedCount: window.model.selectedCount
         onExtract: choices => window.extractWith(choices)
     }
-    ArchiveSettings { id: settingsDialog; app: window.app }
+    ArchiveSettings {
+        id: settingsDialog; app: window.app
+        onDefaultRequested: restoring => defaultDialog.openFor(restoring)
+    }
+    ArchiveDefaultDialog {
+        id: defaultDialog; app: window.app
+        onCompleted: message => window.toast(message)
+    }
     NookMenu {
         id: addMenu
         NookMenuItem { text: "添加文件…"; iconName: "file"; onTriggered: window.app.choose(window, "add") }

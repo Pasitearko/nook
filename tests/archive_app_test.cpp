@@ -6,11 +6,11 @@
 #include "passwordstore.h"
 #include "taskqueue.h"
 #include <QDir>
-#include <QRandomGenerator>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QRandomGenerator>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -20,6 +20,8 @@
 #include <memory>
 
 namespace {
+
+std::unique_ptr<QTemporaryDir> environment;
 
 QQuickItem *findVisual(QQuickItem *parent, const QString &name) {
     if (!parent)
@@ -155,7 +157,7 @@ class ArchiveAppTest : public QObject {
 
   private Q_SLOTS:
     void initTestCase() {
-        fixture = std::make_unique<QTemporaryDir>(QString(NOOK_BINARY_DIR) + "/archive-app-fixture-XXXXXX");
+        fixture = std::move(environment);
         QVERIFY(fixture->isValid());
         qputenv("XDG_CONFIG_HOME", QFile::encodeName(fixture->path() + "/config"));
         // The trash goes where the fixtures are (same filesystem), never the real one.
@@ -288,7 +290,8 @@ class ArchiveAppTest : public QObject {
         ArchiveApp app(&settings, [](const QString &) {});
         ArchiveDocument document;
         QQmlEngine engine;
-        QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveMain.qml"));
+        QQmlComponent component(&engine,
+                                QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveMain.qml"));
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
         std::unique_ptr<QObject> root(component.createWithInitialProperties(
             {{"app", QVariant::fromValue(&app)}, {"document", QVariant::fromValue(&document)}}));
@@ -339,7 +342,8 @@ class ArchiveAppTest : public QObject {
         ArchiveApp app(&settings, [](const QString &) {});
         ArchiveDocument document;
         QQmlEngine engine;
-        QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveMain.qml"));
+        QQmlComponent component(&engine,
+                                QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveMain.qml"));
         std::unique_ptr<QObject> root(component.createWithInitialProperties(
             {{"app", QVariant::fromValue(&app)}, {"document", QVariant::fromValue(&document)}}));
         QVERIFY2(root, qPrintable(component.errorString()));
@@ -405,7 +409,9 @@ class ArchiveAppTest : public QObject {
         writeZip(zip, {{"secret.txt", "classified"}}, "right");
         const QString target = fixture->path() + "/locked-target";
         QDir().mkpath(target);
-        const int id = t.queue()->start({{"op", "extract"}, {"archive", zip}, {"destination", target}, {"subfolder", "never"}}, {}, nullptr);
+        const int id = t.queue()->start(
+            {{"op", "extract"}, {"archive", zip}, {"destination", target}, {"subfolder", "never"}}, {},
+            nullptr);
         QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("password"), 10000);
         QVERIFY(!t.queue()->task(id).value("passwordWrong").toBool());
         t.queue()->submitPassword(id, "wrong", "");
@@ -529,7 +535,8 @@ class ArchiveAppTest : public QObject {
         put(base + "/a.txt", "aaa");
         put(base + "/b.txt", "bbb");
         QQmlEngine engine;
-        QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveCompose.qml"));
+        QQmlComponent component(&engine,
+                                QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveCompose.qml"));
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
         std::unique_ptr<QObject> root(component.createWithInitialProperties(
             {{"app", QVariant::fromValue(&t.app)}, {"items", QStringList{base + "/a.txt", base + "/b.txt"}}}));
@@ -560,7 +567,8 @@ class ArchiveAppTest : public QObject {
         ArchiveDocument document;
         t.app.attach(&document);
         QQmlEngine engine;
-        QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveMain.qml"));
+        QQmlComponent component(&engine,
+                                QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveMain.qml"));
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
         std::unique_ptr<QObject> root(component.createWithInitialProperties(
             {{"app", QVariant::fromValue(&t.app)}, {"document", QVariant::fromValue(&document)}}));
@@ -609,7 +617,8 @@ class ArchiveAppTest : public QObject {
             opened << type;
             QVariantMap initial = properties;
             initial.insert("app", QVariant::fromValue(&t.app));
-            QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/" + type + ".qml"));
+            QQmlComponent component(&engine,
+                                    QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/" + type + ".qml"));
             if (!component.isReady())
                 qWarning() << component.errorString();
             windows.emplace_back(component.createWithInitialProperties(initial));
@@ -620,7 +629,9 @@ class ArchiveAppTest : public QObject {
         const QString target = fixture->path() + "/orphan-target";
         put(target + "/o.txt", "old");
         // Started by no window (as from nook's menu, or after its window closed).
-        const int id = t.queue()->start({{"op", "extract"}, {"archive", zip}, {"destination", target}, {"subfolder", "never"}}, {}, nullptr);
+        const int id = t.queue()->start(
+            {{"op", "extract"}, {"archive", zip}, {"destination", target}, {"subfolder", "never"}}, {},
+            nullptr);
         QTRY_COMPARE_WITH_TIMEOUT(opened, QStringList{"ArchiveTaskWindow"}, 10000);
         auto *window = qobject_cast<QQuickWindow *>(windows.back().get());
         QVERIFY(window);
@@ -637,12 +648,96 @@ class ArchiveAppTest : public QObject {
         QTRY_VERIFY_WITH_TIMEOUT(!window->isVisible(), 5000);
     }
 
+    void defaultAssociationUiIsExplicitAndRestorable() {
+        TestApp t;
+        t.app.setPref("defaultBannerDismissed", false);
+        t.app.clearRecent();
+        ArchiveDocument document;
+        QQmlEngine engine;
+        auto root = mainWindow(engine, t.app, document);
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QTRY_VERIFY(shown(window, "archiveDefaultBanner"));
+        auto *defaults = t.app.defaults();
+        QCOMPARE(defaults->defaultFor("application/zip"), QStringLiteral("archive-test-other.desktop"));
+        const QString list = defaults->mimeappsPath();
+        const QString original = read(list);
+        QMetaObject::invokeMethod(shown(window, "archiveDefaultBannerSet"), "clicked");
+        QTRY_VERIFY(shown(window, "archiveDefaultConfirm"));
+        QCOMPARE(read(list), original); // opening and cancelling never takes over
+        QMetaObject::invokeMethod(shown(window, "archiveDefaultCancel"), "clicked");
+        QTRY_VERIFY(!shown(window, "archiveDefaultConfirm"));
+        QCOMPARE(read(list), original);
+        QMetaObject::invokeMethod(shown(window, "archiveDefaultBannerSet"), "clicked");
+        QTRY_VERIFY(shown(window, "archiveDefaultConfirm"));
+        QCOMPARE(findVisual(window->contentItem(), "archiveDefaultTypes")->property("count").toInt(),
+                 defaults->typeCount());
+        QTest::qWait(250);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-default-confirm.png"));
+        QMetaObject::invokeMethod(shown(window, "archiveDefaultConfirm"), "clicked");
+        QTRY_COMPARE(defaults->state(), QStringLiteral("all"));
+        QTRY_VERIFY(!shown(window, "archiveDefaultBanner"));
+        QVERIFY(defaults->canRestore());
+        QMetaObject::invokeMethod(findVisual(window->contentItem(), "archiveSettingsButton"), "clicked");
+        QTRY_VERIFY(shown(window, "archiveRestoreDefaults"));
+        QVERIFY(!findVisual(window->contentItem(), "archiveSetDefault")->isEnabled());
+        QTest::qWait(250);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-default-settings.png"));
+        QMetaObject::invokeMethod(shown(window, "archiveRestoreDefaults"), "clicked");
+        QTRY_VERIFY(shown(window, "archiveDefaultConfirm"));
+        QCOMPARE(defaults->state(), QStringLiteral("all")); // restore also asks first
+        QMetaObject::invokeMethod(shown(window, "archiveDefaultConfirm"), "clicked");
+        QTRY_VERIFY(!defaults->canRestore());
+        QCOMPARE(defaults->defaultFor("application/zip"), QStringLiteral("archive-test-other.desktop"));
+        QTRY_VERIFY(shown(window, "archiveDefaultBanner"));
+
+        // The close button hides only this window; "don't ask" is persisted separately.
+        QMetaObject::invokeMethod(shown(window, "archiveDefaultBannerClose"), "clicked");
+        QTRY_VERIFY(!shown(window, "archiveDefaultBanner"));
+        root.reset();
+        root = mainWindow(engine, t.app, document);
+        window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY(window);
+        QTRY_VERIFY(shown(window, "archiveDefaultBanner"));
+        auto *dismiss = shown(window, "archiveDefaultDismiss");
+        QVERIFY(dismiss);
+        dismiss->setProperty("checked", true);
+        QMetaObject::invokeMethod(dismiss, "toggled");
+        QTRY_VERIFY(!shown(window, "archiveDefaultBanner"));
+        QCOMPARE(t.app.prefs().value("defaultBannerDismissed").toBool(), true);
+        // The permanent entry remains accessible even when the banner is dismissed.
+        QMetaObject::invokeMethod(findVisual(window->contentItem(), "archiveSettingsButton"), "clicked");
+        QTRY_VERIFY(shown(window, "archiveSetDefault"));
+        QVERIFY(shown(window, "archiveSetDefault")->isEnabled());
+        t.app.setPref("defaultBannerDismissed", false);
+    }
+
+    void defaultBannerOnlyInEmptyWindow() {
+        TestApp t;
+        t.app.setPref("defaultBannerDismissed", false);
+        ArchiveDocument document;
+        QQmlEngine engine;
+        auto root = mainWindow(engine, t.app, document);
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY(window);
+        QTRY_VERIFY(shown(window, "archiveDefaultBanner"));
+        const QString zip = fixture->path() + "/banner.zip";
+        writeZip(zip, {{"hello.txt", "hello"}});
+        document.open(zip);
+        QTRY_COMPARE_WITH_TIMEOUT(document.state(), QStringLiteral("ready"), 10000);
+        QVERIFY(!shown(window, "archiveDefaultBanner"));
+        document.close();
+        QTRY_VERIFY(shown(window, "archiveDefaultBanner"));
+    }
+
     void settingsManageSavedPasswords() {
         TestApp t;
         t.app.passwords()->save("网盘", "abc123");
         ArchiveDocument document;
         QQmlEngine engine;
-        QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveMain.qml"));
+        QQmlComponent component(&engine,
+                                QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveMain.qml"));
         std::unique_ptr<QObject> root(component.createWithInitialProperties(
             {{"app", QVariant::fromValue(&t.app)}, {"document", QVariant::fromValue(&document)}}));
         QVERIFY2(root, qPrintable(component.errorString()));
@@ -671,7 +766,8 @@ class ArchiveAppTest : public QObject {
         t.app.setWindowFactory([&](const QString &type, const QVariantMap &properties) -> QObject * {
             QVariantMap initial = properties;
             initial.insert("app", QVariant::fromValue(&t.app));
-            QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/" + type + ".qml"));
+            QQmlComponent component(&engine,
+                                    QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/" + type + ".qml"));
             if (!component.isReady())
                 qWarning() << component.errorString();
             windows.emplace_back(component.createWithInitialProperties(initial));
@@ -738,7 +834,8 @@ class ArchiveAppTest : public QObject {
         t.app.setWindowFactory([&](const QString &type, const QVariantMap &properties) -> QObject * {
             QVariantMap initial = properties;
             initial.insert("app", QVariant::fromValue(&t.app));
-            QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/" + type + ".qml"));
+            QQmlComponent component(&engine,
+                                    QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/" + type + ".qml"));
             windows.emplace_back(component.createWithInitialProperties(initial));
             return windows.back().get();
         });
@@ -914,7 +1011,8 @@ class ArchiveAppTest : public QObject {
         const QString zip = fixture->path() + "/convert-ui.zip";
         writeZip(zip, {{QByteArray("\xd6\xd0\xce\xc4/\xb1\xa8\xb8\xe6.txt"), "report"}});
         QQmlEngine engine;
-        QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveCompose.qml"));
+        QQmlComponent component(&engine,
+                                QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveCompose.qml"));
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
         std::unique_ptr<QObject> root(component.createWithInitialProperties(
             {{"app", QVariant::fromValue(&t.app)}, {"items", QStringList()}, {"convertFrom", zip}, {"encoding", "GB18030"}}));
@@ -949,5 +1047,29 @@ class ArchiveAppTest : public QObject {
     }
 };
 
-QTEST_MAIN(ArchiveAppTest)
+// Set XDG before QApplication/GIO is first used. Association writes must never reach the user's
+// desktop, even when this test binary is launched directly rather than through ctest.
+int main(int argc, char **argv) {
+    environment = std::make_unique<QTemporaryDir>(QString(NOOK_BINARY_DIR) + "/archive-app-fixture-XXXXXX");
+    if (!environment->isValid())
+        return 1;
+    const QString base = environment->path();
+    qputenv("XDG_CONFIG_HOME", QFile::encodeName(base + "/config"));
+    qputenv("XDG_CONFIG_DIRS", QFile::encodeName(base + "/sysconfig"));
+    qputenv("XDG_DATA_HOME", QFile::encodeName(base + "/data"));
+    qputenv("XDG_DATA_DIRS", "/usr/share");
+    qputenv("XDG_CURRENT_DESKTOP", "nook-test");
+    qputenv("XDG_CACHE_HOME", QFile::encodeName(base + "/cache"));
+    QString desktop = read(QString(NOOK_SOURCE_DIR) + "/packaging/local.nook.archive.desktop");
+    desktop.replace("Exec=nook-archive %U", "Exec=true %U");
+    put(base + "/data/applications/local.nook.archive.desktop", desktop.toUtf8());
+    put(base + "/data/applications/archive-test-other.desktop",
+        "[Desktop Entry]\nType=Application\nName=Test Archive Manager\nExec=true "
+        "%U\nMimeType=application/zip;\n");
+    put(base + "/config/mimeapps.list",
+        "[Default Applications]\napplication/zip=archive-test-other.desktop\n");
+    QGuiApplication app(argc, argv);
+    ArchiveAppTest test;
+    return QTest::qExec(&test, argc, argv);
+}
 #include "archive_app_test.moc"

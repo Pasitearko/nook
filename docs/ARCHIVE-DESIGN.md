@@ -437,13 +437,13 @@ Q1～Q8 回答后重新计算问题依赖，不一次猜定所有细节。后续
 - **批量**：添加、拖入多个文件和文件夹一次完成；任务照常排队，可在任务抽屉查看。
 - **测试**：`archive` 覆盖四种可修改格式的增删改、加密 7z、拒绝修改时原文件不变、转换保持文件名并可加密；`archive-app` 覆盖主窗口删除确认、重命名、添加与同名询问、打开文件后写回／不写回、关窗时的未写回提示、只读压缩包另存为、拖出导出、转换窗口与旧编码 ZIP 转换、拒绝覆盖原文件。
 
-## 21. 第 6 阶段：关联与验收（进行中，尚未提交）
+## 21. 第 6 阶段：关联与自动验收（0.1-19，实机清单待确认）
 
 本阶段的决策（已由用户确认）：
 
 - **Q40 关联范围**：能打开的全部类型都接管，包括 ISO、deb/rpm、jar/apk、dmg；不接管 exe、办公文档、epub、虚拟磁盘映像。
 - **Q41 入口**：空窗口顶部显示可关闭的横幅（带“不再提示”），设置页常驻按钮并显示当前默认程序；点击后先确认，写入 `~/.config/mimeapps.list` 前备份，设置页可“恢复之前的默认”。
-- **Q42 本机**：不替用户改本机关联；用户安装 0.1-16（`makepkg -si`）后自己在设置里点按钮。
+- **Q42 本机**：不替用户改本机关联；用户安装本阶段版本后自己在设置里点按钮。最初计划的 0.1-16 已由文件撤销等后续版本占用，本阶段基于 0.1-18 延续为 **0.1-19**，不回退版本号。
 - **Q43 验收**：对比脚本（File Roller 用 `GDK_BACKEND=broadway` + `gtk4-broadwayd` 无界面运行），加验收清单 `docs/ARCHIVE-ACCEPTANCE.md`，加需在真实桌面手动确认的项目；小差距本阶段补，大差距列出再问。
 
 已完成：
@@ -451,12 +451,17 @@ Q1～Q8 回答后重新计算问题依赖，不一次猜定所有细节。后续
 - `packaging/local.nook.archive.desktop` 的 MimeType 扩充为 52 个名称（去掉别名后 39 种），补上了此前漏掉的规范名 `application/vnd.efi.iso`（ISO）和 `application/java-archive`（jar）。
 - `archivenames.cpp`：识别 .tar.lz、.tlz、.lz、.tar.Z、.taz、.Z、.gtar、.arj、.dmg、.war、.ear、.udeb、.ar、.squashfs、.sv4cpio、.sv4crc。
 - `archive_test` 新增 `readsEveryClaimedFormat`：用样本验证 cpio、ISO、xar、ar、deb、tar.Z、tar.lz、tar.lz4、tar.lzma、apk、jar、gtar、wim，以及 .Z、.lz、.lz4、.lzma、.ps.gz 单文件都能列出和解压，并且系统识别出的类型都在声明的类型里。没有样本、未验证的格式：rpm、cab、lha、arj、dmg、squashfs、sv4crc。
-- `src/archive/app/defaultapps.{h,cpp}`（GIO）：负责状态（unavailable／none／some／all）、当前默认程序名、设为默认（先备份并记录原默认到 `~/.config/nook/archive-defaults.json`）和恢复（只恢复仍归 nook解压缩 的类型，原本无人选择的类型清除关联）。已接入 `ArchiveApp.defaults`，新增偏好项 `defaultBannerDismissed`。
-- `tests/archive_defaults_test.cpp`（ctest 名 `archive-defaults`，独立进程，使用隔离的 XDG 目录）：覆盖未安装、接管、备份、用户中途改动后的恢复，已通过。
+- `src/archive/app/defaultapps.{h,cpp}`（GIO）：负责状态（unavailable／none／some／all）、当前默认程序名、设为默认（先备份并记录原默认到 `~/.config/nook/archive-defaults.json`）和恢复（只恢复仍归 nook解压缩 的、实际被接管的类型；原本没有默认的只局部撤销本次 nook 关联，不清空其他打开方式）。已接入 `ArchiveApp.defaults`，新增偏好项 `defaultBannerDismissed`。
+- `qml/ArchiveDefaultDialog.qml`：设置／恢复共用的显式确认窗，虚拟列表列出类型及当前默认，错误在窗内显示。打开和取消不写关联。
+- `ArchiveMain`：仅空状态显示可关闭的横幅，“不再提示”持久保存；激活窗口刷新默认状态。`ArchiveSettings`：常驻“默认压缩软件”一节，含状态、接管／恢复按钮和首次备份路径，弹出确认前收起设置避免叠加。
+- 关联恢复安全修补：唯一备份名、同轮保留首次备份；尊重初始已归 nook 和中途改给其他程序的选择；不用 GIO 整类型 reset；局部撤销本应用 ID；原程序丢失、写入失败、恢复记录损坏时保留记录并报错。没有修改压缩引擎、队列或文件撤销。
+- `archive-defaults` 测试覆盖备份不被覆盖、初始 nook 保留、第三方选择保留、其他打开方式保留、程序卸载／写盘失败后重试和损坏记录；`archive-app` 覆盖横幅、关闭／不再提示、设置入口、显式接管／恢复与取消无副作用。均在首次 GIO 使用前隔离 XDG，不写用户真实默认。
+- `tools/archive-compare.py`：bubblewrap 外层只读项目／系统，独立 HOME/XDG、D-Bus 和 Broadway；普通 ZIP／7z／tar.gz／tar.xz、20000 小文件、64 MiB 单文件与源路径及 SHA-256 一致；另测明确编码、密码、CRC／截断与路径／链接安全。File Roller 交互阻塞标为超时待验，不冒充通过；CRC 汇总整个 worker 事件流，不能只看 done.ok。
+- `docs/ARCHIVE-ACCEPTANCE.md`：依赖、复现命令、结果解释与真实 Wayland／MIME／缺样本格式清单。`gio-unix-2.0` 由 glib2 提供；产品依赖静态核对无新增缺项，对照工具只作为开发验收依赖。
+- 全量 **15/15 ctest 组通过**（包括对比脚本的 8 项纯判定回归，排除安全任务超时／坏包崩溃的误判）；README、安装文档列表和 PKGBUILD 同步到 **0.1-19**。按阶段提交主分支，不自动安装或改本机默认。
 
-接下来：
+尚未验收：
 
-1. 界面：新建 `qml/ArchiveDefaultDialog.qml`（确认框，列出类型和当前默认程序），加入 CMake 的 NookArchive QML 列表；`ArchiveMain` 空状态顶部的横幅；`ArchiveSettings` 增加“默认压缩软件”一节（状态、设为默认…、恢复之前的默认），并通过信号请主窗口打开确认框；窗口激活和打开设置时调用 `defaults.refresh()`；在 archive-app 测试里补上横幅和设置项。
-2. PKGBUILD：核对依赖（gio-unix 属于 glib2），把 pkgrel 升到 16。注意工作区里另有撤销功能的改动也碰了 PKGBUILD，要先和那边协调。
-3. 验收：写对比脚本（建议放 `tools/archive-acceptance.py`），覆盖大包、几万个小文件、坏包、攻击样本，比较结果和耗时；写 `docs/ARCHIVE-ACCEPTANCE.md`。
-4. 跑全部 ctest，更新 README 和本节，提交 nook 0.1-16。只暂存第 6 阶段自己的文件；CMakeLists.txt 里 undorecord 那一处不是本阶段的。
+1. 真 Wayland 的浮动窗口、GPU 动画、焦点／输入法、拖放、通知、密钥环与实际 MIME 接管／恢复，由用户依清单确认。
+2. File Roller 密码／覆盖／坏包对话框需交互对比；本次 CLI 超时不是其原生失败结论。旧编码名称的自动猜测也不能据显式编码结果宣称全面一致。
+3. 真实 RAR 和 rpm／cab／lha／arj／dmg／squashfs／sv4crc 样本、GiB 级实际磁盘及内存峰值测试、干净 chroot 构建仍待补。MIME 声明不能替代样本验证，不宣称已全功能替代 File Roller。

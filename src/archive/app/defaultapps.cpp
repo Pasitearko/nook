@@ -9,6 +9,7 @@
 #include <QMimeDatabase>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QUuid>
 #include <gio/gdesktopappinfo.h>
 #include <gio/gio.h>
 
@@ -33,16 +34,84 @@ QString errorText(GError *error) {
     return text;
 }
 
+// GKeyFile preserves unrelated groups/comments. In particular, never use GIO's
+// reset_type_associations(): it also deletes other applications' open-with choices.
+const char *associationGroups[] = {"Default Applications", "Added Associations", "Removed Associations"};
+
+QStringList ids(GKeyFile *file, const char *group, const QByteArray &type) {
+    gsize count = 0;
+    gchar **values = g_key_file_get_string_list(file, group, type.constData(), &count, nullptr);
+    QStringList result;
+    for (gsize i = 0; values && i < count; ++i)
+        result << QString::fromUtf8(values[i]);
+    g_strfreev(values);
+    return result;
+}
+
+QJsonObject membership(const QString &path, const QString &type, const QString &id) {
+    GKeyFile *file = g_key_file_new();
+    g_key_file_load_from_file(file, QFile::encodeName(path).constData(), G_KEY_FILE_KEEP_COMMENTS, nullptr);
+    QJsonObject result;
+    for (const char *group : associationGroups)
+        result.insert(QString::fromLatin1(group), ids(file, group, type.toUtf8()).contains(id));
+    g_key_file_unref(file);
+    return result;
+}
+
+QString removeOurAssociation(const QString &path, const QString &type, const QString &id,
+                             const QJsonObject &baseline) {
+    GKeyFile *file = g_key_file_new();
+    GError *error = nullptr;
+    if (!g_key_file_load_from_file(file, QFile::encodeName(path).constData(), G_KEY_FILE_KEEP_COMMENTS,
+                                   &error)) {
+        g_key_file_unref(file);
+        return errorText(error);
+    }
+    const QByteArray key = type.toUtf8();
+    for (const char *group : associationGroups) {
+        QStringList values = ids(file, group, key);
+        const bool hadOurs = baseline.value(QString::fromLatin1(group)).toBool();
+        if (hadOurs) {
+            if (!values.contains(id))
+                values << id;
+        } else {
+            values.removeAll(id);
+        }
+        if (values.isEmpty()) {
+            g_key_file_remove_key(file, group, key.constData(), nullptr);
+        } else {
+            QList<QByteArray> encoded;
+            for (const auto &value : values)
+                encoded << value.toUtf8();
+            QVector<const char *> pointers;
+            for (const auto &value : encoded)
+                pointers << value.constData();
+            g_key_file_set_string_list(file, group, key.constData(), pointers.constData(), pointers.size());
+        }
+    }
+    gsize length = 0;
+    gchar *data = g_key_file_to_data(file, &length, nullptr);
+    QSaveFile save(path);
+    const bool ok = save.open(QIODevice::WriteOnly) && save.write(data, qint64(length)) == qint64(length) &&
+                    save.commit();
+    g_free(data);
+    g_key_file_unref(file);
+    return ok ? QString() : QStringLiteral("无法保存 ") + path + "：" + save.errorString();
+}
+
 } // namespace
 
-DefaultApps::DefaultApps(const QString &desktopId, QObject *parent) : QObject(parent), m_id(desktopId) { refresh(); }
+DefaultApps::DefaultApps(const QString &desktopId, QObject *parent) : QObject(parent), m_id(desktopId) {
+    refresh();
+}
 
 QString DefaultApps::mimeappsPath() const {
     return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + "/mimeapps.list";
 }
 
 QString DefaultApps::recordPath() const {
-    return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + "/nook/archive-defaults.json";
+    return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) +
+           "/nook/archive-defaults.json";
 }
 
 QString DefaultApps::defaultFor(const QString &type) const {
@@ -63,11 +132,17 @@ void DefaultApps::refresh() {
         }
     }
     m_owned = 0;
+    m_associations.clear();
     QHash<QString, int> others;
     QHash<QString, QString> names;
     for (const auto &type : std::as_const(m_types)) {
         App app(g_app_info_get_default_for_type(type.toUtf8().constData(), FALSE));
         const QString id = app ? QString::fromUtf8(g_app_info_get_id(app.get())) : QString();
+        m_associations << QVariantMap{
+            {"type", type},
+            {"name", app ? QString::fromUtf8(g_app_info_get_name(app.get())) : QStringLiteral("未指定")},
+            {"desktopId", id},
+            {"ours", id == m_id}};
         if (id == m_id) {
             ++m_owned;
         } else if (app) {
@@ -80,11 +155,16 @@ void DefaultApps::refresh() {
         if (most.isEmpty() || it.value() > others.value(most))
             most = it.key();
     m_otherName = names.value(most);
-    m_state = !self || m_types.isEmpty() ? "unavailable" : m_owned == 0 ? "none" : m_owned == m_types.size() ? "all" : "some";
+    m_state = !self || m_types.isEmpty()  ? "unavailable"
+              : m_owned == 0              ? "none"
+              : m_owned == m_types.size() ? "all"
+                                          : "some";
     Q_EMIT changed();
 }
 
-bool DefaultApps::canRestore() const { return QFileInfo::exists(recordPath()); }
+bool DefaultApps::canRestore() const {
+    return QFileInfo::exists(recordPath());
+}
 
 QString DefaultApps::lastBackup() const {
     QFile file(recordPath());
@@ -98,30 +178,38 @@ QString DefaultApps::setAsDefault() {
     const App self = desktopApp(m_id);
     if (!self)
         return "找不到 " + m_id + "：nook解压缩 安装后才能设为默认";
-    // A copy of the user's associations as they are, next to them.
-    QString backup;
+    QJsonObject record;
+    QFile old(recordPath());
+    if (old.exists()) {
+        if (!old.open(QIODevice::ReadOnly))
+            return "无法读取之前的恢复记录，没有修改";
+        QJsonParseError parse;
+        record = QJsonDocument::fromJson(old.readAll(), &parse).object();
+        if (parse.error != QJsonParseError::NoError || !record.value("previous").isObject())
+            return "之前的恢复记录已损坏，没有修改";
+    }
+    old.close();
+    // Keep the first backup for this takeover, including repeated clicks in the same second.
+    QString backup = record.value("backup").toString();
     const QString list = mimeappsPath();
-    if (QFileInfo::exists(list)) {
-        backup = list + ".bak-nook-archive-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss");
-        QFile::remove(backup);
+    if (backup.isEmpty() && QFileInfo::exists(list)) {
+        backup = list + ".bak-nook-archive-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss-zzz") +
+                 "-" + QUuid::createUuid().toString(QUuid::Id128);
         if (!QFile::copy(list, backup))
             return "无法备份 " + list + "，没有修改";
     }
-    // What opened each type, unless an earlier record already holds what was there before us.
-    QJsonObject record;
-    QFile old(recordPath());
-    if (old.open(QIODevice::ReadOnly))
-        record = QJsonDocument::fromJson(old.readAll()).object();
-    old.close();
     QJsonObject previous = record.value("previous").toObject();
+    QJsonObject baselines = record.value("membership").toObject();
     for (const auto &type : std::as_const(m_types)) {
         const QString id = defaultFor(type);
-        if (id != m_id)
-            previous.insert(type, id);
-        else if (!previous.contains(type))
-            previous.insert(type, QString()); // ours already, by no one's choice: restoring forgets it
+        // An existing nook default may have been the user's deliberate choice: leave it alone.
+        if (id == m_id)
+            continue;
+        previous.insert(type, id);
+        baselines.insert(type, membership(list, type, m_id));
     }
     record.insert("previous", previous);
+    record.insert("membership", baselines);
     if (!backup.isEmpty())
         record.insert("backup", backup);
     record.insert("time", QDateTime::currentDateTime().toString(Qt::ISODate));
@@ -142,7 +230,8 @@ QString DefaultApps::setAsDefault() {
         return "有 " + QString::number(failed.size()) + " 种类型没有设好：" + failed.first();
     if (m_state != "all")
         // A desktop-specific list (such as gnome-mimeapps.list) overrides mimeapps.list.
-        return QString::number(typeCount() - ownedCount()) + " 种类型仍由其他程序打开，可能被桌面专用的关联文件（如 gnome-mimeapps.list）覆盖";
+        return QString::number(typeCount() - ownedCount()) +
+               " 种类型仍由其他程序打开，可能被桌面专用的关联文件（如 gnome-mimeapps.list）覆盖";
     return {};
 }
 
@@ -150,7 +239,12 @@ QString DefaultApps::restore() {
     QFile file(recordPath());
     if (!file.open(QIODevice::ReadOnly))
         return "没有可以恢复的记录";
-    const QJsonObject previous = QJsonDocument::fromJson(file.readAll()).object().value("previous").toObject();
+    QJsonParseError parse;
+    const QJsonObject record = QJsonDocument::fromJson(file.readAll(), &parse).object();
+    if (parse.error != QJsonParseError::NoError || !record.value("previous").isObject())
+        return "恢复记录已损坏，未修改关联";
+    const QJsonObject previous = record.value("previous").toObject();
+    const QJsonObject baselines = record.value("membership").toObject();
     file.close();
     QStringList failed;
     for (auto it = previous.begin(); it != previous.end(); ++it) {
@@ -158,18 +252,26 @@ QString DefaultApps::restore() {
         // Only what is still ours goes back; a choice made since then stays.
         if (defaultFor(it.key()) != m_id)
             continue;
-        const App app = desktopApp(it.value().toString());
+        const QString oldId = it.value().toString();
+        const App app = desktopApp(oldId);
         GError *error = nullptr;
         if (app) {
             if (!g_app_info_set_as_default_for_type(app.get(), type.constData(), &error))
                 failed << it.key() + "：" + errorText(error);
+            else if (defaultFor(it.key()) != oldId)
+                failed << it.key() + "：默认程序被其他配置覆盖";
+        } else if (!oldId.isEmpty()) {
+            failed << it.key() + "：之前的程序 " + oldId + " 已不可用，请重新安装后重试";
         } else {
-            // Nothing (or something since removed) opened it: forget the choice altogether.
-            g_app_info_reset_type_associations(type.constData());
+            const QString failure =
+                removeOurAssociation(mimeappsPath(), it.key(), m_id, baselines.value(it.key()).toObject());
+            if (!failure.isEmpty())
+                failed << it.key() + "：" + failure;
         }
     }
-    if (failed.isEmpty())
-        QFile::remove(recordPath());
+    if (failed.isEmpty() && !QFile::remove(recordPath()))
+        failed << "关联已恢复，但无法删除恢复记录";
     refresh();
-    return failed.isEmpty() ? QString() : "有 " + QString::number(failed.size()) + " 种类型没有恢复：" + failed.first();
+    return failed.isEmpty() ? QString()
+                            : "有 " + QString::number(failed.size()) + " 种类型没有恢复：" + failed.first();
 }

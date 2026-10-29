@@ -1,6 +1,7 @@
 #pragma once
 #include <QObject>
 #include <QStringList>
+#include <QVariantList>
 
 // "设为默认压缩软件": every file type nook解压缩's desktop file claims, who opens each now, and
 // taking them over (Q25: only when the user asks; Q40: all of them). The user's mimeapps.list is
@@ -13,16 +14,28 @@ class DefaultApps : public QObject {
     Q_PROPERTY(int ownedCount READ ownedCount NOTIFY changed)
     // The application that opens most of the types nook解压缩 does not ("归档管理器").
     Q_PROPERTY(QString otherName READ otherName NOTIFY changed)
+    Q_PROPERTY(QVariantList associations READ associations NOTIFY changed)
     Q_PROPERTY(bool canRestore READ canRestore NOTIFY changed)
     Q_PROPERTY(QString lastBackup READ lastBackup NOTIFY changed)
     Q_PROPERTY(QString mimeappsPath READ mimeappsPath CONSTANT)
   public:
     explicit DefaultApps(const QString &desktopId = QStringLiteral("local.nook.archive.desktop"), QObject *parent = nullptr);
 
-    QString state() const { return m_state; }
-    int typeCount() const { return int(m_types.size()); }
-    int ownedCount() const { return m_owned; }
-    QString otherName() const { return m_otherName; }
+    QString state() const {
+        return m_state;
+    }
+    int typeCount() const {
+        return int(m_types.size());
+    }
+    int ownedCount() const {
+        return m_owned;
+    }
+    QString otherName() const {
+        return m_otherName;
+    }
+    QVariantList associations() const {
+        return m_associations;
+    }
     bool canRestore() const;
     QString lastBackup() const;
     QString mimeappsPath() const;
@@ -48,4 +61,5 @@ class DefaultApps : public QObject {
     QString m_state = QStringLiteral("unavailable");
     int m_owned = 0;
     QString m_otherName;
+    QVariantList m_associations;
 };

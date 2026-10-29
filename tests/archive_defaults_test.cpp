@@ -1,6 +1,8 @@
 #include "defaultapps.h"
 #include <QDir>
 #include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMimeDatabase>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -37,13 +39,19 @@ void setUpFixture() {
     qputenv("XDG_CURRENT_DESKTOP", "nook-test");
     QByteArray ours = read(QString(NOOK_SOURCE_DIR) + "/packaging/local.nook.archive.desktop");
     ours.replace("Exec=nook-archive %U", "Exec=true %U");
+    ours.replace("MimeType=", "MimeType=application/x-nook-test-empty;");
     put(root + "/data/applications/local.nook.archive.desktop", ours);
     put(root + "/data/applications/fake-roller.desktop",
-        "[Desktop Entry]\nType=Application\nName=Fake Roller\nExec=true %U\nMimeType=application/zip;application/x-7z-compressed;\n");
+        "[Desktop Entry]\nType=Application\nName=Fake Roller\nExec=true "
+        "%U\nMimeType=application/zip;application/x-7z-compressed;\n");
+    put(root + "/data/applications/third.desktop",
+        "[Desktop Entry]\nType=Application\nName=Third Choice\nExec=true "
+        "%U\nMimeType=application/x-7z-compressed;\n");
     put(root + "/data/applications/editor.desktop",
         "[Desktop Entry]\nType=Application\nName=Editor\nExec=true %U\nMimeType=text/plain;\n");
-    put(root + "/config/mimeapps.list",
-        "[Default Applications]\napplication/zip=fake-roller.desktop\napplication/x-7z-compressed=fake-roller.desktop\ntext/plain=editor.desktop\n");
+    put(root + "/config/mimeapps.list", "[Default "
+                                        "Applications]\napplication/zip=fake-roller.desktop\napplication/"
+                                        "x-7z-compressed=fake-roller.desktop\ntext/plain=editor.desktop\n");
 }
 
 // The [Default Applications] group of mimeapps.list as type → desktop id.
@@ -88,7 +96,8 @@ class ArchiveDefaultsTest : public QObject {
         QCOMPARE(defaults.state(), QStringLiteral("all"));
         QCOMPARE(defaults.ownedCount(), defaults.typeCount());
         QCOMPARE(defaults.defaultFor("application/zip"), QStringLiteral("local.nook.archive.desktop"));
-        QCOMPARE(defaults.defaultFor("application/vnd.debian.binary-package"), QStringLiteral("local.nook.archive.desktop"));
+        QCOMPARE(defaults.defaultFor("application/vnd.debian.binary-package"),
+                 QStringLiteral("local.nook.archive.desktop"));
         QCOMPARE(defaults.defaultFor("text/plain"), QStringLiteral("editor.desktop"));
         // The list as it was is kept next to it.
         QVERIFY(defaults.lastBackup().startsWith(list + ".bak-nook-archive-"));
@@ -97,10 +106,13 @@ class ArchiveDefaultsTest : public QObject {
         QCOMPARE(defaultsGroup().value("application/zip"), QStringLiteral("local.nook.archive.desktop"));
 
         // Asking again changes nothing and keeps what was there before the first time.
+        const QString firstBackup = defaults.lastBackup();
         QCOMPARE(defaults.setAsDefault(), QString());
+        QCOMPARE(defaults.lastBackup(), firstBackup);
+        QCOMPARE(read(firstBackup), original);
 
         // The user hands 7z to another application meanwhile: restoring leaves that choice alone.
-        auto *roller = G_APP_INFO(g_desktop_app_info_new("fake-roller.desktop"));
+        auto *roller = G_APP_INFO(g_desktop_app_info_new("third.desktop"));
         QVERIFY(roller);
         QVERIFY(g_app_info_set_as_default_for_type(roller, "application/x-7z-compressed", nullptr));
         g_object_unref(roller);
@@ -109,13 +121,80 @@ class ArchiveDefaultsTest : public QObject {
 
         QCOMPARE(defaults.restore(), QString());
         QCOMPARE(defaults.defaultFor("application/zip"), QStringLiteral("fake-roller.desktop"));
-        QCOMPARE(defaults.defaultFor("application/x-7z-compressed"), QStringLiteral("fake-roller.desktop"));
+        QCOMPARE(defaults.defaultFor("application/x-7z-compressed"), QStringLiteral("third.desktop"));
         QCOMPARE(defaults.defaultFor("text/plain"), QStringLiteral("editor.desktop"));
         QVERIFY(!defaults.canRestore());
         // Types no one had chosen are not left pinned to nook解压缩.
         const auto group = defaultsGroup();
         for (auto it = group.cbegin(); it != group.cend(); ++it)
             QVERIFY2(it.value() != "local.nook.archive.desktop", qPrintable(it.key()));
+    }
+
+    void preservesInitialNookChoiceAndOtherOpenWithChoices() {
+        DefaultApps defaults;
+        auto *ours = G_APP_INFO(g_desktop_app_info_new("local.nook.archive.desktop"));
+        QVERIFY(ours);
+        QVERIFY(g_app_info_set_as_default_for_type(ours, "application/zip", nullptr));
+        g_object_unref(ours);
+        const QString emptyType = "application/x-nook-test-empty";
+        QVERIFY(defaults.defaultFor(emptyType).isEmpty());
+        QCOMPARE(defaults.setAsDefault(), QString());
+        auto *third = G_APP_INFO(g_desktop_app_info_new("third.desktop"));
+        QVERIFY(third);
+        QVERIFY(g_app_info_add_supports_type(third, emptyType.toUtf8().constData(), nullptr));
+        g_object_unref(third);
+        QCOMPARE(defaults.defaultFor(emptyType), QStringLiteral("local.nook.archive.desktop"));
+        QCOMPARE(defaults.restore(), QString());
+        QCOMPARE(defaults.defaultFor("application/zip"), QStringLiteral("local.nook.archive.desktop"));
+        const QByteArray list = read(defaults.mimeappsPath());
+        QVERIFY(list.contains("application/x-nook-test-empty=third.desktop;"));
+        QVERIFY(!defaults.canRestore());
+    }
+
+    void missingOriginalProgramKeepsRecordForRetry() {
+        DefaultApps defaults;
+        auto *third = G_APP_INFO(g_desktop_app_info_new("third.desktop"));
+        QVERIFY(third);
+        QVERIFY(g_app_info_set_as_default_for_type(third, "application/x-7z-compressed", nullptr));
+        g_object_unref(third);
+        QCOMPARE(defaults.setAsDefault(), QString());
+        const QString desktop = fixture->path() + "/data/applications/third.desktop";
+        QVERIFY(QFile::rename(desktop, desktop + ".hidden"));
+        QVERIFY(defaults.restore().contains("不可用"));
+        QVERIFY(defaults.canRestore());
+        QCOMPARE(defaults.defaultFor("application/x-7z-compressed"),
+                 QStringLiteral("local.nook.archive.desktop"));
+        QVERIFY(QFile::rename(desktop + ".hidden", desktop));
+        QCOMPARE(defaults.restore(), QString());
+        QCOMPARE(defaults.defaultFor("application/x-7z-compressed"), QStringLiteral("third.desktop"));
+    }
+
+    void failedLocalRestoreRetainsRetryRecord() {
+        DefaultApps defaults;
+        QCOMPARE(defaults.setAsDefault(), QString());
+        const QString path = fixture->path() + "/config/nook/archive-defaults.json";
+        auto record = QJsonDocument::fromJson(read(path)).object();
+        record.insert("previous", QJsonObject{{"application/x-nook-test-empty", ""}});
+        put(path, QJsonDocument(record).toJson());
+        const QString config = fixture->path() + "/config";
+        const auto permissions = QFileInfo(config).permissions();
+        QVERIFY(QFile::setPermissions(config, QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+        const QString failure = defaults.restore();
+        QVERIFY(QFile::setPermissions(config, permissions));
+        QVERIFY2(!failure.isEmpty(), "unwritable mimeapps.list must retain the restoration record");
+        QVERIFY(defaults.canRestore());
+        QCOMPARE(defaults.restore(), QString());
+        QVERIFY(!defaults.canRestore());
+    }
+
+    void corruptRecordIsNeverDiscarded() {
+        DefaultApps defaults;
+        const QString path = fixture->path() + "/config/nook/archive-defaults.json";
+        put(path, "{broken");
+        QVERIFY(defaults.restore().contains("损坏"));
+        QVERIFY(defaults.setAsDefault().contains("损坏"));
+        QCOMPARE(read(path), QByteArray("{broken"));
+        QVERIFY(QFile::remove(path));
     }
 };
 

@@ -87,7 +87,7 @@ qt_add_qml_module(nook-archive URI NookArchive VERSION 1.0
         qml/ArchiveWindow.qml qml/ArchiveField.qml qml/ArchivePasswordField.qml qml/ArchiveCheck.qml
         qml/ArchiveSwitch.qml qml/ArchiveProgress.qml qml/ArchivePasswordDialog.qml qml/ArchiveConflictDialog.qml
         qml/ArchivePrompts.qml qml/ArchiveTaskCard.qml qml/ArchiveTasks.qml qml/ArchiveExtractDialog.qml
-        qml/ArchiveSettings.qml qml/ArchiveCompose.qml qml/ArchiveTaskWindow.qml
+        qml/ArchiveSettings.qml qml/ArchiveCompose.qml qml/ArchiveTaskWindow.qml qml/ArchiveDefaultDialog.qml
     RESOURCES ${NOOK_ICONS}
 )
 qt_add_shaders(nook-archive "nook-archive-shaders"
@@ -104,6 +104,7 @@ if(BUILD_TESTING)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME mount-helper COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/mount_helper_test.py)
     add_test(NAME volume-helper COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/volume_helper_test.py)
+    add_test(NAME archive-compare-checks COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/tests/archive_compare_test.py)
     qt_add_executable(nook-tests tests/core_test.cpp)
     target_link_libraries(nook-tests PRIVATE nook_core Qt6::Test)
     add_test(NAME core COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/run-core.sh $<TARGET_FILE:nook-tests>)
@@ -176,5 +177,5 @@ install(FILES qml/icons/folder.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hi
 install(FILES qml/icons/archive.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps RENAME nook-archive.svg)
 install(FILES LICENSE THIRD_PARTY.md DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/nook)
 install(FILES README.md LICENSE THIRD_PARTY.md packaging/niri.example.kdl DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook)
-install(FILES docs/VALIDATION.md docs/AUTOMOUNT-DESIGN.md docs/INPUT-METHOD.md docs/ARCHIVE-DESIGN.md docs/ARCHIVE-WORKER.md docs/UNDO.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook/docs)
+install(FILES docs/VALIDATION.md docs/AUTOMOUNT-DESIGN.md docs/INPUT-METHOD.md docs/ARCHIVE-DESIGN.md docs/ARCHIVE-WORKER.md docs/ARCHIVE-ACCEPTANCE.md docs/UNDO.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook/docs)
 install(DIRECTORY docs/screenshots DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook/docs)
