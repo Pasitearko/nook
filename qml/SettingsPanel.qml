@@ -198,7 +198,7 @@ Dialog {
                 }
                 Card {
                     visible: panel.category === 1; heading: "撤销与隐私"
-                    Label { text: "侧栏保留本次运行最近 5 次可撤销操作，按从新到旧依次撤销。也可以在空白处右键，或按 Ctrl+Z。关闭应用后记录不保留，不再记录最近访问的文件夹。"; color: panel.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                    Label { text: "侧栏保留本次运行最近 5 次可撤销操作，可点击任意一条单独撤销。空白处右键或 Ctrl+Z 撤销最新一条。关闭应用后记录不保留，不再记录最近访问的文件夹。"; color: panel.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.Wrap }
                     Label { text: "支持本地文件的粘贴、移动、重命名、新建与移入回收站。永久删除、覆盖替换、跨盘移动、特殊字节文件名、回收站手动恢复及远程操作不支持撤销；文件变化或原位置被占用时会停止，绝不覆盖。"; color: panel.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.Wrap }
                     ActionButton {
                         objectName: "clearUndoHistorySettingsButton"

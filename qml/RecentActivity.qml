@@ -63,15 +63,15 @@ Rectangle {
                         width: recentRows.width; height: 32
                         leftPadding: 4; rightPadding: 4
                         iconName: "undo"; text: modelData.title
-                        enabled: index === 0 && activity.task.canUndo
-                        hint: (index === 0 ? "点击撤销 · " : "请先撤销较新的操作 · ") + modelData.detail
+                        enabled: activity.task.canUndo
+                        hint: "点击撤销此操作 · " + modelData.detail
                         foreground: activity.theme.inkSoft
                         contentItem: RowLayout {
                             spacing: 8
-                            Icon { name: "undo"; tint: index === 0 ? activity.theme.accent : activity.theme.muted; Layout.preferredWidth: 16; Layout.preferredHeight: 16 }
-                            Text { text: modelData.title; color: index === 0 ? activity.theme.inkSoft : activity.theme.muted; font.pixelSize: 13; Layout.fillWidth: true; elide: Text.ElideRight }
+                            Icon { name: "undo"; tint: activity.theme.accent; Layout.preferredWidth: 16; Layout.preferredHeight: 16 }
+                            Text { text: modelData.title; color: activity.theme.inkSoft; font.pixelSize: 13; Layout.fillWidth: true; elide: Text.ElideRight }
                         }
-                        onClicked: activity.task.undo()
+                        onClicked: activity.task.undoAt(index)
                     }
                 }
             }
@@ -79,7 +79,7 @@ Rectangle {
         Text {
             objectName: "undoHistoryHint"
             visible: !activity.taskActive
-            text: "最近 5 次 · 从上往下依次撤销"
+            text: "最近 5 次 · 点击任意一条撤销"
             color: activity.theme.muted; font.pixelSize: 11
             Layout.fillWidth: true; wrapMode: Text.Wrap
         }

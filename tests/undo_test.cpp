@@ -50,6 +50,149 @@ class UndoTest : public QObject {
         QCOMPARE(read(source), QByteArray("original"));
         QVERIFY(!op.canUndo());
     }
+    void selectiveUndo_data() {
+        QTest::addColumn<QString>("kind");
+        for (const auto &kind : {"copy", "move", "rename", "mkdir", "touch", "trash"})
+            QTest::newRow(kind) << QString(kind);
+    }
+    void selectiveUndo() {
+        QFETCH(QString, kind);
+        QTemporaryDir dir(fixtureTemplate());
+        const auto source = dir.filePath("source"), dest = dir.filePath("dest");
+        QVERIFY(QDir().mkdir(dest));
+        put(source);
+        Operations op;
+        if (kind == "mkdir" || kind == "touch")
+            op.run(kind, {}, uri(dest), "created");
+        else
+            op.run(kind, {uri(source)}, uri(dest), kind == "rename" ? "renamed" : "");
+        QTRY_VERIFY(!op.busy());
+        QVERIFY2(op.errors().isEmpty(), qPrintable(op.errors().join("\n")));
+        QCOMPARE(op.undoHistory().size(), 1);
+        const auto selected = op.undoHistory().first();
+        op.run("touch", {}, uri(dir.path()), "newer");
+        QTRY_VERIFY(!op.busy());
+        const auto newer = op.undoHistory().first();
+        QCOMPARE(op.undoHistory().at(1), selected);
+        op.undoAt(1);
+        QTRY_VERIFY(!op.busy());
+        QVERIFY2(op.errors().isEmpty(), qPrintable(op.errors().join("\n")));
+        QCOMPARE(op.completedItems(), 1);
+        QCOMPARE(op.totalItems(), 1);
+        QCOMPARE(op.undoHistory(), QVariantList{newer});
+        QCOMPARE(read(source), QByteArray("original"));
+        QVERIFY(!QFile::exists(dir.filePath("renamed")));
+        QVERIFY(QDir(dest).isEmpty());
+        QVERIFY(QFile::exists(dir.filePath("newer")));
+        op.undo();
+        QTRY_VERIFY(!op.busy());
+        QVERIFY2(op.errors().isEmpty(), qPrintable(op.errors().join("\n")));
+        QVERIFY(op.undoHistory().isEmpty());
+        QVERIFY(!QFile::exists(dir.filePath("newer")));
+    }
+    void selectiveUndoPreservesOrderAndRejectsInvalidIndices() {
+        QTemporaryDir dir(fixtureTemplate());
+        Operations op;
+        for (int i = 0; i < 5; ++i) {
+            op.run("touch", {}, uri(dir.path()), QString::number(i));
+            QTRY_VERIFY(!op.busy());
+        }
+        auto expected = op.undoHistory();
+        QSignalSpy finished(&op, &Operations::finished);
+        for (int index : {-1, 5, 100})
+            op.undoAt(index);
+        QVERIFY(!op.busy());
+        QCOMPARE(finished.count(), 0);
+        QCOMPARE(op.undoHistory(), expected);
+        // Remove a middle record, then the oldest, without popping newer records.
+        QStringList names{"4", "3", "2", "1", "0"};
+        for (int index : {2, 3, 1}) {
+            const auto name = names.takeAt(index);
+            expected.removeAt(index);
+            op.undoAt(index);
+            QTRY_VERIFY(!op.busy());
+            QVERIFY2(op.errors().isEmpty(), qPrintable(op.errors().join("\n")));
+            QCOMPARE(op.undoHistory(), expected);
+            QVERIFY(!QFile::exists(dir.filePath(name)));
+        }
+        QVERIFY(QFile::exists(dir.filePath("4")));
+        QVERIFY(QFile::exists(dir.filePath("1")));
+        op.undo();
+        QTRY_VERIFY(!op.busy());
+        QVERIFY(!QFile::exists(dir.filePath("4")));
+        QVERIFY(QFile::exists(dir.filePath("1")));
+        QCOMPARE(op.undoHistory().size(), 1);
+    }
+    void blockedSelectedRecordDoesNotBlockOthers() {
+        QTemporaryDir dir(fixtureTemplate());
+        Operations op;
+        op.run("mkdir", {}, uri(dir.path()), "folder");
+        QTRY_VERIFY(!op.busy());
+        op.run("touch", {}, uri(dir.filePath("folder")), "file");
+        QTRY_VERIFY(!op.busy());
+        const auto history = op.undoHistory();
+        // A later child must not be discarded by undoing its parent creation.
+        op.undoAt(1);
+        QTRY_VERIFY(!op.busy());
+        QVERIFY(!op.errors().isEmpty());
+        QCOMPARE(op.completedItems(), 0);
+        QCOMPARE(op.undoHistory(), history);
+        QVERIFY(QFile::exists(dir.filePath("folder/file")));
+        // An unrelated record is still selectable past the blocked parent.
+        op.run("touch", {}, uri(dir.path()), "independent");
+        QTRY_VERIFY(!op.busy());
+        op.undoAt(2);
+        QTRY_VERIFY(!op.busy());
+        QVERIFY(!op.errors().isEmpty());
+        op.undoAt(0);
+        QTRY_VERIFY(!op.busy());
+        QVERIFY2(op.errors().isEmpty(), qPrintable(op.errors().join("\n")));
+        QVERIFY(!QFile::exists(dir.filePath("independent")));
+        QCOMPARE(op.undoHistory(), history);
+        op.undo();
+        QTRY_VERIFY(!op.busy());
+        op.undo();
+        QTRY_VERIFY(!op.busy());
+        QVERIFY2(op.errors().isEmpty(), qPrintable(op.errors().join("\n")));
+        QVERIFY(op.undoHistory().isEmpty());
+        QVERIFY(!QFile::exists(dir.filePath("folder")));
+    }
+    void selectedBatchAndBusyGuard() {
+        QTemporaryDir dir(fixtureTemplate());
+        const auto dest = dir.filePath("dest");
+        QVERIFY(QDir().mkdir(dest));
+        put(dir.filePath("a"));
+        put(dir.filePath("b"));
+        Operations op;
+        op.run("move", {uri(dir.filePath("a")), uri(dir.filePath("b"))}, uri(dest));
+        QTRY_VERIFY(!op.busy());
+        op.run("touch", {}, uri(dir.path()), "newer");
+        QTRY_VERIFY(!op.busy());
+        const auto history = op.undoHistory();
+        put(dir.filePath("a"), "occupied");
+        op.undoAt(1);
+        QTRY_VERIFY(!op.busy());
+        QVERIFY(!op.errors().isEmpty());
+        QCOMPARE(op.totalItems(), 2);
+        QCOMPARE(op.completedItems(), 0);
+        QCOMPARE(op.undoHistory(), history);
+        QCOMPARE(read(dir.filePath("a")), QByteArray("occupied"));
+        QVERIFY(!QFile::exists(dir.filePath("b")));
+        QVERIFY(QFile::remove(dir.filePath("a")));
+        op.undoAt(1);
+        QVERIFY(op.busy());
+        op.undoAt(0);
+        op.clearUndoHistory();
+        op.run("touch", {}, uri(dir.path()), "while-busy");
+        QTRY_VERIFY(!op.busy());
+        QVERIFY2(op.errors().isEmpty(), qPrintable(op.errors().join("\n")));
+        QCOMPARE(op.completedItems(), 2);
+        QCOMPARE(op.undoHistory(), QVariantList{history.first()});
+        QCOMPARE(read(dir.filePath("a")), QByteArray("original"));
+        QCOMPARE(read(dir.filePath("b")), QByteArray("original"));
+        QVERIFY(QFile::exists(dir.filePath("newer")));
+        QVERIFY(!QFile::exists(dir.filePath("while-busy")));
+    }
     void moveAndRename() {
         QTemporaryDir dir(fixtureTemplate());
         const auto source = dir.filePath("a"), dest = dir.filePath("dest");

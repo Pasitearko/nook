@@ -68,6 +68,7 @@ class Operations : public QObject {
         return !m_busy && !m_undo.isEmpty();
     }
     Q_INVOKABLE void undo();
+    Q_INVOKABLE void undoAt(int index);
     Q_INVOKABLE void clearUndoHistory();
     Q_INVOKABLE void cancel();
     Q_INVOKABLE void resolveConflict(int choice);
@@ -79,6 +80,8 @@ class Operations : public QObject {
     void finished();
 
   private:
+    void start(const QString &kind, const QStringList &uris, const QString &destination, const QString &name,
+               int undoIndex = 0);
     int conflict(const QString &name, bool folder);
     struct TransferProgress {
         int completed;

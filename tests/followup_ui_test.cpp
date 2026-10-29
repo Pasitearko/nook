@@ -284,6 +284,38 @@ class FollowupUiTest : public QObject {
         QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-undo-history.png"));
     }
 
+    void undoHistoryAllowsSelectingAnyRow() {
+        for (int i = 0; i < 3; ++i) {
+            operations->run("touch", {}, uri(""), "selective-" + QString::number(i));
+            QTRY_VERIFY(!operations->busy());
+        }
+        QTRY_COMPARE(visualItems(window->contentItem(), "undoHistoryRow").size(), 3);
+        QTRY_VERIFY(item("undoHistoryHint")->property("text").toString().contains(QStringLiteral("任意")));
+        auto expected = operations->undoHistory();
+        for (int index : {1, 1, 0}) {
+            QQuickItem *selected = nullptr;
+            for (auto *row : visualItems(window->contentItem(), "undoHistoryRow")) {
+                QVERIFY(row->isEnabled());
+                if (row->property("index").toInt() == index)
+                    selected = row;
+            }
+            QVERIFY(selected);
+            const auto name = selected->property("modelData").toMap().value("detail").toString();
+            QCOMPARE(selected->property("modelData"), expected.at(index));
+            expected.removeAt(index);
+            QTest::qWait(100);
+            click(selected);
+            QTRY_VERIFY(!operations->busy());
+            QVERIFY2(operations->errors().isEmpty(), qPrintable(operations->errors().join("\n")));
+            QVERIFY(!QFile::exists(name));
+            QCOMPARE(operations->undoHistory(), expected);
+            for (const auto &record : expected)
+                QVERIFY(QFile::exists(record.toMap().value("detail").toString()));
+        }
+        QVERIFY(operations->undoHistory().isEmpty());
+        QTRY_VERIFY(!item("recentActivity")->isVisible());
+    }
+
     void undoHistoryAtSmallWindowAndHighScale() {
         for (int i = 0; i < 5; ++i) {
             operations->run("touch", {}, uri(""), "undo-long-file-name-" + QString::number(i) + ".txt");
@@ -308,14 +340,21 @@ class FollowupUiTest : public QObject {
         QQuickItem *last = nullptr;
         for (auto *row : visualItems(window->contentItem(), "undoHistoryRow"))
             if (row->property("index").toInt() == 4) last = row;
-        QVERIFY(last && !last->isEnabled());
+        QVERIFY(last && last->isEnabled());
         const auto center = last->mapToItem(scroll, {last->width() / 2, last->height() / 2});
         QVERIFY(scroll->boundingRect().contains(center));
         QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-undo-small.png"));
+        click(last);
+        QTRY_VERIFY(!operations->busy());
+        QVERIFY2(operations->errors().isEmpty(), qPrintable(operations->errors().join("\n")));
+        QCOMPARE(operations->undoHistory().size(), 4);
+        QVERIFY(!QFile::exists(fixture->path() + "/undo-long-file-name-0.txt"));
+        QVERIFY(QFile::exists(fixture->path() + "/undo-long-file-name-4.txt"));
+        QTest::qWait(100);
         click(item("clearUndoHistoryButton"));
         QVERIFY(operations->undoHistory().isEmpty());
         QTRY_VERIFY(!card->isVisible());
-        QVERIFY(QFile::exists(fixture->path() + "/undo-long-file-name-0.txt"));
+        QVERIFY(QFile::exists(fixture->path() + "/undo-long-file-name-4.txt"));
     }
 
     void undoShortcutRespectsTextEditing() {

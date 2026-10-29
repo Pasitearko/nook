@@ -97,8 +97,11 @@ QString Operations::undoText() const {
     return m_undo.isEmpty() ? QStringLiteral("撤销") : QStringLiteral("撤销") + m_undo.first().title;
 }
 void Operations::undo() {
-    if (canUndo())
-        run("undo", {});
+    undoAt(0);
+}
+void Operations::undoAt(int index) {
+    if (canUndo() && index >= 0 && index < m_undo.size())
+        start("undo", {}, {}, {}, index);
 }
 void Operations::clearUndoHistory() {
     if (m_busy || m_undo.isEmpty())
@@ -345,11 +348,15 @@ bool Operations::transfer(GFile *source, GFile *destination, bool move, GError *
 }
 void Operations::run(const QString &kind, const QStringList &uris, const QString &destination,
                      const QString &name) {
+    start(kind, uris, destination, name);
+}
+void Operations::start(const QString &kind, const QStringList &uris, const QString &destination,
+                       const QString &name, int undoIndex) {
     if (m_busy)
         return;
     const QStringList supported{"copy",  "move",   "rename",  "mkdir", "touch",
                                 "trash", "delete", "restore", "undo"};
-    if (!supported.contains(kind) || (kind == "undo" && m_undo.isEmpty()))
+    if (!supported.contains(kind) || (kind == "undo" && (undoIndex < 0 || undoIndex >= m_undo.size())))
         return;
     if ((kind == "mkdir" || kind == "touch" || kind == "rename") && !nook::validName(name)) {
         m_errors = {QStringLiteral("名称无效：不能包含 /、空字符，或超过文件系统名称长度")};
@@ -368,14 +375,17 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
     m_status = QStringLiteral("正在准备…");
     m_kind = kind;
     m_completedItems = 0;
-    m_totalItems = kind == "undo"                       ? m_undo.first().items.size()
+    m_totalItems = kind == "undo"                       ? m_undo.at(undoIndex).items.size()
                    : kind == "mkdir" || kind == "touch" ? 1
                                                         : int(uris.size());
     m_progress = -1;
     m_lastReport = {};
     Q_EMIT changed();
-    const auto undoRecord = kind == "undo" ? m_undo.first() : nook::UndoRecord{};
-    m_thread = std::thread([this, kind, uris, destination, name, total = m_totalItems, undoRecord]() mutable {
+    // History cannot change while busy; keep the selected slot through completion,
+    // including failed or cancelled batches, without disturbing other records.
+    const auto undoRecord = kind == "undo" ? m_undo.at(undoIndex) : nook::UndoRecord{};
+    m_thread = std::thread([this, kind, uris, destination, name, total = m_totalItems, undoRecord,
+                            undoIndex]() mutable {
         const auto sources = kind == "move" || kind == "trash" ? topLevelSelections(uris, m_cancel) : uris;
         if (sources.size() != uris.size()) {
             total = sources.size();
@@ -576,12 +586,13 @@ void Operations::run(const QString &kind, const QStringList &uris, const QString
         bool cancelled = m_cancelled;
         QMetaObject::invokeMethod(
             this,
-            [this, failures, completed, skipped, cancelled, total, journal, remaining, kind, untracked] {
+            [this, failures, completed, skipped, cancelled, total, journal, remaining, kind, untracked,
+             undoIndex] {
                 if (kind == "undo") {
                     if (remaining.items.isEmpty())
-                        m_undo.removeFirst();
+                        m_undo.removeAt(undoIndex);
                     else
-                        m_undo.first() = remaining;
+                        m_undo[undoIndex] = remaining;
                 } else if (!journal.items.isEmpty()) {
                     m_undo.prepend(journal);
                     if (m_undo.size() > 5)
