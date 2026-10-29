@@ -5,6 +5,7 @@
 #include "filesessions.h"
 #include "passwordstore.h"
 #include "taskqueue.h"
+#include <QClipboard>
 #include <QDir>
 #include <QQmlComponent>
 #include <QQmlEngine>
@@ -1044,6 +1045,81 @@ class ArchiveAppTest : public QObject {
         const int id = t.queue()->start(request, {}, nullptr);
         QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("failed"), 10000);
         QVERIFY(QFileInfo(zip).size() > 0);
+    }
+    // A drag from blank space or a row's size/date/type cells selects what the band covers
+    // (Ctrl adds to the selection); a click on blank space clears it. The info dialog's values
+    // can be selected and copied.
+    void bandSelectionAndCopyableInfo() {
+        TestApp t;
+        const QString zip = fixture->path() + "/band.zip";
+        QList<QPair<QByteArray, QByteArray>> entries;
+        for (int i = 0; i < 8; ++i)
+            entries << qMakePair(QByteArray("file-") + QByteArray::number(i) + ".txt", QByteArray(100 + i, 'x'));
+        writeZip(zip, entries);
+        ArchiveDocument document;
+        t.app.attach(&document);
+        QQmlEngine engine;
+        auto root = mainWindow(engine, t.app, document);
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY(window && QTest::qWaitForWindowExposed(window));
+        document.open(zip);
+        QTRY_COMPARE_WITH_TIMEOUT(document.state(), QStringLiteral("ready"), 10000);
+        ArchiveModel *model = document.model();
+        QTRY_COMPARE(model->count(), 8);
+        auto *list = findVisual(window->contentItem(), "archiveFileList");
+        auto *band = findVisual(window->contentItem(), "archiveSelectionBand");
+        QVERIFY(list && band);
+        QTest::qWait(200);
+        const qreal rowHeight = 40;
+        // In the size column (past the name), in the middle of a row.
+        const auto sizeCell = [&](int row) { return list->mapToScene({list->width() - 400, row * rowHeight + rowHeight / 2}).toPoint(); };
+        const QPoint blank = list->mapToScene({list->width() - 200, list->height() - 20}).toPoint();
+        const auto drag = [&](QPoint from, QPoint to, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+            QTest::mousePress(window, Qt::LeftButton, modifiers, from);
+            for (int i = 1; i <= 8; ++i)
+                QTest::mouseMove(window, from + (to - from) * i / 8);
+            QTRY_VERIFY(band->isVisible());
+            QTest::mouseRelease(window, Qt::LeftButton, modifiers, to);
+            QTRY_VERIFY(!band->isVisible());
+        };
+        // From the blank space below the rows up into row 5: rows 5–7.
+        drag(blank, sizeCell(5));
+        QTRY_COMPARE(model->selectedRows(), (QList<int>{5, 6, 7}));
+        // From a row's size cell: rows 1–2 only.
+        drag(sizeCell(1), sizeCell(2));
+        QTRY_COMPARE(model->selectedRows(), (QList<int>{1, 2}));
+        // Ctrl adds rows 4–5.
+        drag(sizeCell(4), sizeCell(5), Qt::ControlModifier);
+        QTRY_COMPARE(model->selectedRows(), (QList<int>{1, 2, 4, 5}));
+        // A click in a size cell selects that row; a click on blank space clears.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sizeCell(3));
+        QTRY_COMPARE(model->selectedRows(), QList<int>{3});
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, blank);
+        QTRY_COMPARE(model->selectedCount(), 0);
+        // The name still selects its row (and is where files are dragged out from).
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, list->mapToScene({60, 6 * rowHeight + rowHeight / 2}).toPoint());
+        QTRY_COMPARE(model->selectedRows(), QList<int>{6});
+
+        // Info: the location can be selected with the mouse and copied.
+        QTest::keyClick(window, Qt::Key_I, Qt::ControlModifier);
+        QQuickItem *value = nullptr;
+        QTRY_VERIFY((value = shown(window, "archiveInfoValue")));
+        QVERIFY(value->property("selectByMouse").toBool());
+        QVERIFY(value->property("readOnly").toBool());
+        QCOMPARE(value->property("text").toString(), fixture->path());
+        QTest::qWait(300);
+        const QPoint from = value->mapToScene({2, 8}).toPoint();
+        const QPoint to = value->mapToScene({value->width() - 2, value->height() - 4}).toPoint();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, from);
+        for (int i = 1; i <= 10; ++i)
+            QTest::mouseMove(window, from + (to - from) * i / 10);
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, to);
+        QTRY_VERIFY(!value->property("selectedText").toString().isEmpty());
+        QGuiApplication::clipboard()->clear();
+        QTest::keyClick(window, Qt::Key_C, Qt::ControlModifier);
+        QTRY_VERIFY(!QGuiApplication::clipboard()->text().isEmpty());
+        QCOMPARE(QGuiApplication::clipboard()->text(), value->property("selectedText").toString());
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-info-select.png"));
     }
 };
 

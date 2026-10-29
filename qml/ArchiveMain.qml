@@ -244,7 +244,16 @@ ArchiveWindow {
         visible: value !== ""
         Layout.fillWidth: true; spacing: 12
         Text { text: parent.label; color: window.muted; font.pixelSize: 13; Layout.preferredWidth: 92; horizontalAlignment: Text.AlignRight }
-        Text { text: parent.value; color: window.ink; font.pixelSize: 13; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
+        // Selectable and copyable (Ctrl+C or the right-click menu), like nook's properties.
+        TextEdit {
+            id: infoValue
+            objectName: "archiveInfoValue"
+            ContextMenu.menu: null
+            TextMenuArea { target: infoValue }
+            text: parent.value; readOnly: true; selectByMouse: true
+            selectionColor: window.theme.selection; selectedTextColor: window.theme.selectionText
+            color: window.ink; font.pixelSize: 13; Layout.fillWidth: true; wrapMode: TextEdit.WrapAnywhere
+        }
     }
 
     Item {

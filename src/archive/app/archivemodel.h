@@ -84,6 +84,9 @@ class ArchiveModel : public QAbstractListModel {
     Q_INVOKABLE void click(int row, int modifiers);
     Q_INVOKABLE void selectAll();
     Q_INVOKABLE void clearSelection();
+    // A selection band: exactly these rows, plus those of base (what was selected when a Ctrl+drag began).
+    Q_INVOKABLE void selectRows(const QList<int> &rows, const QList<int> &base);
+    Q_INVOKABLE QList<int> selectedRows() const;
     Q_INVOKABLE QVariantMap entry(int row) const;
     Q_INVOKABLE QStringList selectedPaths() const;
     Q_INVOKABLE bool isFolder(int row) const;

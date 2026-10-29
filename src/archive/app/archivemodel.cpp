@@ -366,6 +366,27 @@ void ArchiveModel::selectAll() {
     Q_EMIT selectionChanged();
 }
 
+void ArchiveModel::selectRows(const QList<int> &rows, const QList<int> &base) {
+    QSet<int> selected;
+    for (const int row : base + rows)
+        if (row >= 0 && row < int(m_rows.size()))
+            selected.insert(m_rows[size_t(row)]);
+    if (selected == m_selected)
+        return;
+    m_selected = selected;
+    if (!m_rows.empty())
+        Q_EMIT dataChanged(index(0), index(int(m_rows.size()) - 1), {SelectedRole});
+    Q_EMIT selectionChanged();
+}
+
+QList<int> ArchiveModel::selectedRows() const {
+    QList<int> rows;
+    for (int row = 0; row < int(m_rows.size()); ++row)
+        if (m_selected.contains(m_rows[size_t(row)]))
+            rows << row;
+    return rows;
+}
+
 void ArchiveModel::clearSelection() {
     if (m_selected.isEmpty())
         return;

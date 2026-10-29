@@ -326,7 +326,7 @@ Dialog {
                     Label { objectName: "mountStatus"; text: panel.controller.diskMounts.status; color: panel.muted; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
                 }
                 Card {
-                    visible: panel.category === 3; heading: "nook 0.1"
+                    visible: panel.category === 3; heading: "nook 0.2"
                     Icon { name: "folder"; width: 64; height: 64; Layout.alignment: Qt.AlignHCenter }
                     Label { text: "Qt Quick · C++ · GIO · SQLite"; color: panel.muted; font.pixelSize: 13; Layout.fillWidth: true; wrapMode: Text.Wrap }
                 }

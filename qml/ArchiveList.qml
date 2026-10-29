@@ -106,12 +106,90 @@ FocusScope {
                         event.accepted = true
                     }
                     delegate: rowComponent
-                    MouseArea {
-                        // Clicks between and below the rows clear the selection.
-                        anchors.fill: parent; z: -1
-                        acceptedButtons: Qt.LeftButton | Qt.RightButton
-                        onPressed: event => { list.forceActiveFocus(); if (!(event.modifiers & Qt.ControlModifier)) pane.model.clearSelection() }
+                }
+                // As in nook's file list: a left drag from blank space or from a row's size, date or
+                // type cells draws a selection band (Ctrl adds to the selection), only the name drags
+                // files out, and a click on blank space clears the selection.
+                MouseArea {
+                    id: band
+                    objectName: "archiveSelectionPointer"
+                    anchors.fill: list; z: 2
+                    acceptedButtons: Qt.LeftButton
+                    preventStealing: true
+                    property bool selecting: false
+                    property bool dragged: false
+                    property point origin: Qt.point(0, 0)  // list content coordinates
+                    property point pointer: Qt.point(0, 0) // local coordinates
+                    property var base: []
+                    property int pressRow: -1
+                    function contentPoint(x, y) { return Qt.point(x + list.contentX - list.originX, y + list.contentY - list.originY) }
+                    function rowAt(x, y) { return list.indexAt(x + list.contentX, y + list.contentY) }
+                    function inName(x) { const cx = x + list.contentX; return cx >= 9 && cx <= 9 + pane.columns[0].width }
+                    function refresh() {
+                        const c = contentPoint(pointer.x, pointer.y)
+                        const left = Math.min(origin.x, c.x), right = Math.max(origin.x, c.x)
+                        const top = Math.min(origin.y, c.y), bottom = Math.max(origin.y, c.y)
+                        const rows = []
+                        const rowsRight = 9 + pane.columns.reduce((sum, column) => sum + column.width, 0)
+                        if (right >= 9 && left <= rowsRight) {
+                            const last = Math.min(pane.model.count - 1, Math.floor(bottom / pane.rowHeight))
+                            for (let row = Math.max(0, Math.floor(top / pane.rowHeight)); row <= last; ++row) rows.push(row)
+                        }
+                        pane.model.selectRows(rows, base)
                     }
+                    onPressed: event => {
+                        const row = rowAt(event.x, event.y)
+                        // The scroll bar, and a row's name (select, open, drag out), are not ours.
+                        if (event.x >= width - 14 || (row >= 0 && inName(event.x))) { event.accepted = false; return }
+                        list.forceActiveFocus()
+                        selecting = false; dragged = false; pressRow = row
+                        origin = contentPoint(event.x, event.y); pointer = Qt.point(event.x, event.y)
+                        base = event.modifiers & Qt.ControlModifier ? pane.model.selectedRows() : []
+                    }
+                    onPositionChanged: event => {
+                        pointer = Qt.point(event.x, event.y)
+                        if (!selecting) {
+                            const c = contentPoint(event.x, event.y)
+                            if (Math.abs(c.x - origin.x) < 5 && Math.abs(c.y - origin.y) < 5) return
+                            selecting = true; dragged = true; pane.model.currentRow = -1
+                        }
+                        refresh()
+                    }
+                    onReleased: selecting = false
+                    onCanceled: selecting = false
+                    onClicked: event => {
+                        if (dragged) return
+                        if (pressRow >= 0) pane.model.click(pressRow, event.modifiers)
+                        else if (!(event.modifiers & Qt.ControlModifier)) pane.model.clearSelection()
+                    }
+                    onDoubleClicked: event => { if (pressRow >= 0) pane.activated(pressRow) }
+                    // Keep selecting while the pointer rests above or below the list.
+                    Timer {
+                        interval: 16; repeat: true
+                        running: band.selecting && (band.pointer.y < 28 || band.pointer.y > band.height - 28)
+                        onTriggered: {
+                            const edge = band.pointer.y < 28 ? band.pointer.y - 28 : band.pointer.y - (band.height - 28)
+                            const step = Math.max(-40, Math.min(40, edge * 0.6))
+                            list.contentY = Math.max(list.originY, Math.min(list.contentY + step, list.originY + Math.max(0, list.contentHeight - list.height)))
+                            band.refresh()
+                        }
+                    }
+                }
+                Rectangle {
+                    objectName: "archiveSelectionBand"
+                    visible: band.selecting
+                    z: 3
+                    // The anchor is kept in content coordinates, so it stays put while scrolling.
+                    readonly property real startX: band.origin.x - list.contentX + list.originX
+                    readonly property real startY: band.origin.y - list.contentY + list.originY
+                    readonly property real bandLeft: Math.max(0, Math.min(startX, band.pointer.x))
+                    readonly property real bandTop: Math.max(0, Math.min(startY, band.pointer.y))
+                    x: list.x + bandLeft; y: list.y + bandTop
+                    width: Math.min(list.width, Math.max(startX, band.pointer.x)) - bandLeft
+                    height: Math.min(list.height, Math.max(startY, band.pointer.y)) - bandTop
+                    radius: 3
+                    color: pane.theme.bandFill
+                    border.width: 1; border.color: pane.theme.selectionBar
                 }
                 Column {
                     anchors.centerIn: parent
