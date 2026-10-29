@@ -14,7 +14,7 @@ AbstractButton {
     property var hostWindow: ApplicationWindow.window
     readonly property var theme: hostWindow && hostWindow.theme ? hostWindow.theme : Palette.fallback()
     property color foreground: theme.inkSoft
-    readonly property bool animated: hostWindow ? hostWindow.controller.settings.values.animations : false
+    readonly property bool animated: hostWindow ? hostWindow.animations === true : false
     // Icons read clearly at rest and respond to hover/toggle; accent buttons sit on terracotta.
     property color iconColor: accent ? theme.accentInk : active ? theme.accentText : hovered ? theme.iconHover : theme.icon
     Behavior on iconColor { enabled: control.animated; ColorAnimation { duration: 100 } }

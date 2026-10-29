@@ -15,7 +15,7 @@ Popup {
     property bool wrapAnywhere: false
     property var hostWindow: ApplicationWindow.window
     readonly property var theme: hostWindow && hostWindow.theme ? hostWindow.theme : Palette.fallback()
-    readonly property bool animated: hostWindow && hostWindow.controller ? hostWindow.controller.settings.values.animations : false
+    readonly property bool animated: hostWindow ? hostWindow.animations === true : false
     readonly property real windowWidth: hostWindow && hostWindow.layoutWidth ? hostWindow.layoutWidth : 600
     readonly property color tone: danger ? theme.danger : theme.accent
     default property alias content: body.data

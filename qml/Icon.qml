@@ -10,6 +10,7 @@ Item {
     property color tint: (host && host.theme ? host.theme : Palette.fallback()).icon
     readonly property bool monochrome: ["add", "back", "calendar", "close", "copy", "cut", "document", "download", "drive", "file",
         "filter", "forward", "grid", "hidden", "home", "list", "moon", "paste", "redo", "refresh", "rename", "search", "select-all",
+        "lock", "info", "verify", "extract", "compress",
         "settings", "split", "sun", "terminal", "trash", "undo", "up"].indexOf(name) >= 0
     property bool shaderFailed: false
     readonly property bool tinted: monochrome && !shaderFailed && GraphicsInfo.api !== GraphicsInfo.Software

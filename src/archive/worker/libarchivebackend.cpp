@@ -280,6 +280,21 @@ QJsonObject libarchiveList(const Request &request, bool *fallback) {
     for (const auto &entry : std::as_const(items))
         raw << entry.raw;
     names.detect(raw);
+    // libarchive does not report compressed sizes; 7-Zip's listing of the same ZIP does. Both
+    // follow the central directory, so entries pair up by position (checked against sizes).
+    QList<qint64> packed;
+    QStringList methods;
+    if (reader.zip()) {
+        const QJsonArray other = sevenZipEntries(request.archive);
+        bool aligned = other.size() == items.size();
+        for (qsizetype i = 0; aligned && i < items.size(); ++i)
+            aligned = items[i].type == "dir" || qint64(other[i].toObject().value("size").toDouble()) == items[i].size;
+        for (qsizetype i = 0; aligned && i < items.size(); ++i) {
+            const QJsonObject entry = other[i].toObject();
+            packed << (entry.contains("packed") ? qint64(entry.value("packed").toDouble()) : -1);
+            methods << entry.value("method").toString();
+        }
+    }
     bool encrypted = false;
     qint64 total = 0;
     for (auto &entry : items) {
@@ -298,9 +313,14 @@ QJsonObject libarchiveList(const Request &request, bool *fallback) {
                   {"split", false},
                   {"stream", reader.raw()}});
     QJsonArray batch;
-    for (const auto &entry : std::as_const(items)) {
+    for (qsizetype i = 0; i < items.size(); ++i) {
+        const Item &entry = items[i];
         QJsonObject json{{"path", entry.path}, {"type", entry.type}, {"size", double(entry.size)},
                          {"mtime", double(entry.mtime)}, {"mode", int(entry.mode)}};
+        if (i < packed.size() && packed[i] >= 0 && entry.type != "dir")
+            json.insert("packed", double(packed[i]));
+        if (i < methods.size() && !methods[i].isEmpty())
+            json.insert("method", methods[i]);
         if (entry.encrypted)
             json.insert("encrypted", true);
         if (!entry.link.isEmpty())

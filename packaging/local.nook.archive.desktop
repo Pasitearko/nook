@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=nook解压缩
+GenericName=压缩包管理器
+Comment=浏览、解压和创建压缩包
+Exec=nook-archive %U
+Icon=nook-archive
+Terminal=false
+Categories=Utility;Archiving;Compression;
+Keywords=zip;7z;rar;tar;压缩;解压;archive;
+MimeType=application/zip;application/x-7z-compressed;application/vnd.rar;application/x-rar;application/x-rar-compressed;application/x-tar;application/x-compressed-tar;application/x-bzip2-compressed-tar;application/x-xz-compressed-tar;application/x-zstd-compressed-tar;application/x-lz4-compressed-tar;application/x-lzma-compressed-tar;application/gzip;application/x-bzip2;application/x-xz;application/zstd;application/x-lzma;application/x-lz4;application/x-cpio;application/x-iso9660-image;application/vnd.ms-cab-compressed;application/vnd.debian.binary-package;application/x-rpm;application/x-xar;application/x-lha;application/x-java-archive;application/x-ms-wim;
+StartupWMClass=local.nook.archive
+StartupNotify=true

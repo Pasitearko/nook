@@ -6,7 +6,7 @@ Menu {
     id: menu
     property var host: ApplicationWindow.window
     readonly property var theme: host && host.theme ? host.theme : Palette.fallback()
-    readonly property bool animated: host ? host.prefs.animations : false
+    readonly property bool animated: host ? host.animations === true : false
     objectName: "styledMenu"
     implicitWidth: 278
     padding: 7

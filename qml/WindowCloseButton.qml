@@ -9,7 +9,7 @@ AbstractButton {
     property string hint: "关闭窗口"
     property var hostWindow: ApplicationWindow.window
     readonly property var theme: hostWindow && hostWindow.theme ? hostWindow.theme : Palette.fallback()
-    readonly property bool animated: hostWindow ? hostWindow.controller.settings.values.animations : false
+    readonly property bool animated: hostWindow ? hostWindow.animations === true : false
     implicitWidth: 40
     implicitHeight: 36
     hoverEnabled: true

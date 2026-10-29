@@ -39,45 +39,50 @@ add_executable(nook-archive-worker
 target_link_libraries(nook-archive-worker PRIVATE nook_archive PkgConfig::LIBARCHIVE)
 target_compile_options(nook-archive-worker PRIVATE -Wall -Wextra -Wpedantic)
 qt_add_executable(nook src/main.cpp)
-qt_add_qml_module(nook URI Nook VERSION 1.0
-    QML_FILES qml/Main.qml qml/FilePane.qml qml/ActionButton.qml qml/Icon.qml
-        qml/NookMenu.qml qml/NookMenuItem.qml qml/SettingsPanel.qml
-        qml/NookToolTip.qml qml/NookComboBox.qml qml/Sidebar.qml qml/PropertiesDialog.qml
-        qml/Spotlight.qml qml/RecentActivity.qml
-        qml/Theme.qml qml/palette.js qml/DatePicker.qml qml/TextMenu.qml qml/TextMenuArea.qml qml/SpringProgress.qml qml/FileChooser.qml qml/WindowCloseButton.qml qml/NookDialog.qml
-    RESOURCES qml/icons/folder.svg qml/icons/file.svg qml/icons/image.svg
+# Controls and artwork shared by nook and nook解压缩; each program compiles them into its own
+# QML module. They expect their window to provide `theme` (Theme) and `animations` (bool).
+set(NOOK_SHARED_QML
+    qml/ActionButton.qml qml/Icon.qml qml/NookMenu.qml qml/NookMenuItem.qml qml/NookToolTip.qml
+    qml/NookComboBox.qml qml/Spotlight.qml qml/Theme.qml qml/palette.js qml/TextMenu.qml
+    qml/TextMenuArea.qml qml/WindowCloseButton.qml qml/NookDialog.qml)
+set(NOOK_ICONS
+    qml/icons/folder.svg qml/icons/file.svg qml/icons/image.svg
     qml/icons/code.svg qml/icons/document.svg qml/icons/video.svg qml/icons/music.svg
     qml/icons/home.svg qml/icons/download.svg qml/icons/drive.svg qml/icons/trash.svg
-    qml/icons/search.svg qml/icons/settings.svg
-    qml/icons/add.svg
-    qml/icons/close.svg
-    qml/icons/back.svg
-    qml/icons/forward.svg
-    qml/icons/up.svg
-    qml/icons/refresh.svg
-    qml/icons/cut.svg
-    qml/icons/copy.svg
-    qml/icons/paste.svg
-    qml/icons/rename.svg
-    qml/icons/list.svg
-    qml/icons/grid.svg
-    qml/icons/split.svg
-    qml/icons/terminal.svg
-    qml/icons/hidden.svg
-    qml/icons/filter.svg
-    qml/icons/calendar.svg
-    qml/icons/undo.svg
-    qml/icons/redo.svg
-    qml/icons/select-all.svg
-    qml/icons/select.svg
-    qml/icons/sun.svg
-    qml/icons/moon.svg
+    qml/icons/search.svg qml/icons/settings.svg qml/icons/add.svg qml/icons/close.svg
+    qml/icons/back.svg qml/icons/forward.svg qml/icons/up.svg qml/icons/refresh.svg
+    qml/icons/cut.svg qml/icons/copy.svg qml/icons/paste.svg qml/icons/rename.svg
+    qml/icons/list.svg qml/icons/grid.svg qml/icons/split.svg qml/icons/terminal.svg
+    qml/icons/hidden.svg qml/icons/filter.svg qml/icons/calendar.svg qml/icons/undo.svg
+    qml/icons/redo.svg qml/icons/select-all.svg qml/icons/select.svg qml/icons/sun.svg
+    qml/icons/moon.svg qml/icons/archive.svg qml/icons/lock.svg qml/icons/info.svg
+    qml/icons/verify.svg qml/icons/extract.svg qml/icons/compress.svg)
+qt_add_qml_module(nook URI Nook VERSION 1.0
+    QML_FILES ${NOOK_SHARED_QML}
+        qml/Main.qml qml/FilePane.qml qml/SettingsPanel.qml qml/Sidebar.qml qml/PropertiesDialog.qml
+        qml/RecentActivity.qml qml/DatePicker.qml qml/SpringProgress.qml qml/FileChooser.qml
+    RESOURCES ${NOOK_ICONS}
 )
 # GLSL sources are compiled to portable .qsb (Vulkan/GL/Metal) at build time.
 qt_add_shaders(nook "nook-shaders"
     PREFIX "/qt/qml/Nook"
     FILES qml/shaders/spotlight.frag qml/shaders/tint.frag)
 target_link_libraries(nook PRIVATE nook_core Qt6::QuickControls2)
+# nook解压缩: its own program and identity (local.nook.archive), sharing nook's look and settings.
+qt_add_executable(nook-archive
+    src/archive/app/main.cpp src/archive/app/archiveapp.cpp src/archive/app/archiveapp.h
+    src/archive/app/archivedocument.cpp src/archive/app/archivedocument.h
+    src/archive/app/archivemodel.cpp src/archive/app/archivemodel.h)
+qt_add_qml_module(nook-archive URI NookArchive VERSION 1.0
+    QML_FILES ${NOOK_SHARED_QML} qml/ArchiveMain.qml qml/ArchiveList.qml
+    RESOURCES ${NOOK_ICONS}
+)
+qt_add_shaders(nook-archive "nook-archive-shaders"
+    PREFIX "/qt/qml/NookArchive"
+    FILES qml/shaders/spotlight.frag qml/shaders/tint.frag)
+target_include_directories(nook-archive PRIVATE src/archive/app)
+target_link_libraries(nook-archive PRIVATE nook_core nook_archive Qt6::QuickControls2 Qt6::DBus)
+add_dependencies(nook-archive nook-archive-worker)
 # Development probe for NTFS volumes (read-only); built, never installed.
 add_executable(nook-ntfs-probe tools/ntfs_probe.cpp)
 target_link_libraries(nook-ntfs-probe PRIVATE nook_core)
@@ -124,10 +129,18 @@ if(BUILD_TESTING)
     add_dependencies(nook-archive-tests nook-archive-worker)
     add_test(NAME archive COMMAND nook-archive-tests)
     set_tests_properties(archive PROPERTIES ENVIRONMENT "NOOK_ARCHIVE_WORKER=$<TARGET_FILE:nook-archive-worker>;LANG=zh_CN.UTF-8")
+    qt_add_executable(nook-archive-app-tests tests/archive_app_test.cpp
+        src/archive/app/archiveapp.cpp src/archive/app/archivedocument.cpp src/archive/app/archivemodel.cpp)
+    target_include_directories(nook-archive-app-tests PRIVATE src/archive/app)
+    target_link_libraries(nook-archive-app-tests PRIVATE nook_core nook_archive Qt6::Test Qt6::QuickControls2 Qt6::DBus PkgConfig::LIBARCHIVE)
+    target_compile_definitions(nook-archive-app-tests PRIVATE NOOK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" NOOK_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+    add_dependencies(nook-archive-app-tests nook-archive-worker)
+    add_test(NAME archive-app COMMAND nook-archive-app-tests)
+    set_tests_properties(archive-app PROPERTIES ENVIRONMENT "NOOK_ARCHIVE_WORKER=$<TARGET_FILE:nook-archive-worker>;LANG=zh_CN.UTF-8;QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
 endif()
 include(GNUInstallDirs)
-install(TARGETS nook RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(FILES packaging/local.nook.desktop packaging/local.nook.chooser.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+install(TARGETS nook nook-archive RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES packaging/local.nook.desktop packaging/local.nook.chooser.desktop packaging/local.nook.archive.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 # The file chooser behind xdg-desktop-portal; portals.conf decides which desktops use it.
 install(FILES packaging/nook.portal DESTINATION ${CMAKE_INSTALL_DATADIR}/xdg-desktop-portal/portals)
 install(FILES packaging/org.freedesktop.impl.portal.desktop.nook.service DESTINATION ${CMAKE_INSTALL_DATADIR}/dbus-1/services)
@@ -138,6 +151,7 @@ install(TARGETS nook-archive-worker RUNTIME DESTINATION lib/nook)
 install(FILES packaging/local.nook.mount.policy packaging/local.nook.volume.policy
         DESTINATION ${CMAKE_INSTALL_DATADIR}/polkit-1/actions)
 install(FILES qml/icons/folder.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps RENAME nook.svg)
+install(FILES qml/icons/archive.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps RENAME nook-archive.svg)
 install(FILES LICENSE THIRD_PARTY.md DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/nook)
 install(FILES README.md LICENSE THIRD_PARTY.md packaging/niri.example.kdl DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook)
 install(FILES docs/VALIDATION.md docs/AUTOMOUNT-DESIGN.md docs/INPUT-METHOD.md docs/ARCHIVE-DESIGN.md docs/ARCHIVE-WORKER.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook/docs)

@@ -9,6 +9,8 @@ ApplicationWindow {
     required property var controller
     readonly property var app: controller
     readonly property var prefs: app.settings.values
+    // What the shared controls (ActionButton, NookDialog, NookMenu …) read from their window.
+    readonly property bool animations: prefs.animations === true
     readonly property bool dark: prefs.theme === "dark" || (prefs.theme === "system" && app.settings.systemDark)
     readonly property Theme theme: Theme { dark: window.dark; effects: prefs.effects }
     readonly property color ink: theme.ink

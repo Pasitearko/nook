@@ -116,6 +116,8 @@ QJsonObject libarchiveList(const Request &request, bool *fallback);
 QJsonObject libarchiveTest(const Request &request, bool *fallback);
 QJsonObject libarchiveExtract(const Request &request, bool *fallback);
 QJsonObject sevenZipList(const Request &request);
+// 7-Zip's entries for a package that needs no password to list (packed sizes, methods).
+QJsonArray sevenZipEntries(const QString &archive);
 QJsonObject sevenZipTest(const Request &request);
 QJsonObject sevenZipExtract(const Request &request);
 QJsonObject create(const Request &request);

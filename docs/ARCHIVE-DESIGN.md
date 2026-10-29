@@ -374,3 +374,15 @@ Q1～Q8 回答后重新计算问题依赖，不一次猜定所有细节。后续
 | 7-Zip（`7z` 程序） | 7z、RAR/RAR5、分卷、WIM 的列表／测试／解压，及 libarchive 打不开的格式；7z 与 ZIP 的创建（参数、加密、分卷） | libarchive 解不开加密的 7z/RAR；7-Zip 在 Linux 上处理不了 GBK 文件名，所以 ZIP 读取不交给它 |
 
 密码只经 stdin 传给 worker 和 7-Zip，从不出现在命令行。协议、写盘与安全措施见 `docs/ARCHIVE-WORKER.md`。
+
+## 17. 第 2 阶段：独立应用与浏览（已完成）
+
+- **可执行文件**：`nook-archive`（应用 id `local.nook.archive`，desktop 名“nook解压缩”，图标 `nook-archive`）。单实例：第二次启动把压缩包交给已运行的进程，每个压缩包一个窗口；空窗口优先接收。`--isolated`、`--capture`、`--quit-after` 只用于开发验证。
+- **共享界面**：`qml/` 里的 ActionButton、Icon、NookMenu、NookComboBox、NookDialog、Spotlight、Theme、WindowCloseButton 等同时编进 `Nook` 与 `NookArchive` 两个 QML 模块（CMake 的 `NOOK_SHARED_QML`）。宿主窗口须提供 `theme`、`animations`、`layoutWidth` 三个属性；共享组件不再读取 nook 专有的 `prefs`。
+- **外观**：跟随 nook 的设置（深浅色、缩放、动画），只读不写；自身偏好与最近打开记录存于 `~/.config/nook/archive.conf`。
+- **浏览**：后退／前进／上级、路径面包屑、全包搜索（显示所在位置）、按名称／大小／压缩后／时间／类型排序（文件夹在前、数字按数值）、Ctrl/Shift 多选、加密项锁标记、压缩包内的压缩包用压缩包图标、越界路径标为警示色。
+- **编码**：旧编码 ZIP 显示“文件名编码”下拉框，“自动识别（GBK）”可改为任意编码并即时重新列出。
+- **压缩后大小**：libarchive 不提供 ZIP 条目的压缩大小，worker 额外用 7-Zip 列一次，按位置与大小对齐后补上；对不上就不显示。压缩率大于 100%（极小的包）时不显示。
+- **打开方式**：拖入、Ctrl+O（直接调用 Nook 选择器）、命令行路径或 `file://` URI、最近打开列表。
+- **尚未实现**（按钮可见，点击提示“下一阶段推出”）：解压、测试、添加、删除、重命名、新建压缩包——分别在第 3、5 阶段完成。
+- **测试**：`tests/archive_app_test.cpp`（ctest 名 `archive-app`）覆盖树模型、导航、排序、选择、越界名、旧编码切换、损坏包、离屏窗口浏览与搜索、加密 ZIP 标记。

@@ -258,7 +258,7 @@ struct Listing {
 
 class ListParser {
   public:
-    explicit ListParser(bool emitEntries) : m_emit(emitEntries) {}
+    explicit ListParser(bool emitEntries, bool keep = false) : m_emit(emitEntries), m_keep(keep) {}
     void line(const QByteArray &raw) {
         const QString text = QString::fromUtf8(raw).trimmed();
         if (text == u"--") {
@@ -332,6 +332,8 @@ class ListParser {
             item.insert("link", m_entry.value("Symbolic Link"));
         if (components.isEmpty())
             item.insert("unsafe", true);
+        if (m_keep)
+            m_listing.items << item;
         m_listing.encrypted = m_listing.encrypted || encrypted;
         m_listing.total += std::max<qint64>(size, 0);
         ++m_listing.count;
@@ -347,6 +349,7 @@ class ListParser {
 
     enum class Section { Header, Archive, Entries } m_section = Section::Header;
     bool m_emit;
+    bool m_keep;
     QHash<QString, QString> m_entry;
     QJsonArray m_batch;
     Listing m_listing;
@@ -409,6 +412,14 @@ Prepared prepare(const Request &request, bool emitEntries) {
     }
 }
 
+}
+
+QJsonArray sevenZipEntries(const QString &archive) {
+    ListParser parser(false, true);
+    const Run result = run(QStringList{"l", "-slt", "-bsp0"} + common() + QStringList{"--", archive}, {},
+                           [&](const QByteArray &line) { parser.line(line); }, {});
+    parser.finish();
+    return result.exitCode == 0 ? parser.listing().items : QJsonArray();
 }
 
 QJsonObject sevenZipList(const Request &request) {
