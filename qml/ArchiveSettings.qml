@@ -33,7 +33,7 @@ NookDialog {
                 objectName: "archiveDefaultStatus"
                 Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 13; color: dialog.theme.ink
                 text: dialog.defaults.state === "unavailable" ? "安装 nook解压缩 后才能设置默认程序。"
-                    : dialog.defaults.state === "all" ? "已是全部 " + dialog.defaults.typeCount + " 种类型的默认程序"
+                    : dialog.defaults.state === "all" ? "nook解压缩 已是全部 " + dialog.defaults.typeCount + " 种类型的默认程序"
                     : "已接管 " + dialog.defaults.ownedCount + " / " + dialog.defaults.typeCount + " 种类型"
                         + (dialog.defaults.otherName !== "" ? "；其余主要由“" + dialog.defaults.otherName + "”打开" : "；其余未指定默认程序")
             }

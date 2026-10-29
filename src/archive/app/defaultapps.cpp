@@ -9,7 +9,6 @@
 #include <QMimeDatabase>
 #include <QSaveFile>
 #include <QStandardPaths>
-#include <QUuid>
 #include <gio/gdesktopappinfo.h>
 #include <gio/gio.h>
 
@@ -32,6 +31,53 @@ QString errorText(GError *error) {
     if (error)
         g_error_free(error);
     return text;
+}
+
+// What the confirmation lists. shared-mime-info tags its translations "zh-Hans-CN", which
+// neither Qt nor GIO match for zh_CN, so the types nook解压缩 claims are named here.
+const QHash<QString, QString> &labels() {
+    static const QHash<QString, QString> names{
+        {"application/zip", "ZIP 压缩包"},
+        {"application/x-7z-compressed", "7z 压缩包"},
+        {"application/vnd.rar", "RAR 压缩包"},
+        {"application/x-tar", "tar 包"},
+        {"application/x-compressed-tar", "tar.gz 压缩包"},
+        {"application/x-bzip2-compressed-tar", "tar.bz2 压缩包"},
+        {"application/x-xz-compressed-tar", "tar.xz 压缩包"},
+        {"application/x-zstd-compressed-tar", "tar.zst 压缩包"},
+        {"application/x-lz4-compressed-tar", "tar.lz4 压缩包"},
+        {"application/x-lzma-compressed-tar", "tar.lzma 压缩包"},
+        {"application/x-lzip-compressed-tar", "tar.lz 压缩包"},
+        {"application/x-tarz", "tar.Z 压缩包"},
+        {"application/gzip", "gzip 压缩文件"},
+        {"application/x-bzip2", "bzip2 压缩文件"},
+        {"application/x-xz", "xz 压缩文件"},
+        {"application/zstd", "zstd 压缩文件"},
+        {"application/x-lzma", "LZMA 压缩文件"},
+        {"application/x-lz4", "LZ4 压缩文件"},
+        {"application/x-lzip", "lzip 压缩文件"},
+        {"application/x-compress", "compress 压缩文件（.Z）"},
+        {"application/x-gzpostscript", "gzip 压缩的 PostScript 文档"},
+        {"application/x-cpio", "cpio 包"},
+        {"application/x-sv4cpio", "SVR4 cpio 包"},
+        {"application/x-sv4crc", "SVR4 cpio 包（带校验）"},
+        {"application/vnd.efi.iso", "ISO 光盘映像"},
+        {"application/vnd.ms-cab-compressed", "CAB 压缩包"},
+        {"application/vnd.debian.binary-package", "Debian 软件包（deb）"},
+        {"application/x-archive", "ar 包（含 .a 静态库）"},
+        {"application/x-rpm", "RPM 软件包"},
+        {"application/x-source-rpm", "RPM 源码包"},
+        {"application/x-xar", "XAR 包"},
+        {"application/x-lha", "LHA 压缩包"},
+        {"application/x-lhz", "LHZ 压缩包"},
+        {"application/x-arj", "ARJ 压缩包"},
+        {"application/java-archive", "Java 包（jar）"},
+        {"application/vnd.android.package-archive", "Android 应用包（apk）"},
+        {"application/x-ms-wim", "Windows 映像（WIM）"},
+        {"application/x-apple-diskimage", "macOS 磁盘映像（dmg）"},
+        {"application/vnd.squashfs", "SquashFS 映像"},
+    };
+    return names;
 }
 
 // GKeyFile preserves unrelated groups/comments. In particular, never use GIO's
@@ -135,11 +181,19 @@ void DefaultApps::refresh() {
     m_associations.clear();
     QHash<QString, int> others;
     QHash<QString, QString> names;
+    const QMimeDatabase mime;
     for (const auto &type : std::as_const(m_types)) {
         App app(g_app_info_get_default_for_type(type.toUtf8().constData(), FALSE));
         const QString id = app ? QString::fromUtf8(g_app_info_get_id(app.get())) : QString();
+        // What people recognise: the type's description and its file names (".zip").
+        const QMimeType known = mime.mimeTypeForName(type);
+        QStringList suffixes;
+        for (const auto &suffix : known.suffixes())
+            suffixes << "." + suffix;
         m_associations << QVariantMap{
             {"type", type},
+            {"label", labels().value(type, known.isValid() && !known.comment().isEmpty() ? known.comment() : type)},
+            {"suffixes", suffixes.mid(0, 3).join(u' ')},
             {"name", app ? QString::fromUtf8(g_app_info_get_name(app.get())) : QStringLiteral("未指定")},
             {"desktopId", id},
             {"ours", id == m_id}};
@@ -193,8 +247,10 @@ QString DefaultApps::setAsDefault() {
     QString backup = record.value("backup").toString();
     const QString list = mimeappsPath();
     if (backup.isEmpty() && QFileInfo::exists(list)) {
-        backup = list + ".bak-nook-archive-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss-zzz") +
-                 "-" + QUuid::createUuid().toString(QUuid::Id128);
+        const QString stamp = list + ".bak-nook-archive-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss");
+        backup = stamp;
+        for (int n = 2; QFileInfo::exists(backup) || QFileInfo(backup).isSymLink(); ++n)
+            backup = stamp + "-" + QString::number(n);
         if (!QFile::copy(list, backup))
             return "无法备份 " + list + "，没有修改";
     }

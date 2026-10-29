@@ -21,6 +21,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import zipfile
 
@@ -260,10 +261,14 @@ def isolated_env(root):
     env = os.environ.copy()
     for key, name in (("HOME", "home"), ("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"),
                       ("XDG_CACHE_HOME", "cache"), ("XDG_STATE_HOME", "state"),
-                      ("TMPDIR", "tmp"), ("XDG_RUNTIME_DIR", "runtime")):
+                      ("TMPDIR", "tmp")):
         path = root / name
         path.mkdir(mode=0o700)
         env[key] = str(path)
+    # Sockets live here, so the path must stay well under the 108-byte limit of a UNIX socket
+    # address (a long --output would truncate both Broadway sockets to the same name). The
+    # sandbox's /tmp is a private tmpfs.
+    env["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="nook-rt-", dir="/tmp")
     env.update(XDG_CONFIG_DIRS=str(root / "system-config"), XDG_DATA_DIRS="/usr/local/share:/usr/share",
                GSETTINGS_BACKEND="memory", GDK_BACKEND="broadway", GTK_A11Y="none", LC_ALL="C.UTF-8",
                GIO_USE_VFS="local", ADW_DISABLE_PORTAL="1",
@@ -307,14 +312,15 @@ def main():
     env = isolated_env(root)
     # Broadway's GTK socket is relative to private XDG_RUNTIME_DIR; --unixsocket is
     # its *HTTP* endpoint, not BROADWAY_DISPLAY. Neither endpoint uses host TCP ports.
-    socket = root / "runtime" / "broadway-http.socket"
+    runtime = Path(env["XDG_RUNTIME_DIR"])
+    socket = runtime / "broadway-http.socket"
     env["BROADWAY_DISPLAY"] = ":73"
     with (root / "broadway.log").open("wb") as log:
         server = subprocess.Popen(["gtk4-broadwayd", "--unixsocket", str(socket), ":73"], env=env,
                                   stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             deadline = time.monotonic() + 5
-            ready_socket = root / "runtime" / "broadway74.socket"
+            ready_socket = runtime / "broadway74.socket"
             while not ready_socket.exists() and server.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.05)
             if not ready_socket.exists():

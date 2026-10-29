@@ -55,12 +55,17 @@ NookDialog {
                 required property var modelData
                 width: ListView.view.width - 10; height: 32; spacing: 12
                 Text {
-                    text: modelData.type; color: dialog.theme.ink; font.pixelSize: 12
+                    text: modelData.label; color: dialog.theme.ink; font.pixelSize: 12
                     Layout.fillWidth: true; elide: Text.ElideRight
                 }
                 Text {
+                    text: modelData.suffixes; color: dialog.theme.muted; font.pixelSize: 12
+                    Layout.preferredWidth: 130; elide: Text.ElideRight
+                }
+                // Who opens it now; fixed widths keep the three columns lined up.
+                Text {
                     text: modelData.name; color: modelData.ours ? dialog.theme.accentText : dialog.theme.muted
-                    font.pixelSize: 12; Layout.maximumWidth: 160; elide: Text.ElideRight
+                    font.pixelSize: 12; Layout.preferredWidth: 150; horizontalAlignment: Text.AlignRight; elide: Text.ElideRight
                 }
             }
         }

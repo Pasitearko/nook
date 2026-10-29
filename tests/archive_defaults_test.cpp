@@ -84,6 +84,16 @@ class ArchiveDefaultsTest : public QObject {
         const QByteArray original = read(list);
         DefaultApps defaults;
         QVERIFY(defaults.typeCount() > 35);
+        // Each type is named in Chinese in the confirmation (shared-mime-info's own translations
+        // are not found for zh_CN), and ISO's old names resolve to the current one.
+        static const QRegularExpression chinese(QStringLiteral("[\\x{4e00}-\\x{9fff}]"));
+        QCOMPARE(defaults.associations().size(), defaults.typeCount());
+        for (const auto &item : defaults.associations()) {
+            const QVariantMap association = item.toMap();
+            if (association.value("type").toString().startsWith("application/x-nook-test"))
+                continue; // the fixture's own made-up type
+            QVERIFY2(association.value("label").toString().contains(chinese), qPrintable(association.value("type").toString()));
+        }
         // Aliases are counted once: ISO's old names resolve to the current one.
         QVERIFY(defaults.types().contains("application/vnd.efi.iso"));
         QVERIFY(!defaults.types().contains("application/x-iso9660-image"));
