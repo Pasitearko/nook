@@ -20,12 +20,11 @@ window-rule {
     default-column-width { fixed 1102; }
     default-window-height { fixed 709; }
 }
-// nook解压缩 (packages, compression and extraction progress): floating, the chooser's size.
+// nook解压缩: floating. No fixed size: its windows ask for their own (the package window
+// 1102×709, the compression window and the small progress window much less).
 window-rule {
     match app-id="^local\.nook\.archive$"
     open-floating true
-    default-column-width { fixed 1102; }
-    default-window-height { fixed 709; }
 }
 // Optional bind; replace an existing Mod+E instead of defining it twice.
 // binds { Mod+E { spawn "nook" "--new-window"; } }
