@@ -18,6 +18,8 @@ class ArchiveDocument : public QObject {
     Q_PROPERTY(QVariantMap info READ info NOTIFY infoChanged)
     Q_PROPERTY(QString formatLabel READ formatLabel NOTIFY infoChanged)
     Q_PROPERTY(bool readOnly READ readOnly NOTIFY infoChanged)
+    // Why it cannot be changed (empty when it can).
+    Q_PROPERTY(QString readOnlyReason READ readOnlyReason NOTIFY infoChanged)
     Q_PROPERTY(QString encoding READ encoding NOTIFY infoChanged)
     Q_PROPERTY(QString encodingChoice READ encodingChoice NOTIFY infoChanged)
     Q_PROPERTY(bool legacyNames READ legacyNames NOTIFY infoChanged)
@@ -40,6 +42,7 @@ class ArchiveDocument : public QObject {
     QVariantMap info() const { return m_info; }
     QString formatLabel() const;
     bool readOnly() const;
+    QString readOnlyReason() const;
     QString encoding() const { return m_info.value("encoding").toString(); }
     QString encodingChoice() const { return m_encoding; }
     bool legacyNames() const { return m_info.value("legacyNames").toBool(); }

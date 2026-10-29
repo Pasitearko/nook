@@ -30,11 +30,12 @@ class ArchiveJob : public QObject {
     void send(const QVariantMap &command);
     void read();
     void ended();
+    void removeStaging();
     QProcess m_process;
     QTimer m_killTimer;
     QByteArray m_buffer;
     QByteArray m_stderr;
-    QString m_staging;
+    QStringList m_staging; // every private folder the worker announced
     QVariantMap m_result;
     bool m_done = false;
 };

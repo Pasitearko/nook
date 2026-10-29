@@ -2,6 +2,7 @@
 #include "archiveapp.h"
 #include "archivedocument.h"
 #include "archivemodel.h"
+#include "filesessions.h"
 #include "passwordstore.h"
 #include "taskqueue.h"
 #include <QDir>
@@ -105,6 +106,46 @@ struct TestApp {
 
 QString status(TaskQueue *queue, int id) { return queue->task(id).value("status").toString(); }
 
+// What a package holds under a name (read with libarchive, so independent of the worker).
+QByteArray entryData(const QString &archivePath, const QString &name) {
+    struct archive *a = archive_read_new();
+    archive_read_support_format_all(a);
+    archive_read_support_filter_all(a);
+    QByteArray data;
+    if (archive_read_open_filename(a, QFile::encodeName(archivePath).constData(), 65536) == ARCHIVE_OK) {
+        archive_entry *entry;
+        while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+            const char *path = archive_entry_pathname_utf8(entry);
+            if (path && QString::fromUtf8(path) == name) {
+                char buffer[8192];
+                la_ssize_t got;
+                while ((got = archive_read_data(a, buffer, sizeof buffer)) > 0)
+                    data.append(buffer, got);
+                break;
+            }
+        }
+    }
+    archive_read_free(a);
+    return data;
+}
+
+// A main window on document, shown.
+std::unique_ptr<QObject> mainWindow(QQmlEngine &engine, ArchiveApp &app, ArchiveDocument &document) {
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveMain.qml"));
+    if (!component.isReady())
+        qWarning() << component.errorString();
+    std::unique_ptr<QObject> root(component.createWithInitialProperties(
+        {{"app", QVariant::fromValue(&app)}, {"document", QVariant::fromValue(&document)}}));
+    if (auto *window = qobject_cast<QQuickWindow *>(root.get()))
+        window->show();
+    return root;
+}
+
+QQuickItem *shown(QQuickWindow *window, const QString &name) {
+    QQuickItem *item = findVisual(window->contentItem(), name);
+    return item && item->isVisible() ? item : nullptr;
+}
+
 } // namespace
 
 // nook解压缩's browsing side: the tree model, a document backed by the worker, and the window.
@@ -120,6 +161,8 @@ class ArchiveAppTest : public QObject {
         // The trash goes where the fixtures are (same filesystem), never the real one.
         qputenv("XDG_DATA_HOME", QFile::encodeName(fixture->path() + "/data"));
         QDir().mkpath(fixture->path() + "/data");
+        // Files opened from packages are copied here.
+        qputenv("XDG_CACHE_HOME", QFile::encodeName(fixture->path() + "/cache"));
     }
 
     void modelTreeAndNavigation() {
@@ -206,7 +249,9 @@ class ArchiveAppTest : public QObject {
         QCOMPARE(opened.size(), 1);
         QVERIFY(document.legacyNames());
         QCOMPARE(document.formatLabel(), QStringLiteral("ZIP"));
-        QVERIFY(!document.readOnly());
+        // Written back, the names would change encoding: converting to a UTF-8 ZIP comes first.
+        QVERIFY(document.readOnly());
+        QVERIFY(document.readOnlyReason().contains("UTF-8"));
         QCOMPARE(names(*document.model()), (QStringList{"中文"}));
         document.model()->activate(0);
         QCOMPARE(names(*document.model()), (QStringList{"报告.txt"}));
@@ -705,6 +750,202 @@ class ArchiveAppTest : public QObject {
         QTest::qWait(900);
         QVERIFY(progress->isVisible());
         QVERIFY(progress->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-failed.png"));
+    }
+
+    // Deleting asks first; renaming and adding change the package and the window shows it again.
+    void mainWindowChangesPackage() {
+        if (QStandardPaths::findExecutable("7z").isEmpty())
+            QSKIP("ZIP packages are changed with 7-Zip");
+        TestApp t;
+        const QString zip = fixture->path() + "/edit-ui.zip";
+        writeZip(zip, {{"docs/a.txt", "aaa"}, {"docs/b.txt", "bbb"}, {"keep.txt", "keep"}});
+        ArchiveDocument document;
+        t.app.attach(&document);
+        QQmlEngine engine;
+        auto root = mainWindow(engine, t.app, document);
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY(window && QTest::qWaitForWindowExposed(window));
+        document.open(zip);
+        QTRY_COMPARE_WITH_TIMEOUT(document.state(), QStringLiteral("ready"), 10000);
+        QVERIFY(!document.readOnly());
+        ArchiveModel *model = document.model();
+        model->openFolder("docs");
+        QCOMPARE(names(*model), (QStringList{"a.txt", "b.txt"}));
+
+        // Delete: a red confirmation, then the package without it.
+        model->click(0, 0);
+        QMetaObject::invokeMethod(findVisual(window->contentItem(), "archiveDelete"), "clicked");
+        QQuickItem *confirm = nullptr;
+        QTRY_VERIFY((confirm = shown(window, "archiveDeleteConfirm")));
+        QTest::qWait(300);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-delete.png"));
+        QMetaObject::invokeMethod(confirm, "clicked");
+        QTRY_COMPARE_WITH_TIMEOUT(names(*model), (QStringList{"b.txt"}), 15000);
+        QCOMPARE(model->folder(), QStringLiteral("docs"));
+
+        // Rename: the name without its extension is selected; a taken name is refused.
+        model->click(0, 0);
+        QMetaObject::invokeMethod(findVisual(window->contentItem(), "archiveRename"), "clicked");
+        QQuickItem *field = nullptr;
+        QTRY_VERIFY((field = shown(window, "archiveRenameField")));
+        QCOMPARE(field->property("selectedText").toString(), QStringLiteral("b"));
+        field->setProperty("text", "c.txt");
+        QTest::qWait(300);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-rename.png"));
+        QMetaObject::invokeMethod(findVisual(window->contentItem(), "archiveRenameConfirm"), "clicked");
+        QTRY_COMPARE_WITH_TIMEOUT(names(*model), (QStringList{"c.txt"}), 15000);
+
+        // Add into the folder shown; the same name again is asked about.
+        const QString incoming = fixture->path() + "/edit-ui-in/new.txt";
+        put(incoming, "new");
+        QMetaObject::invokeMethod(window, "addPaths", Q_ARG(QVariant, QVariant(QStringList{incoming})));
+        QTRY_COMPARE_WITH_TIMEOUT(names(*model), (QStringList{"c.txt", "new.txt"}), 15000);
+        put(incoming, "newer");
+        QMetaObject::invokeMethod(window, "addPaths", Q_ARG(QVariant, QVariant(QStringList{incoming})));
+        QQuickItem *overwrite = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((overwrite = shown(window, "archiveConflictOverwrite")), 15000);
+        QTest::qWait(300);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-add-conflict.png"));
+        QMetaObject::invokeMethod(overwrite, "clicked");
+        QTRY_COMPARE_WITH_TIMEOUT(t.queue()->activeCount(), 0, 15000);
+        QCOMPARE(entryData(zip, "docs/new.txt"), QByteArray("newer"));
+        QCOMPARE(entryData(zip, "docs/c.txt"), QByteArray("bbb"));
+        QCOMPARE(entryData(zip, "keep.txt"), QByteArray("keep"));
+        QVERIFY(entryData(zip, "docs/a.txt").isEmpty());
+    }
+
+    // A file opened from the package: each save asks; closing with an edit not written back asks too.
+    void openedFileIsWrittenBack() {
+        if (QStandardPaths::findExecutable("7z").isEmpty())
+            QSKIP("ZIP packages are changed with 7-Zip");
+        TestApp t;
+        QString opened;
+        t.app.files()->setOpener([&](const QString &path) { opened = path; });
+        const QString zip = fixture->path() + "/open-ui.zip";
+        writeZip(zip, {{"notes/todo.txt", "one"}});
+        ArchiveDocument document;
+        t.app.attach(&document);
+        QQmlEngine engine;
+        auto root = mainWindow(engine, t.app, document);
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY(window && QTest::qWaitForWindowExposed(window));
+        document.open(zip);
+        QTRY_COMPARE_WITH_TIMEOUT(document.state(), QStringLiteral("ready"), 10000);
+        document.model()->openFolder("notes");
+        QMetaObject::invokeMethod(window, "activate", Q_ARG(QVariant, 0));
+        QTRY_VERIFY_WITH_TIMEOUT(!opened.isEmpty(), 10000);
+        QVERIFY(opened.startsWith(fixture->path() + "/cache/nook-archive/"));
+        QCOMPARE(read(opened), QStringLiteral("one"));
+        // The extraction was the window's work, not a task in the list.
+        QTRY_COMPARE(t.queue()->count(), 0);
+
+        put(opened, "two two");
+        QQuickItem *accept = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((accept = shown(window, "archiveModifiedAccept")), 5000);
+        QTest::qWait(300);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-modified.png"));
+        QMetaObject::invokeMethod(accept, "clicked");
+        QTRY_COMPARE_WITH_TIMEOUT(entryData(zip, "notes/todo.txt"), QByteArray("two two"), 15000);
+        QTRY_COMPARE(t.app.files()->unsavedCount(), 0);
+
+        QTRY_VERIFY(!shown(window, "archiveModifiedDecline"));
+        put(opened, "three three three");
+        QTRY_COMPARE_WITH_TIMEOUT(t.app.files()->unsavedCount(), 1, 5000);
+        QQuickItem *decline = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((decline = shown(window, "archiveModifiedDecline")), 5000);
+        QMetaObject::invokeMethod(decline, "clicked");
+        QCOMPARE(t.app.files()->unsavedCount(), 1);
+        window->close();
+        QQuickItem *discard = nullptr;
+        QTRY_VERIFY((discard = shown(window, "archiveUnsavedDiscard")));
+        QVERIFY(window->isVisible());
+        QTest::qWait(300);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-unsaved.png"));
+        QMetaObject::invokeMethod(discard, "clicked");
+        QTRY_VERIFY(!window->isVisible());
+        QVERIFY(!QFileInfo::exists(opened));
+        QCOMPARE(entryData(zip, "notes/todo.txt"), QByteArray("two two"));
+    }
+
+    // A package that cannot change: its edits can be saved as a copy. Dragging out extracts first.
+    void readOnlyCopyAndDragExport() {
+        TestApp t;
+        QString opened;
+        FileSessions *files = t.app.files();
+        files->setOpener([&](const QString &path) { opened = path; });
+        const QString zip = fixture->path() + "/legacy-edit.zip";
+        writeZip(zip, {{QByteArray("\xd6\xd0\xce\xc4/\xb1\xa8\xb8\xe6.txt"), "report"}});
+        QObject owner;
+        QSignalSpy modified(files, &FileSessions::modified);
+        files->open(&owner, zip, "中文/报告.txt", "GB18030", true);
+        QTRY_VERIFY_WITH_TIMEOUT(!opened.isEmpty(), 10000);
+        QCOMPARE(QFileInfo(opened).fileName(), QStringLiteral("报告.txt"));
+        put(opened, "edited");
+        QTRY_COMPARE_WITH_TIMEOUT(modified.size(), 1, 5000);
+        const int id = modified.first().first().toInt();
+        QVERIFY(files->ownedBy(id, &owner));
+        QVERIFY(files->session(id).value("readOnly").toBool());
+        files->writeBack(id); // refused: nothing starts
+        QCOMPARE(t.queue()->activeCount(), 0);
+        const QString saved = fixture->path() + "/legacy-saved";
+        QDir().mkpath(saved);
+        put(saved + "/报告.txt", "already here");
+        const QString copy = files->saveCopy(id, saved);
+        QCOMPARE(copy, saved + "/报告 (2).txt");
+        QCOMPARE(read(copy), QStringLiteral("edited"));
+        QCOMPARE(files->unsavedCount(), 0);
+
+        QSignalSpy ready(files, &FileSessions::dragReady);
+        const int token = files->exportForDrag(&owner, zip, {"中文"}, {}, "GB18030");
+        QVERIFY(token > 0);
+        QTRY_COMPARE_WITH_TIMEOUT(ready.size(), 1, 10000);
+        QCOMPARE(ready.first().at(0).toInt(), token);
+        const QStringList urls = ready.first().at(1).toStringList();
+        QCOMPARE(urls.size(), 1);
+        const QString dragged = QUrl(urls.first()).toLocalFile();
+        QVERIFY(dragged.endsWith("/中文"));
+        QCOMPARE(read(dragged + "/报告.txt"), QStringLiteral("report"));
+        QTRY_COMPARE(t.queue()->count(), 0);
+    }
+
+    // Converting keeps the original and writes names as UTF-8: the copy can then be changed.
+    void composeConvertsLegacyNames() {
+        TestApp t;
+        const QString zip = fixture->path() + "/convert-ui.zip";
+        writeZip(zip, {{QByteArray("\xd6\xd0\xce\xc4/\xb1\xa8\xb8\xe6.txt"), "report"}});
+        QQmlEngine engine;
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveCompose.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        std::unique_ptr<QObject> root(component.createWithInitialProperties(
+            {{"app", QVariant::fromValue(&t.app)}, {"items", QStringList()}, {"convertFrom", zip}, {"encoding", "GB18030"}}));
+        QVERIFY2(root, qPrintable(component.errorString()));
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY(window && QTest::qWaitForWindowExposed(window));
+        // Next to the original, under a name that does not replace it.
+        QCOMPARE(findVisual(window->contentItem(), "archiveComposeName")->property("text").toString(), QStringLiteral("convert-ui (2)"));
+        QCOMPARE(findVisual(window->contentItem(), "archiveComposeFormat")->property("currentText").toString(), QStringLiteral("ZIP"));
+        QVERIFY(!shown(window, "archiveComposeItems"));
+        QVERIFY(!shown(window, "archiveComposeDelete"));
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-convert.png"));
+        QMetaObject::invokeMethod(findVisual(window->contentItem(), "archiveComposeStart"), "clicked");
+        QTRY_VERIFY_WITH_TIMEOUT(!window->isVisible(), 20000);
+
+        const QString converted = fixture->path() + "/convert-ui (2).zip";
+        QCOMPARE(entryData(converted, "中文/报告.txt"), QByteArray("report"));
+        QVERIFY(QFileInfo::exists(zip));
+        ArchiveDocument document;
+        document.open(converted);
+        QTRY_COMPARE_WITH_TIMEOUT(document.state(), QStringLiteral("ready"), 10000);
+        QVERIFY(!document.legacyNames());
+        QVERIFY(!document.readOnly());
+        QCOMPARE(names(*document.model()), (QStringList{"中文"}));
+
+        // The worker refuses to write over the package it reads.
+        QVariantMap request = t.app.convertRequest(zip, {{"name", "convert-ui"}, {"folder", fixture->path()}, {"format", "zip"}, {"levelStep", 3}}, "GB18030");
+        QCOMPARE(request.value("output").toString(), zip);
+        const int id = t.queue()->start(request, {}, nullptr);
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("failed"), 10000);
+        QVERIFY(QFileInfo(zip).size() > 0);
     }
 };
 

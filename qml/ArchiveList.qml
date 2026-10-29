@@ -21,6 +21,10 @@ FocusScope {
     ]
     signal activated(int row)
     signal contextRequested(int row, real x, real y)
+    // Dragging selected rows out of the window; held tells when the button is let go.
+    signal dragStarted()
+    signal dragReleased()
+    property bool dragHeld: false
 
     function focusList() { list.forceActiveFocus() }
     function move(row, modifiers) {
@@ -236,6 +240,21 @@ FocusScope {
                         pane.model.click(row.index, event.modifiers)
                 }
                 onDoubleClicked: event => { if (event.button === Qt.LeftButton) pane.activated(row.index) }
+                // On the MouseArea itself, so it sees the press before the MouseArea takes it.
+                DragHandler {
+                    target: null; acceptedButtons: Qt.LeftButton
+                    enabled: !row.unsafe
+                    onActiveChanged: {
+                        if (active) {
+                            if (!row.selected) pane.model.click(row.index, 0)
+                            pane.dragHeld = true
+                            pane.dragStarted()
+                        } else {
+                            pane.dragHeld = false
+                            pane.dragReleased()
+                        }
+                    }
+                }
             }
         }
     }

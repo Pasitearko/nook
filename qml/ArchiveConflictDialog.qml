@@ -9,6 +9,8 @@ NookDialog {
     objectName: "archiveConflictDialog"
     required property var app
     property var conflict: ({})
+    // Adding to a package: the existing one is inside it, the incoming one on disk.
+    property bool adding: false
     readonly property var existing: conflict.existing || {}
     readonly property var incoming: conflict.incoming || {}
     readonly property string path: conflict.path || ""
@@ -24,16 +26,17 @@ NookDialog {
     }
     iconName: "file"
     title: "“" + path.split("/").pop() + "”已存在"
-    message: path.indexOf("/") >= 0 ? "位置：" + path.substring(0, path.lastIndexOf("/")) : "目标文件夹里已有同名项目。"
+    message: path.indexOf("/") >= 0 ? "位置：" + path.substring(0, path.lastIndexOf("/"))
+             : adding ? "压缩包里已有同名项目。" : "目标文件夹里已有同名项目。"
     wrapAnywhere: true
     closePolicy: Popup.NoAutoClose
     onAboutToShow: { answered = false; all.checked = false }
 
     GridLayout {
         Layout.fillWidth: true; columns: 2; columnSpacing: 14; rowSpacing: 6
-        Text { text: "已有的"; color: dialog.theme.muted; font.pixelSize: 13 }
+        Text { text: dialog.adding ? "压缩包里已有的" : "已有的"; color: dialog.theme.muted; font.pixelSize: 13 }
         Text { text: dialog.describe(dialog.existing); color: dialog.theme.ink; font.pixelSize: 13; Layout.fillWidth: true }
-        Text { text: "压缩包里的"; color: dialog.theme.muted; font.pixelSize: 13 }
+        Text { text: dialog.adding ? "要添加的" : "压缩包里的"; color: dialog.theme.muted; font.pixelSize: 13 }
         Text {
             text: dialog.describe(dialog.incoming) + (dialog.incoming.mtime && dialog.existing.mtime && dialog.incoming.mtime > dialog.existing.mtime ? "（较新）" : "")
             color: dialog.theme.ink; font.pixelSize: 13; Layout.fillWidth: true

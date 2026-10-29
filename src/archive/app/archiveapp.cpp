@@ -58,6 +58,7 @@ ArchiveApp::ArchiveApp(AppSettings *settings, std::function<void(const QString &
     });
     if (prefs().value("autoTryPasswords").toBool())
         m_passwords.load();
+    FileSessions::sweep();
     // nook writes its preferences from another process; pick its changes up as they land.
     const QString preferences = m_settings->store().fileName();
     const auto watch = [this, preferences] {
@@ -143,7 +144,9 @@ void ArchiveApp::choose(QObject *requester, const QString &purpose, const QStrin
         folder = QDir::homePath();
     QVariantMap options{{"current_folder", QVariant::fromValue(QFile::encodeName(folder) + '\0')}};
     QString title;
-    if (purpose == "archives") {
+    // Adding to an open package picks files or folders the same way as for a new one.
+    const QString kind = purpose == "add" ? QStringLiteral("files") : purpose == "addFolders" ? QStringLiteral("folders") : purpose;
+    if (kind == "archives") {
         Filter archives{"压缩包", {}};
         for (const auto &pattern : nook::archive::archivePatterns())
             archives.rules.append(FilterRule{0, pattern});
@@ -151,19 +154,19 @@ void ArchiveApp::choose(QObject *requester, const QString &purpose, const QStrin
         options.insert("multiple", true);
         options.insert("accept_label", "打开");
         title = "打开压缩包";
-    } else if (purpose == "files") {
+    } else if (kind == "files") {
         options.insert("multiple", true);
         options.insert("accept_label", "添加");
-        title = "选择要压缩的文件";
-    } else if (purpose == "folders") {
+        title = purpose == "add" ? "选择要添加到压缩包的文件" : "选择要压缩的文件";
+    } else if (kind == "folders") {
         options.insert("multiple", true);
         options.insert("directory", true);
         options.insert("accept_label", "添加");
-        title = "选择要压缩的文件夹";
+        title = purpose == "addFolders" ? "选择要添加到压缩包的文件夹" : "选择要压缩的文件夹";
     } else {
         options.insert("directory", true);
         options.insert("accept_label", "选择");
-        title = purpose == "save" ? "选择保存位置" : "选择解压位置";
+        title = purpose == "save" || purpose == "saveCopy" ? "选择保存位置" : "选择解压位置";
     }
     // Nook's own chooser, whichever chooser the desktop portal is set up with (same package).
     QDBusMessage call = QDBusMessage::createMethodCall("org.freedesktop.impl.portal.desktop.nook",
@@ -241,6 +244,27 @@ void ArchiveApp::attach(ArchiveDocument *document) {
     connect(document, &ArchiveDocument::opened, this, [this, document](const QString &path) {
         m_queue.rememberPassword(path, document->password());
     });
+}
+
+void ArchiveApp::openConvert(const QString &archive, const QString &encoding) {
+    if (m_factory)
+        m_factory("ArchiveCompose", {{"items", QStringList()}, {"convertFrom", localPath(archive)}, {"encoding", encoding}});
+}
+
+QVariantMap ArchiveApp::convertRequest(const QString &archive, const QVariantMap &choices, const QString &encoding) const {
+    // Built like a new package from the same choices, then told where its contents come from.
+    QVariantMap request = compressRequests({localPath(archive)}, choices).value(0).toMap();
+    request.insert("op", "convert");
+    request.insert("archive", localPath(archive));
+    request.remove("items");
+    if (request.contains("password"))
+        request.insert("newPassword", request.take("password"));
+    if (!encoding.isEmpty() && encoding != "auto")
+        request.insert("encoding", encoding);
+    const QString password = m_queue.sessionPassword(localPath(archive));
+    if (!password.isEmpty())
+        request.insert("password", password);
+    return request;
 }
 
 void ArchiveApp::openCompose(const QStringList &items) {
@@ -331,6 +355,11 @@ void ArchiveApp::needsAnswer(int id) {
 void ArchiveApp::finished(int id) {
     const QVariantMap task = m_queue.task(id);
     const QString state = task.value("status").toString();
+    const QString kind = task.value("kind").toString();
+    if (state == "done" && (kind == "add" || kind == "delete" || kind == "rename"))
+        Q_EMIT archiveChanged(task.value("archive").toString());
+    if (task.value("quiet").toBool())
+        return;
     if (state == "done" && task.value("openAfter").toBool() && !task.value("target").toString().isEmpty())
         reveal(task.value("target").toString(), task.value("targetIsFolder").toBool());
     if (state == "cancelled" || !prefs().value("notify").toBool())
@@ -341,17 +370,19 @@ void ArchiveApp::finished(int id) {
         return;
     if (window && m_queue.closesOnSuccess(id) && state != "done")
         return; // a progress window stays open on failure and says so there
-    const QString kind = task.value("kind").toString();
     const bool ok = state == "done";
-    const QString title = kind == "extract" ? (ok ? "解压完成" : "解压失败")
-                          : kind == "test"  ? (ok ? "测试通过" : "测试未通过")
-                                            : (ok ? "压缩完成" : "压缩失败");
+    const QString title = kind == "extract"   ? (ok ? "解压完成" : "解压失败")
+                          : kind == "test"    ? (ok ? "测试通过" : "测试未通过")
+                          : kind == "convert" ? (ok ? "转换完成" : "转换失败")
+                          : kind == "create"  ? (ok ? "压缩完成" : "压缩失败")
+                                              : (ok ? "压缩包已修改" : "修改压缩包失败");
     const QString body = task.value("archiveName").toString() + "\n" + task.value("message").toString();
     if (ok && !task.value("target").toString().isEmpty()) {
         const QString target = task.value("target").toString();
         const bool folder = task.value("targetIsFolder").toBool();
-        m_notifier.notify(title, body, false, kind == "test" ? QString() : "打开位置",
-                          kind == "test" ? std::function<void()>() : [this, target, folder] { reveal(target, folder); });
+        const bool where = kind == "extract" || kind == "create" || kind == "convert";
+        m_notifier.notify(title, body, false, where ? "打开位置" : QString(),
+                          where ? [this, target, folder] { reveal(target, folder); } : std::function<void()>());
     } else {
         m_notifier.notify(title, body, !ok, ok ? QString() : "查看详情",
                           ok ? std::function<void()>() : [this, id] { openTaskWindow(id); });
@@ -369,6 +400,8 @@ bool ArchiveApp::looksLikeArchive(const QString &location) const {
     const QFileInfo info(localPath(location));
     return info.isFile() && nook::archive::looksLikeArchive(info.fileName());
 }
+
+QString ArchiveApp::stemOf(const QString &path) const { return nook::archive::stemOf(QFileInfo(localPath(path)).fileName()); }
 
 QString ArchiveApp::folderOf(const QString &path) const { return QFileInfo(localPath(path)).absolutePath(); }
 

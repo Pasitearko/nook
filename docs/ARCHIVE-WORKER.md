@@ -16,6 +16,10 @@
 | `test` | 同上 |
 | `extract` | 同上，加 `destination`；`entries`（只解压这些路径，目录含其内容）；`prefix`（去掉的上层路径，例如在包内子文件夹里解压选中项）；`flatten`（不保留目录）；`subfolder`：`smart`（默认，多个顶层项目时才建文件夹）、`always`、`never`；`folderName`（默认为压缩包名去掉后缀）；`conflict`：`ask`（默认）、`overwrite`、`skip`、`rename`；`expectedSize`（用于事先检查磁盘空间） |
 | `create` | `format`（`zip`、`7z`、`tar`、`tar.gz`、`tar.bz2`、`tar.xz`、`tar.zst`、`gz`、`bz2`、`xz`、`zst`），`output`，`items`，`password`，`conflict`，`testAfter`，`options` |
+| `add` | `archive`，`password`，`items`（本机路径，文件夹含其内容），`prefix`（放进包内的这个文件夹），`conflict`（`ask` 默认、`overwrite`、`skip`、`rename`；同名文件夹总是合并） |
+| `delete` | `archive`，`password`，`entries`（目录含其内容） |
+| `rename` | `archive`，`password`，`from`，`to`（完整包内路径；目录连同内容一起改） |
+| `convert` | `archive`，`password`，`encoding`（按这个编码读取文件名），加 `create` 的 `format`、`output`、`options`、`conflict`、`testAfter`；`newPassword` 为新压缩包的密码 |
 
 `create` 的 `options`：`level`（7z/ZIP 0～9；gzip/xz 0～9；bzip2 1～9；zstd 1～22）、`method`（7z：LZMA2、LZMA、PPMd、BZip2、Deflate、Copy；ZIP：Deflate、Deflate64、BZip2、LZMA、PPMd、Copy）、`dictionary`（字节）、`wordSize`、`solid`（布尔或字节）、`threads`、`volumeSize`（字节，仅 7z）、`encryptNames`（7z，默认开）、`zipEncryption`（`AES256` 默认，或 `ZipCrypto`）、`exclude`（通配符数组）。
 
@@ -33,14 +37,14 @@
 | `info` | `backend`、`format`、`filters`、`encoding`（实际使用的编码）、`legacyNames`、`encrypted`、`headerEncrypted`、`solid`、`split`、`volumes`、`stream`（单文件压缩流） |
 | `entries` | 每批最多 1000 项：`path`、`type`（`file`、`dir`、`link`、`hardlink`、`other`）、`size`（未知为 −1）、`packed`、`mtime`、`mode`、`link`、`encrypted`、`method`、`unsafe`（路径越界） |
 | `staging` | 暂存目录路径；客户端在 worker 被强行终止时删除它 |
-| `progress` | `phase`（`list`、`test`、`extract`、`commit`、`create`）、`fraction`、`bytes`、`files`、`current`；最多每 100 ms 一次 |
+| `progress` | `phase`（`list`、`test`、`extract`、`commit`、`create`；修改时 `copy`、`update`、`test`、`commit`；转换时 `extract`、`create`）、`fraction`、`bytes`、`files`、`current`；最多每 100 ms 一次 |
 | `need-password` | `wrong`：上一个密码被拒绝 |
 | `conflict` | `id`、`path`（相对目标文件夹）、`existing` 与 `incoming`（`size`、`mtime`、`directory`） |
 | `warning` | `code`（`unsafe-path`、`unsafe-link`、`special`、`hardlink`、`renamed`、`kept-folder`、`io`、`read`、`write`、`create`）、`path`、`message` |
 | `error` | 单个文件出错，任务继续 |
-| `done` | `ok`、`cancelled`、`error`（`code`、`message`）、`created`（相对目标文件夹，供“删除本次已解压的内容”）、`skipped`、`destination`；`list` 另有 `count`、`totalSize`；`test` 另有 `errors`、`tested`；`create` 另有 `output` |
+| `done` | `ok`、`cancelled`、`error`（`code`、`message`）、`created`（相对目标文件夹，供“删除本次已解压的内容”）、`skipped`、`destination`；`list` 另有 `count`、`totalSize`；`test` 另有 `errors`、`tested`；`create`、`convert` 另有 `output`；`add`、`delete`、`rename` 另有 `changed`（改动的条目数）、`skipped` |
 
-`error.code`：`not-found`、`missing-volume`、`unsupported`、`corrupt`、`wrong-password`、`no-space`、`destination`、`options`、`test-failed`、`memory`、`missing-tool`、`failed`，以及客户端补充的 `missing-worker`、`crashed`。
+`error.code`：`not-found`、`missing-volume`、`unsupported`、`corrupt`、`wrong-password`、`no-space`、`destination`、`options`、`test-failed`、`memory`、`missing-tool`、`failed`，修改时另有 `exists`（重命名的目标已存在）、`options`（例如把文件夹移进它自己）、`request`（未知操作），转换时 `same`（输出就是原压缩包），以及客户端补充的 `missing-worker`、`crashed`。
 
 7-Zip 后端的 `entries` 可能先于 `info` 到达。
 
@@ -50,8 +54,8 @@
 
 ## 写盘与安全
 
-1. **Landlock**：请求解析后，worker（及其启动的 7-Zip）只能写目标文件夹（解压）或保存位置（创建），且不能创建设备、管道和套接字；列表和测试完全不能写。读取不受限。内核不支持时照常工作，`started.sandbox` 为 `false`。
-2. **暂存**：解压先写入目标文件夹里新建的 `.nook-extract-*`（0700），全部完成后再移入；创建先写入 `.nook-create-*`，校验（如要求）通过后再改名。中途失败、取消或被杀，半成品都留在暂存目录里，由 worker 或客户端删除。
+1. **Landlock**：请求解析后，worker（及其启动的 7-Zip）只能写目标文件夹（解压）、保存位置（创建、转换）或压缩包所在文件夹（添加、删除、重命名），且不能创建设备、管道和套接字；列表和测试完全不能写。读取不受限。内核不支持时照常工作，`started.sandbox` 为 `false`。
+2. **暂存**：解压先写入目标文件夹里新建的 `.nook-extract-*`（0700），全部完成后再移入；创建先写入 `.nook-create-*`，校验（如要求）通过后再改名。添加、删除、重命名在压缩包旁的 `.nook-modify-*` 里改一份副本，完整测试通过后才替换原文件（保留原权限），任何一步失败原压缩包都不变；转换在保存位置的 `.nook-convert-*` 里先解出再打包。中途失败、取消或被杀，半成品都留在暂存目录里，由 worker 或客户端删除。
 3. **路径**：含 `..` 的条目跳过；绝对路径去掉开头的 `/`；ZIP 的 `\` 视为目录分隔符。逐级用 `O_NOFOLLOW | O_DIRECTORY` 打开目录，任何一级是符号链接就跳过该条目，因此不会经由包内的链接写到外面。
 4. **链接**：解压后逐个解析暂存区里的符号链接（包括经过其他链接的情况），指向解压位置之外或使用绝对路径的删除并警告。硬链接只能指向本次已解压的文件。
 5. **权限**：恢复修改时间和 rwx 权限（再套用 umask），不恢复所有者和 setuid、setgid、sticky 位；目录总保留属主读写执行；设备文件、管道和套接字不解压。
@@ -66,3 +70,9 @@ worker 以 `C.UTF-8` 运行，libarchive 把未标记 UTF-8 的 ZIP 文件名原
 ## 测试
 
 `tests/archive_test.cpp`（ctest 名 `archive`）覆盖：分卷与命名规则、编码检测、旧编码 ZIP、智能文件夹、冲突处理、路径穿越与链接逃逸、set-id 位、硬链接、特殊文件、ZIP AES 密码重试、所有可创建格式的往返、7z 文件名加密、分卷创建与解压、选中项/前缀/平铺、取消、损坏检测、Landlock 与被杀后的清理。需要本机安装 `7z`，否则相关用例跳过。尚无 RAR 样本（本机无法创建 RAR），RAR 读取依赖 7-Zip，待真实样本验证。
+
+## 修改压缩包
+
+- **可修改的格式**：ZIP、7z 用 7-Zip 改（`a`、`d`、`rn`，加密包沿用原密码，ZIP 为 AES-256，7z 原本加密文件名的保持加密）；tar 及压缩的 tar 用 libarchive 重写一遍（同样的压缩过滤器）。分卷、单文件压缩流和其他格式返回 `unsupported`。
+- **旧编码 ZIP**：界面把文件名不是 UTF-8 的 ZIP 视为只读（7-Zip 写回时会改变这些名称），提示先转换为 UTF-8 文件名的 ZIP。
+- 修改相关用例见 `archive_test` 的 `modifyEachFormat`、`modifyEncryptedSevenZip`、`modifyRefusesAndKeepsOriginal`、`convertKeepsNamesAndEncrypts`。

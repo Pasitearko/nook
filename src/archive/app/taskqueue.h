@@ -26,7 +26,7 @@ class TaskQueue : public QAbstractListModel {
   public:
     enum Role {
         IdRole = Qt::UserRole + 1,
-        KindRole,          // extract, test, create
+        KindRole,          // extract, test, create, add, delete, rename, convert
         TitleRole,         // 解压“a.zip”
         DetailRole,        // where to
         StateRole,         // queued, running, password, conflict, cancelling, done, failed, cancelled
@@ -44,6 +44,7 @@ class TaskQueue : public QAbstractListModel {
         TargetRole,        // what "打开位置" shows
         TargetIsFolderRole,
         ArchiveRole,
+        QuietRole,         // work for a window (opening a file inside), not shown as a task
     };
     explicit TaskQueue(PasswordStore *passwords, QObject *parent = nullptr);
     ~TaskQueue() override;

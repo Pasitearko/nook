@@ -552,6 +552,157 @@ class ArchiveTest : public QObject {
         }
         QCOMPARE(tree(out), QStringList());
     }
+
+    // Changing packages (phase 5).
+    QStringList listed(const QString &archive, const QString &password = {}) {
+        QVariantMap request{{"op", "list"}, {"archive", archive}};
+        if (!password.isEmpty())
+            request.insert("password", password);
+        return runJob(request).paths();
+    }
+    QStringList leftovers(const QString &folder) {
+        return QDir(folder).entryList({".nook-*"}, QDir::AllEntries | QDir::Hidden);
+    }
+
+    void modifyEachFormat_data() {
+        QTest::addColumn<QString>("format");
+        QTest::newRow("zip") << "zip";
+        QTest::newRow("7z") << "7z";
+        QTest::newRow("tar.gz") << "tar.gz";
+        QTest::newRow("tar") << "tar";
+    }
+    void modifyEachFormat() {
+        QFETCH(QString, format);
+        if (!sevenZipAvailable() && (format == "zip" || format == "7z"))
+            QSKIP("7z is not installed");
+        const QString source = fresh("modify-source-" + format);
+        put(source + "/a.txt", "alpha");
+        put(source + "/dir/b.txt", "bravo");
+        const QString folder = fresh("modify-" + format);
+        const QString archive = folder + "/pack." + format;
+        Outcome made = runJob({{"op", "create"}, {"format", format}, {"output", archive},
+                               {"items", QStringList{source + "/a.txt", source + "/dir"}}});
+        QVERIFY2(made.done.value("ok").toBool(), qPrintable(made.done.value("error").toMap().value("message").toString()));
+
+        const QString extra = fresh("modify-extra-" + format);
+        put(extra + "/new.txt", "new");
+        put(extra + "/newdir/c.txt", "charlie");
+        put(extra + "/a.txt", "replacement");
+        // Into a folder of the package.
+        Outcome added = runJob({{"op", "add"}, {"archive", archive}, {"prefix", "dir"},
+                                {"items", QStringList{extra + "/new.txt", extra + "/newdir"}}});
+        QVERIFY2(added.done.value("ok").toBool(), qPrintable(added.done.value("error").toMap().value("message").toString()));
+        QStringList paths = listed(archive);
+        QVERIFY2(paths.contains("dir/new.txt") && paths.contains("dir/newdir/c.txt"), qPrintable(paths.join(", ")));
+
+        // A name that is taken: asked about; "keep both" numbers the new one.
+        Outcome renamed = runJob({{"op", "add"}, {"archive", archive}, {"items", QStringList{extra + "/a.txt"}}},
+                                 [](ArchiveJob &job, const QVariantMap &event) {
+                                     if (event.value("event") == "conflict")
+                                         job.resolveConflict(event.value("id").toInt(), "rename", false);
+                                 });
+        QVERIFY(renamed.done.value("ok").toBool());
+        QCOMPARE(renamed.of("conflict").size(), 1);
+        QCOMPARE(renamed.of("conflict").first().value("path").toString(), QStringLiteral("a.txt"));
+        QVERIFY(listed(archive).contains("a (2).txt"));
+        Outcome replaced = runJob({{"op", "add"}, {"archive", archive}, {"conflict", "overwrite"}, {"items", QStringList{extra + "/a.txt"}}});
+        QVERIFY(replaced.done.value("ok").toBool());
+
+        Outcome moved = runJob({{"op", "rename"}, {"archive", archive}, {"from", "dir/newdir"}, {"to", "dir/moved"}});
+        QVERIFY2(moved.done.value("ok").toBool(), qPrintable(moved.done.value("error").toMap().value("message").toString()));
+        paths = listed(archive);
+        QVERIFY(paths.contains("dir/moved/c.txt"));
+        QVERIFY(!paths.contains("dir/newdir/c.txt"));
+        // Renaming onto an existing name fails and leaves the package alone.
+        const QByteArray before = read(archive);
+        Outcome clash = runJob({{"op", "rename"}, {"archive", archive}, {"from", "dir/moved"}, {"to", "dir/new.txt"}});
+        QCOMPARE(clash.done.value("error").toMap().value("code").toString(), QStringLiteral("exists"));
+        QCOMPARE(read(archive), before);
+
+        Outcome removed = runJob({{"op", "delete"}, {"archive", archive}, {"entries", QStringList{"dir/moved", "a (2).txt"}}});
+        QVERIFY(removed.done.value("ok").toBool());
+        const QString out = fresh("modify-out-" + format);
+        QVERIFY(runJob(extract(archive, out, {{"subfolder", "never"}})).done.value("ok").toBool());
+        QCOMPARE(tree(out), QStringList({"a.txt", "dir", "dir/b.txt", "dir/new.txt"}));
+        QCOMPARE(read(out + "/a.txt"), QByteArray("replacement"));
+        QCOMPARE(read(out + "/dir/new.txt"), QByteArray("new"));
+        QCOMPARE(leftovers(folder), QStringList());
+    }
+
+    void modifyEncryptedSevenZip() {
+        if (!sevenZipAvailable())
+            QSKIP("7z is not installed");
+        const QString source = fresh("enc-modify-source");
+        put(source + "/secret.txt", "s");
+        put(source + "/more.txt", "m");
+        const QString folder = fresh("enc-modify");
+        const QString archive = folder + "/locked.7z";
+        QVERIFY(runJob({{"op", "create"}, {"format", "7z"}, {"output", archive}, {"password", "pw"},
+                        {"items", QStringList{source + "/secret.txt"}}}).done.value("ok").toBool());
+        // Names are hidden: changing it needs the password, asked for (wrong first).
+        int asked = 0;
+        Outcome added = runJob({{"op", "add"}, {"archive", archive}, {"items", QStringList{source + "/more.txt"}}},
+                               [&](ArchiveJob &job, const QVariantMap &event) {
+                                   if (event.value("event") == "need-password")
+                                       job.sendPassword(++asked == 1 ? "nope" : "pw");
+                               });
+        QVERIFY2(added.done.value("ok").toBool(), qPrintable(added.done.value("error").toMap().value("message").toString()));
+        QVERIFY(asked >= 2);
+        QVERIFY(listed(archive).isEmpty()); // still hidden without the password
+        QCOMPARE(listed(archive, "pw"), QStringList({"more.txt", "secret.txt"}));
+        // The added file is encrypted too.
+        const QString out = fresh("enc-modify-out");
+        QVERIFY(!runJob(extract(archive, out, {{"entries", QStringList{"more.txt"}}, {"password", "wrong"}})).done.value("ok").toBool());
+        QVERIFY(runJob(extract(archive, out, {{"entries", QStringList{"more.txt"}}, {"password", "pw"}})).done.value("ok").toBool());
+        QCOMPARE(read(out + "/more.txt"), QByteArray("m"));
+        QVERIFY(runJob({{"op", "delete"}, {"archive", archive}, {"password", "pw"}, {"entries", QStringList{"secret.txt"}}}).done.value("ok").toBool());
+        QCOMPARE(listed(archive, "pw"), QStringList({"more.txt"}));
+    }
+
+    void modifyRefusesAndKeepsOriginal() {
+        const QString folder = fresh("refuse");
+        put(folder + "/fake.rar", QByteArray("Rar!\x1a\x07\x01\x00", 8) + noise(100));
+        Outcome rar = runJob({{"op", "delete"}, {"archive", folder + "/fake.rar"}, {"entries", QStringList{"x"}}});
+        QCOMPARE(rar.done.value("error").toMap().value("code").toString(), QStringLiteral("unsupported"));
+        // Cancelled while asking: nothing changes, nothing is left behind.
+        const QString zip = folder + "/keep.zip";
+        writeArchive(zip, {{"a.txt", AE_IFREG, "a"}}, true);
+        put(folder + "/a.txt", "other");
+        const QByteArray before = read(zip);
+        Outcome stopped = runJob({{"op", "add"}, {"archive", zip}, {"items", QStringList{folder + "/a.txt"}}},
+                                 [](ArchiveJob &job, const QVariantMap &event) {
+                                     if (event.value("event") == "conflict")
+                                         job.cancel();
+                                 });
+        QVERIFY(stopped.done.value("cancelled").toBool());
+        QCOMPARE(read(zip), before);
+        QTRY_COMPARE(leftovers(folder), QStringList());
+        Outcome missing = runJob({{"op", "delete"}, {"archive", zip}, {"entries", QStringList{"nothing"}}});
+        QCOMPARE(missing.done.value("error").toMap().value("code").toString(), QStringLiteral("not-found"));
+        QCOMPARE(read(zip), before);
+    }
+
+    void convertKeepsNamesAndEncrypts() {
+        if (!sevenZipAvailable())
+            QSKIP("7z is not installed");
+        // A legacy ZIP (GBK names) to a 7z with hidden names; the original stays.
+        const QString folder = fresh("convert");
+        const QString zip = folder + "/旧.zip";
+        writeArchive(zip, {{QByteArray("\xd6\xd0\xce\xc4/\xb1\xa8\xb8\xe6.txt"), AE_IFREG, "report"}}, true);
+        const QByteArray before = read(zip);
+        Outcome converted = runJob({{"op", "convert"}, {"archive", zip}, {"format", "7z"}, {"output", folder + "/新.7z"},
+                                    {"newPassword", "pw"}, {"options", QVariantMap{{"encryptNames", true}}}});
+        QVERIFY2(converted.done.value("ok").toBool(), qPrintable(converted.done.value("error").toMap().value("message").toString()));
+        QCOMPARE(listed(folder + "/新.7z", "pw"), QStringList({"中文", "中文/报告.txt"}));
+        QCOMPARE(read(zip), before);
+        QCOMPARE(leftovers(folder), QStringList());
+        // And a tar.gz to ZIP.
+        const QString source = fresh("convert-source");
+        put(source + "/x.txt", "x");
+        QVERIFY(runJob({{"op", "create"}, {"format", "tar.gz"}, {"output", folder + "/t.tar.gz"}, {"items", QStringList{source + "/x.txt"}}}).done.value("ok").toBool());
+        QVERIFY(runJob({{"op", "convert"}, {"archive", folder + "/t.tar.gz"}, {"format", "zip"}, {"output", folder + "/t.zip"}}).done.value("ok").toBool());
+        QCOMPARE(listed(folder + "/t.zip"), QStringList({"x.txt"}));
+    }
 };
 
 QTEST_GUILESS_MAIN(ArchiveTest)

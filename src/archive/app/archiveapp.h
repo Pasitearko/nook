@@ -1,5 +1,6 @@
 #pragma once
 #include "application.h"
+#include "filesessions.h"
 #include "notifier.h"
 #include "passwordstore.h"
 #include "taskqueue.h"
@@ -22,6 +23,7 @@ class ArchiveApp : public QObject {
     Q_PROPERTY(QVariantList formats READ formats CONSTANT)
     Q_PROPERTY(TaskQueue *queue READ queue CONSTANT)
     Q_PROPERTY(PasswordStore *passwords READ passwords CONSTANT)
+    Q_PROPERTY(FileSessions *files READ files CONSTANT)
     // concurrency, conflict, subfolder, notify, autoTryPasswords, openAfter, format, level …
     Q_PROPERTY(QVariantMap prefs READ prefs NOTIFY prefsChanged)
   public:
@@ -38,6 +40,7 @@ class ArchiveApp : public QObject {
     QVariantList formats() const;
     TaskQueue *queue() { return &m_queue; }
     PasswordStore *passwords() { return &m_passwords; }
+    FileSessions *files() { return &m_files; }
     Notifier *notifier() { return &m_notifier; }
     QVariantMap prefs() const;
 
@@ -48,6 +51,9 @@ class ArchiveApp : public QObject {
     Q_INVOKABLE void openWindow(const QString &path) { m_openWindow(path); }
     // The compact compression window for these files and folders.
     Q_INVOKABLE void openCompose(const QStringList &items);
+    // The same window, converting a package to another format (names read with encoding).
+    Q_INVOKABLE void openConvert(const QString &archive, const QString &encoding);
+    Q_INVOKABLE QVariantMap convertRequest(const QString &archive, const QVariantMap &choices, const QString &encoding) const;
     // A small window that follows one task and asks its questions.
     Q_INVOKABLE void openTaskWindow(int id);
     // nook's menu: each runs in a small progress window that closes on success.
@@ -84,6 +90,8 @@ class ArchiveApp : public QObject {
     Q_INVOKABLE QString suffixFor(const QString &format) const;
     // Where "解压到当前文件夹" puts a package: the folder it is in.
     Q_INVOKABLE QString folderOf(const QString &path) const;
+    // "photos.tar.gz" → "photos".
+    Q_INVOKABLE QString stemOf(const QString &path) const;
     // A free name for a new folder or file in folder ("名称", then "名称 (2)" …).
     Q_INVOKABLE QString freeName(const QString &folder, const QString &name) const;
 
@@ -93,6 +101,8 @@ class ArchiveApp : public QObject {
     void notice(const QString &message);
     void chosen(QObject *requester, const QString &purpose, const QStringList &paths);
     void choosingDone();
+    // A package was changed (added to, deleted from, renamed in): windows showing it reload.
+    void archiveChanged(const QString &path);
 
   private:
     void finished(int id);
@@ -104,6 +114,7 @@ class ArchiveApp : public QObject {
     QFileSystemWatcher m_watcher;
     PasswordStore m_passwords;
     TaskQueue m_queue;
+    FileSessions m_files{&m_queue};
     Notifier m_notifier;
     int m_requests = 0;
     int m_choosing = 0;

@@ -119,6 +119,29 @@ QJsonObject sevenZipList(const Request &request);
 // 7-Zip's entries for a package that needs no password to list (packed sizes, methods).
 QJsonArray sevenZipEntries(const QString &archive);
 QJsonObject sevenZipTest(const Request &request);
+
+// Changing ZIP and 7z packages goes through 7-Zip on a copy (see modify.cpp).
+struct EditListing {
+    bool ok = false;
+    QJsonObject done; // when !ok
+    QJsonArray entries;
+    std::optional<QString> password;
+    bool encrypted = false;
+    bool headerEncrypted = false;
+};
+// Lists archive (asking for a header password); with needPassword, also makes sure the password
+// for encrypted entries is known and right.
+EditListing sevenZipEditListing(const Request &request, const QString &archive, bool needPassword);
+// Runs 7-Zip with arguments (and a list file of listLines) in directory; asks again for a
+// rejected password. Empty on success, else a done event.
+QJsonObject sevenZipEdit(const QStringList &arguments, const QStringList &listLines, const QString &directory,
+                         const QString &phase, std::optional<QString> &password);
+// The switches every 7-Zip call takes (UTF-8 names and console, output on stdout/stderr).
+QStringList sevenZipSwitches();
+QJsonObject sevenZipVerify(const QString &archive, const std::optional<QString> &password);
+// add, delete, rename on ZIP, 7z and tar packages; convert to another format.
+QJsonObject modify(const Request &request);
+QJsonObject convert(const Request &request);
 QJsonObject sevenZipExtract(const Request &request);
 QJsonObject create(const Request &request);
 QJsonObject sevenZipCreate(const Request &request, const QString &temporaryPath);

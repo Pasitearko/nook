@@ -53,10 +53,24 @@ QString ArchiveDocument::formatLabel() const {
     return label;
 }
 
-bool ArchiveDocument::readOnly() const {
-    // What phase 5 can rewrite; everything else is browsed and extracted only.
+bool ArchiveDocument::readOnly() const { return !readOnlyReason().isEmpty(); }
+
+QString ArchiveDocument::readOnlyReason() const {
+    if (m_info.isEmpty())
+        return {};
+    // What can be rewritten: ZIP, 7z and tar (plain or compressed), in one piece, writable.
     const QString label = formatLabel().section(u' ', 0, 0);
-    return !(label == "ZIP" || label == "7z" || label.startsWith(u"tar")) || m_info.value("split").toBool();
+    if (!(label == "ZIP" || label == "7z" || label.startsWith(u"tar")) || m_info.value("stream").toBool())
+        return QStringLiteral("这种格式只能查看和解压；转换为 ZIP 或 7z 后即可修改");
+    if (m_info.value("split").toBool())
+        return QStringLiteral("分卷压缩包只能查看和解压；转换为单个压缩包后即可修改");
+    // 7-Zip cannot find entries by their legacy names on Linux, so changing them could go wrong.
+    if (m_info.value("legacyNames").toBool())
+        return QStringLiteral("旧编码文件名的 ZIP 只能查看和解压；转换为 UTF-8 文件名的 ZIP 后即可修改");
+    const QFileInfo file(m_path);
+    if (!file.isWritable() || !QFileInfo(file.absolutePath()).isWritable())
+        return QStringLiteral("没有修改这个压缩包或其所在文件夹的权限");
+    return {};
 }
 
 void ArchiveDocument::setState(const QString &state) {

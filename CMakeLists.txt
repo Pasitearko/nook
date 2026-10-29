@@ -36,7 +36,8 @@ target_compile_options(nook_archive PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(nook-archive-worker
     src/archive/worker/main.cpp src/archive/worker/worker.h src/archive/worker/channel.cpp
     src/archive/worker/sandbox.cpp src/archive/worker/stage.cpp
-    src/archive/worker/libarchivebackend.cpp src/archive/worker/sevenzip.cpp src/archive/worker/create.cpp)
+    src/archive/worker/libarchivebackend.cpp src/archive/worker/sevenzip.cpp src/archive/worker/create.cpp
+    src/archive/worker/modify.cpp)
 target_link_libraries(nook-archive-worker PRIVATE nook_archive PkgConfig::LIBARCHIVE)
 target_compile_options(nook-archive-worker PRIVATE -Wall -Wextra -Wpedantic)
 qt_add_executable(nook src/main.cpp)
@@ -76,7 +77,8 @@ set(NOOK_ARCHIVE_APP_SOURCES
     src/archive/app/archivemodel.cpp src/archive/app/archivemodel.h
     src/archive/app/taskqueue.cpp src/archive/app/taskqueue.h
     src/archive/app/passwordstore.cpp src/archive/app/passwordstore.h
-    src/archive/app/notifier.cpp src/archive/app/notifier.h)
+    src/archive/app/notifier.cpp src/archive/app/notifier.h
+    src/archive/app/filesessions.cpp src/archive/app/filesessions.h)
 qt_add_executable(nook-archive src/archive/app/main.cpp ${NOOK_ARCHIVE_APP_SOURCES})
 qt_add_qml_module(nook-archive URI NookArchive VERSION 1.0
     QML_FILES ${NOOK_SHARED_QML} qml/ArchiveMain.qml qml/ArchiveList.qml

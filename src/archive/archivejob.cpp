@@ -32,8 +32,7 @@ ArchiveJob::~ArchiveJob() {
         disconnect(&m_process, nullptr, this, nullptr);
         ::kill(-pid_t(m_process.processId()), SIGKILL);
         m_process.waitForFinished(2000);
-        if (!m_staging.isEmpty())
-            QDir(m_staging).removeRecursively();
+        removeStaging();
     }
 }
 
@@ -91,7 +90,7 @@ void ArchiveJob::read() {
             continue;
         const QString type = event.value("event").toString();
         if (type == "staging")
-            m_staging = event.value("path").toString();
+            m_staging << event.value("path").toString();
         if (type == "done") {
             m_done = true;
             m_result = event;
@@ -100,14 +99,23 @@ void ArchiveJob::read() {
     }
 }
 
+void ArchiveJob::removeStaging() {
+    // Only folders of the worker's own naming; whatever it was staging is incomplete.
+    for (const auto &path : std::as_const(m_staging)) {
+        const QString name = QFileInfo(path).fileName();
+        if (name.startsWith(".nook-extract-") || name.startsWith(".nook-create-") || name.startsWith(".nook-modify-") ||
+            name.startsWith(".nook-convert-"))
+            QDir(path).removeRecursively();
+    }
+    m_staging.clear();
+}
+
 void ArchiveJob::ended() {
     m_killTimer.stop();
     read();
     if (!m_done) {
         // Killed or crashed: whatever it was staging is incomplete.
-        const QString name = QFileInfo(m_staging).fileName();
-        if (name.startsWith(".nook-extract-") || name.startsWith(".nook-create-"))
-            QDir(m_staging).removeRecursively();
+        removeStaging();
         const bool missing = m_process.error() == QProcess::FailedToStart;
         m_result = {{"event", "done"},
                     {"ok", false},

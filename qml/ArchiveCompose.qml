@@ -5,14 +5,18 @@ import QtQuick.Layouts
 // The compact compression window: what goes in, the name and format, where it is saved, how
 // hard to compress, a password and volumes. After "压缩" it follows its task(s) and closes on
 // success (the notification says where the package is); it stays open to ask and on failure.
+// With convertFrom it saves an existing package in another format instead (the original stays).
 ArchiveWindow {
     id: window
     objectName: "archiveCompose"
     property var items: []
     property var taskIds: []
+    property string convertFrom: ""
+    property string encoding: "auto"
+    readonly property bool converting: convertFrom !== ""
     readonly property var queue: app.queue
     readonly property var choicesSaved: app.prefs
-    readonly property var defaults: app.compressDefaults(items)
+    readonly property var defaults: converting ? {name: app.stemOf(convertFrom), folder: app.folderOf(convertFrom)} : app.compressDefaults(items)
     readonly property var formats: app.formats.filter(f => !f.single || singleFiles)
     readonly property var format: formats[Math.max(0, formatBox.currentIndex)] || app.formats[0]
     // Single-file formats need each package to hold exactly one file.
@@ -20,16 +24,17 @@ ArchiveWindow {
     readonly property bool working: taskIds.length > 0
     readonly property string suffix: format.suffix
     readonly property string outputName: (format.single && !separateMode ? defaults.fileName : nameField.text.trim()) + suffix
-    readonly property bool separateMode: separate.checked && items.length > 1
+    readonly property bool separateMode: !converting && separate.checked && items.length > 1
     readonly property var levels: ["仅存储", "最快", "快速", "标准", "较好", "最好"]
     readonly property var volumes: [{label: "不分卷", bytes: 0}, {label: "100 MB", bytes: 100 * 1048576},
                                     {label: "700 MB（CD）", bytes: 700 * 1048576}, {label: "1 GB", bytes: 1073741824},
                                     {label: "4 GB（FAT32 / 部分网盘）", bytes: 4095 * 1048576}, {label: "自定义…", bytes: -1}]
     readonly property string problem: {
-        if (items.length === 0) return "没有要压缩的项目"
+        if (items.length === 0 && !converting) return "没有要压缩的项目"
         if (!separateMode && !format.single && nameField.text.trim() === "") return "请输入压缩包名称"
         if (/[\/\0]/.test(nameField.text)) return "名称里不能有“/”"
         if (folderField.text.trim() === "") return "请选择保存位置"
+        if (converting && !separateMode && folderField.text.trim().replace(/\/+$/, "") + "/" + outputName === convertFrom) return "不能覆盖原压缩包，请换个名称"
         if (format.encrypts && password.text !== "" && password.text !== confirm.text && !password.revealed) return "两次输入的密码不一致"
         if (format.volumes && volumes[volumeBox.currentIndex].bytes < 0 && !(Number(customVolume.text) > 0)) return "请输入分卷大小（MB）"
         return ""
@@ -37,7 +42,7 @@ ArchiveWindow {
 
     width: 600; height: 660
     minimumWidth: 520; minimumHeight: 420
-    title: "新建压缩包 · nook解压缩"
+    title: (converting ? "转换格式" : "新建压缩包") + " · nook解压缩"
 
     function addItems(paths) {
         const next = items.slice()
@@ -60,10 +65,11 @@ ArchiveWindow {
         app.setPref("testAfter", choices.testAfter)
         if (format.value === "7z") app.setPref("encryptNames", choices.encryptNames)
         if (format.value === "zip") app.setPref("zipCrypto", choices.zipCrypto)
-        const extras = {deleteSources: deleteSources.checked, closesOnSuccess: true,
+        const extras = {deleteSources: !converting && deleteSources.checked, closesOnSuccess: true,
                         saveName: keep.checked && choices.password !== "" ? keepName.text.trim() : ""}
         const ids = []
-        for (const request of app.compressRequests(items, choices)) ids.push(queue.start(request, extras, window))
+        const requests = converting ? [app.convertRequest(convertFrom, choices, encoding)] : app.compressRequests(items, choices)
+        for (const request of requests) ids.push(queue.start(request, extras, window))
         taskIds = ids
     }
     function checkFinished() {
@@ -89,7 +95,14 @@ ArchiveWindow {
     Component.onCompleted: {
         nameField.text = defaults.name || ""
         folderField.text = defaults.folder || ""
-        formatBox.currentIndex = Math.max(0, formats.findIndex(f => f.value === choicesSaved.format))
+        // Names in an old encoding are converted so that the package can be changed: a ZIP, in UTF-8.
+        const preferred = converting && encoding !== "auto" ? "zip" : choicesSaved.format
+        formatBox.currentIndex = Math.max(0, formats.findIndex(f => f.value === preferred))
+        // Converting next to the original: a name that is free in the chosen format.
+        if (converting) {
+            const free = app.freeName(folderField.text, nameField.text + suffix)
+            nameField.text = free.substring(0, free.length - suffix.length)
+        }
         levelBox.currentIndex = choicesSaved.levelStep
         encryptNames.checked = choicesSaved.encryptNames === true
         zipCrypto.checked = choicesSaved.zipCrypto === true
@@ -112,9 +125,13 @@ ArchiveWindow {
             }
             ColumnLayout {
                 Layout.fillWidth: true; spacing: 1
-                Text { text: window.working ? "正在压缩" : "新建压缩包"; color: window.ink; font.pixelSize: 17; font.weight: Font.DemiBold }
                 Text {
-                    text: window.items.length === 1 ? window.items[0].split("/").pop() : window.items.length + " 个项目"
+                    text: window.converting ? (window.working ? "正在转换" : "转换格式") : window.working ? "正在压缩" : "新建压缩包"
+                    color: window.ink; font.pixelSize: 17; font.weight: Font.DemiBold
+                }
+                Text {
+                    text: window.converting ? window.convertFrom.split("/").pop() + " → " + window.outputName
+                          : window.items.length === 1 ? window.items[0].split("/").pop() : window.items.length + " 个项目"
                     color: window.muted; font.pixelSize: 12; elide: Text.ElideMiddle; Layout.fillWidth: true
                 }
             }
@@ -135,7 +152,15 @@ ArchiveWindow {
                 id: formColumn
                 x: 18; y: 14; width: form.width - 36; spacing: 12
                 // What goes in.
+                Text {
+                    visible: window.converting
+                    Layout.fillWidth: true
+                    text: "把“" + window.convertFrom.split("/").pop() + "”的全部内容存为新的压缩包，原压缩包保留不变。"
+                          + (window.encoding !== "auto" ? "文件名按当前选择的编码读取，存为 UTF-8。" : "")
+                    color: window.muted; font.pixelSize: 13; wrapMode: Text.Wrap
+                }
                 Rectangle {
+                    visible: !window.converting
                     Layout.fillWidth: true
                     Layout.preferredHeight: Math.min(4, window.items.length) * 30 + 44
                     radius: 10; color: window.theme.pane; border.width: 1; border.color: window.line
@@ -253,12 +278,12 @@ ArchiveWindow {
                     Layout.fillWidth: true; Layout.leftMargin: 84; spacing: 8
                     ArchiveCheck {
                         id: separate; objectName: "archiveComposeSeparate"
-                        visible: window.items.length > 1
+                        visible: window.items.length > 1 && !window.converting
                         text: "每个项目单独压缩"
                         detail: "生成 " + window.items.length + " 个压缩包，各自以项目名称命名"
                     }
                     ArchiveCheck { id: testAfter; text: "压缩后校验"; detail: "完整读一遍新压缩包，确认可以正常解压" }
-                    ArchiveCheck { id: deleteSources; objectName: "archiveComposeDelete"; text: "压缩后把源文件移到回收站" }
+                    ArchiveCheck { id: deleteSources; objectName: "archiveComposeDelete"; visible: !window.converting; text: "压缩后把源文件移到回收站" }
                 }
             }
         }
@@ -283,7 +308,7 @@ ArchiveWindow {
         RowLayout {
             Layout.fillWidth: true; Layout.preferredHeight: 60; Layout.leftMargin: 18; Layout.rightMargin: 14; spacing: 8
             Text {
-                text: window.working ? "可以关闭这个窗口，压缩会在后台继续" : window.problem
+                text: window.working ? "可以关闭这个窗口，" + (window.converting ? "转换" : "压缩") + "会在后台继续" : window.problem
                 color: window.working ? window.muted : window.theme.warning
                 font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true
             }
@@ -291,7 +316,7 @@ ArchiveWindow {
             ActionButton {
                 objectName: "archiveComposeStart"
                 visible: !window.working
-                text: "压缩"; iconName: "compress"; accent: true; implicitHeight: 38
+                text: window.converting ? "转换" : "压缩"; iconName: "compress"; accent: true; implicitHeight: 38
                 enabled: window.problem === ""
                 onClicked: window.start()
             }

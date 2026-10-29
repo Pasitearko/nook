@@ -44,11 +44,16 @@ Popup {
             id: list
             Layout.fillWidth: true; Layout.fillHeight: true
             Layout.leftMargin: 10; Layout.rightMargin: 10; Layout.bottomMargin: 10
-            clip: true; spacing: 8
+            clip: true; spacing: 0
             boundsBehavior: Flickable.StopAtBounds
             model: drawer.queue
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-            delegate: ArchiveTaskCard { width: list.width; app: drawer.app }
+            // Files being opened from the package are work for the window, not tasks of their own.
+            delegate: ArchiveTaskCard {
+                required property bool quiet
+                width: list.width; app: drawer.app
+                visible: !quiet; height: quiet ? 0 : implicitHeight + 8
+            }
             Text {
                 anchors.centerIn: parent; visible: list.count === 0
                 text: "没有任务"; color: drawer.theme.muted; font.pixelSize: 13

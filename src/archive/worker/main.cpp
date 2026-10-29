@@ -34,14 +34,21 @@ int main() {
     QString writable;
     if (request.op == "extract")
         writable = QFileInfo(destinationOf(request.json)).absoluteFilePath();
-    else if (request.op == "create")
+    else if (request.op == "create" || request.op == "convert")
         writable = QFileInfo(request.json.value("output").toString()).absolutePath();
+    else if (request.op == "add" || request.op == "delete" || request.op == "rename")
+        writable = QFileInfo(request.archive).absolutePath();
     const bool sandboxed = !qEnvironmentVariableIsSet("NOOK_ARCHIVE_NO_SANDBOX") && restrictWrites(writable);
     channel.send({{"event", "started"}, {"sandbox", sandboxed}, {"pid", int(::getpid())}});
 
     QJsonObject done;
     if (request.op == "create") {
         done = create(request);
+    } else if (request.op == "add" || request.op == "delete" || request.op == "rename") {
+        done = modify(request);
+    } else if (request.op == "convert") {
+        done = QFileInfo::exists(volumesOf(request.archive).first) ? convert(request)
+                                                                   : QJsonObject{{"event", "done"}, {"ok", false}, {"error", failure("not-found", "找不到压缩包")}};
     } else if (request.op == "list" || request.op == "test" || request.op == "extract") {
         if (request.archive.isEmpty() || !QFileInfo::exists(volumesOf(request.archive).first)) {
             const bool split = volumesOf(request.archive).split;

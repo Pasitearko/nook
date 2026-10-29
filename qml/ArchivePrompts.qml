@@ -30,6 +30,7 @@ Item {
         } else if (task.status === "conflict") {
             current = id
             conflictDialog.conflict = task.conflict
+            conflictDialog.adding = task.kind === "add"
             conflictDialog.open()
         } else {
             Qt.callLater(next)

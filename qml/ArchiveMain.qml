@@ -14,8 +14,16 @@ ArchiveWindow {
     readonly property var queue: app.queue
     readonly property bool ready: document.state === "ready"
     readonly property bool dialogsOpen: passwordDialog.visible || infoDialog.visible || extractDialog.visible || settingsDialog.visible || prompts.busy
+                                        || deleteDialog.visible || renameDialog.visible || modifiedDialog.visible || unsavedDialog.visible
+    readonly property var files: app.files
+    readonly property bool writable: ready && !document.readOnly
     property bool dropping: false
     property string pendingSave: ""
+    // Rows being dragged out of the window: the token of their extraction, while it runs.
+    property int dragToken: 0
+    property bool draggingOut: false
+    // The window closes once the user has answered about edits not written back.
+    property bool closeConfirmed: false
 
     width: 1102; height: 709
     minimumWidth: 720; minimumHeight: 460
@@ -39,7 +47,10 @@ ArchiveWindow {
     }
     function activate(row) {
         if (model.isFolder(row)) { searchBox.clear(); model.activate(row); fileList.focusList(); return }
-        toast("打开压缩包里的文件将在后续版本中支持")
+        const entry = model.entry(row)
+        if (entry.unsafe) { toast("“" + entry.name + "”的路径不安全，只能查看"); return }
+        if (entry.link !== "") { toast("“" + entry.name + "”是符号链接，指向 " + entry.link); return }
+        files.open(window, document.path, entry.path, document.encodingChoice, document.readOnly)
     }
     function ratioText() {
         const total = model.totalSize
@@ -48,7 +59,6 @@ ArchiveWindow {
         // Tiny packages are larger than what they hold; a ratio above 100% says nothing useful.
         return packed <= total ? "压缩率 " + Math.max(1, Math.round(packed / total * 100)) + "%" : ""
     }
-    function pending(what) { toast(what + "将在后续版本中推出") }
     function startTask(request, extras) {
         if (document.encodingChoice !== "auto") request.encoding = document.encodingChoice
         queue.start(request, extras || {}, window)
@@ -71,12 +81,76 @@ ArchiveWindow {
                      subfolder: subfolder || app.prefs.subfolder, conflict: app.prefs.conflict, openAfter: app.prefs.openAfter})
     }
     function testArchive() { startTask({op: "test", archive: document.path}) }
+    // Files from disk go into the folder shown (conflicts asked as the settings say).
+    function addPaths(paths) {
+        if (!writable || paths.length === 0) return
+        const request = {op: "add", archive: document.path, items: paths.map(p => app.localPath(p)), conflict: app.prefs.conflict}
+        if (model.folder !== "") request.prefix = model.folder
+        startTask(request)
+    }
+    function deleteSelected() {
+        startTask({op: "delete", archive: document.path, entries: deleteDialog.entries})
+        model.clearSelection()
+    }
+    function renameEntry(from, name) {
+        const parent = from.indexOf("/") >= 0 ? from.substring(0, from.lastIndexOf("/") + 1) : ""
+        startTask({op: "rename", archive: document.path, from: from, to: parent + name})
+    }
+    function convert() { app.openConvert(document.path, document.encodingChoice) }
+    // Dragged rows go out as files once extracted; by then the button may be up (nothing to do).
+    function dragOut() {
+        if (!ready || model.selectedCount === 0) return
+        draggingOut = true
+        dragToken = files.exportForDrag(window, document.path, model.selectedPaths(),
+                                        model.query === "" ? model.folder : "", document.encodingChoice)
+        if (dragToken === 0) draggingOut = false
+    }
+    function readOnlyHint(what) { return document.readOnlyReason !== "" ? document.readOnlyReason : what }
 
+    onClosing: close => {
+        if (closeConfirmed || document.path === "") return
+        const edits = files.unsaved(document.path)
+        if (edits.length === 0) return
+        close.accepted = false
+        unsavedDialog.edits = edits
+        unsavedDialog.open()
+    }
+    Connections {
+        target: window.files
+        function onModified(id) {
+            if (!window.files.ownedBy(id, window)) return
+            // One question at a time: a newer change to another file waits for this one.
+            if (modifiedDialog.visible) { if (modifiedDialog.waiting.indexOf(id) < 0) modifiedDialog.waiting.push(id); return }
+            modifiedDialog.ask(id)
+        }
+        function onFailed(owner, message) { if (owner === window) window.toast(message) }
+        function onWritten(id, ok, message) {
+            if (!window.files.ownedBy(id, window)) return
+            const session = window.files.session(id)
+            window.toast(ok ? "已把“" + session.name + "”写回压缩包" : "“" + session.name + "”没有写回：" + message)
+        }
+        function onDragReady(token, urls) {
+            if (token !== window.dragToken) return
+            window.dragToken = 0
+            if (!fileList.dragHeld || urls.length === 0) { window.draggingOut = false; return }
+            dragSource.Drag.mimeData = {"text/uri-list": urls.join("\r\n")}
+            dragSource.Drag.active = true
+        }
+    }
+    Connections {
+        target: window.app
+        function onArchiveChanged(path) { if (path === window.document.path) window.document.reload() }
+    }
     Connections {
         target: window.app
         function onChosen(requester, purpose, paths) {
             if (requester !== window || paths.length === 0) return
             if (purpose === "archives") window.openPaths(paths)
+            else if (purpose === "add" || purpose === "addFolders") window.addPaths(paths)
+            else if (purpose === "saveCopy") {
+                const copy = window.files.saveCopy(modifiedDialog.sessionId, paths[0])
+                window.toast(copy !== "" ? "已另存为“" + copy + "”" : "无法保存到“" + window.app.localPath(paths[0]) + "”")
+            }
             else window.app.openCompose(paths)
         }
         function onNotice(message) { window.toast(message) }
@@ -100,7 +174,7 @@ ArchiveWindow {
         function onTaskFinished(id) {
             if (window.active && window.queue.ownedBy(id, window)) {
                 const task = window.queue.task(id)
-                if (task.status !== "cancelled") window.toast(task.message)
+                if (task.status !== "cancelled" && !task.quiet) window.toast(task.message)
             }
         }
     }
@@ -114,6 +188,8 @@ ArchiveWindow {
     Shortcut { sequence: "Ctrl+N"; enabled: !window.dialogsOpen; onActivated: window.app.choose(window, "files") }
     Shortcut { sequence: "Ctrl+,"; enabled: !window.dialogsOpen; onActivated: settingsDialog.open() }
     Shortcut { sequence: "F5"; enabled: document.path !== ""; onActivated: document.reload() }
+    Shortcut { sequence: "Delete"; enabled: window.writable && model.selectedCount > 0 && !window.editingText && !window.dialogsOpen; onActivated: deleteDialog.openFor() }
+    Shortcut { sequence: "F2"; enabled: window.writable && model.selectedCount === 1 && !window.dialogsOpen; onActivated: renameDialog.openFor() }
     Shortcut { sequence: "Alt+Left"; enabled: window.ready; onActivated: model.back() }
     Shortcut { sequence: "Alt+Right"; enabled: window.ready; onActivated: model.forward() }
     Shortcut { sequence: "Alt+Up"; enabled: window.ready; onActivated: model.up() }
@@ -249,9 +325,15 @@ ArchiveWindow {
                     ActionButton { objectName: "archiveExtractHere"; text: "解压到此处"; foreground: window.ink; hint: "解压到压缩包所在的文件夹“" + document.folderPath + "”"; onClicked: window.extractHere() }
                     ActionButton { objectName: "archiveTest"; text: "测试"; iconName: "verify"; foreground: window.ink; hint: "检查压缩包是否完整、密码是否正确"; onClicked: window.testArchive() }
                     Rectangle { width: 1; height: 18; color: window.line; Layout.leftMargin: 4; Layout.rightMargin: 4 }
-                    ActionButton { text: "添加"; iconName: "add"; foreground: window.ink; enabled: !document.readOnly; hint: document.readOnly ? "这种格式只能查看和解压" : "向压缩包添加文件"; onClicked: window.pending("添加文件") }
-                    ActionButton { text: "删除"; iconName: "trash"; foreground: window.ink; enabled: !document.readOnly && model.selectedCount > 0; hint: "从压缩包中删除选中的项目"; onClicked: window.pending("删除") }
-                    ActionButton { text: "重命名"; iconName: "rename"; foreground: window.ink; enabled: !document.readOnly && model.selectedCount === 1; hint: "重命名选中的项目"; onClicked: window.pending("重命名") }
+                    ActionButton {
+                        id: addButton; objectName: "archiveAdd"
+                        text: "添加"; iconName: "add"; foreground: window.ink; enabled: window.writable
+                        hint: window.readOnlyHint("向当前文件夹添加文件或文件夹（也可以直接拖进来）")
+                        onClicked: addMenu.popup(addButton, 0, addButton.height + 4)
+                    }
+                    ActionButton { objectName: "archiveDelete"; text: "删除"; iconName: "trash"; foreground: window.ink; enabled: window.writable && model.selectedCount > 0; hint: window.readOnlyHint("从压缩包中删除选中的项目 · Delete"); onClicked: deleteDialog.openFor() }
+                    ActionButton { objectName: "archiveRename"; text: "重命名"; iconName: "rename"; foreground: window.ink; enabled: window.writable && model.selectedCount === 1; hint: window.readOnlyHint("重命名选中的项目 · F2"); onClicked: renameDialog.openFor() }
+                    ActionButton { objectName: "archiveConvert"; text: "转换格式…"; iconName: "compress"; foreground: window.ink; hint: document.legacyNames ? "转换为 UTF-8 文件名的 ZIP 等格式，之后即可修改" : "另存为 ZIP、7z 或 tar 等格式，原压缩包保留"; onClicked: window.convert() }
                     ActionButton { objectName: "archiveInfo"; text: "信息"; iconName: "info"; foreground: window.ink; hint: "压缩包信息 · Ctrl+I"; onClicked: infoDialog.open() }
                     Item { Layout.fillWidth: true }
                     Text { visible: encodingBox.visible; text: "文件名编码"; color: window.muted; font.pixelSize: 13 }
@@ -267,7 +349,12 @@ ArchiveWindow {
                         onActivated: document.setEncoding(choices[currentIndex].value)
                     }
                     Chip { objectName: "archiveFormat"; text: document.formatLabel; visible: text !== ""; Layout.leftMargin: 6 }
-                    Chip { visible: document.readOnly; text: "只读"; tone: window.muted }
+                    Chip {
+                        id: readOnlyChip; objectName: "archiveReadOnly"
+                        visible: document.readOnly; text: "只读"; tone: window.muted
+                        HoverHandler { id: readOnlyHover }
+                        NookToolTip { visible: readOnlyHover.hovered; text: window.document.readOnlyReason }
+                    }
                 }
                 Item {
                     Layout.fillWidth: true; Layout.fillHeight: true
@@ -280,6 +367,27 @@ ArchiveWindow {
                         model: window.model
                         onActivated: row => window.activate(row)
                         onContextRequested: (row, x, y) => { contextMenu.row = row; contextMenu.popup(fileList, x, y) }
+                        onDragStarted: window.dragOut()
+                        onDragReleased: if (!dragSource.Drag.active) window.draggingOut = false
+                    }
+                    // Over an open package that can change, dropped files are added to the folder shown.
+                    Rectangle {
+                        objectName: "archiveDropHint"
+                        anchors.fill: fileList
+                        visible: window.ready && window.dropping
+                        radius: 10; color: Qt.alpha(window.theme.accent, 0.06)
+                        border.width: 2; border.color: window.writable ? window.theme.accent : window.theme.lineStrong
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: dropLabel.implicitWidth + 32; height: dropLabel.implicitHeight + 20; radius: 9
+                            color: window.theme.raised; border.width: 1; border.color: window.theme.lineStrong
+                            Text {
+                                id: dropLabel; anchors.centerIn: parent
+                                text: window.writable ? "松开即可添加到“" + (window.model.folder !== "" ? window.model.folder.split("/").pop() : window.document.name) + "”"
+                                                      : window.document.readOnlyReason
+                                color: window.ink; font.pixelSize: 14
+                            }
+                        }
                     }
                     // Nothing open: a place to drop packages, the two ways in, and recent ones.
                     Item {
@@ -413,18 +521,34 @@ ArchiveWindow {
         DropArea {
             anchors.fill: parent
             keys: ["text/uri-list"]
-            onEntered: drag => { window.dropping = drag.hasUrls }
+            onEntered: drag => {
+                // Our own rows coming back in: nothing to do.
+                if (window.draggingOut) { drag.accepted = false; return }
+                window.dropping = drag.hasUrls
+            }
             onExited: window.dropping = false
             onDropped: drop => {
                 window.dropping = false
+                if (window.draggingOut) return
                 const paths = []
                 for (const url of drop.urls) {
                     const uri = String(url)
                     if (uri.startsWith("file:") && window.app.exists(uri)) paths.push(uri)
                 }
-                if (paths.length) { window.takePaths(paths); drop.accept(Qt.CopyAction) }
-                else window.toast("只能拖入本机的文件和文件夹")
+                if (paths.length === 0) { window.toast("只能拖入本机的文件和文件夹"); return }
+                if (window.writable) window.addPaths(paths)
+                else if (window.ready && !paths.every(p => window.app.looksLikeArchive(p))) { window.toast(window.document.readOnlyReason); return }
+                else window.takePaths(paths)
+                drop.accept(Qt.CopyAction)
             }
+        }
+        // What a drag out of the list carries: the extracted files, as a file manager expects.
+        Item {
+            id: dragSource
+            Drag.dragType: Drag.Automatic
+            Drag.supportedActions: Qt.CopyAction
+            Drag.proposedAction: Qt.CopyAction
+            Drag.onDragFinished: { Drag.active = false; window.draggingOut = false }
         }
     }
 
@@ -435,6 +559,9 @@ ArchiveWindow {
         NookMenuItem { text: "解压选中的项目到…"; iconName: "extract"; onTriggered: extractDialog.openFor(true) }
         NookMenuItem { text: "解压选中的项目到当前文件夹"; onTriggered: window.extractHere("", true) }
         NookMenuItem { text: "解压选中的项目到“" + extractDialog.stem + "”文件夹"; onTriggered: window.extractHere("always", true) }
+        NookMenuItem { text: "打开"; iconName: "file"; visible: !window.model.isFolder(contextMenu.row); onTriggered: window.activate(contextMenu.row) }
+        NookMenuItem { text: "重命名…"; iconName: "rename"; shortcutText: "F2"; visible: window.writable && window.model.selectedCount === 1; onTriggered: renameDialog.openFor() }
+        NookMenuItem { text: "从压缩包中删除…"; iconName: "trash"; shortcutText: "Delete"; visible: window.writable; onTriggered: deleteDialog.openFor() }
         NookMenuItem { text: "全选"; iconName: "select-all"; shortcutText: "Ctrl+A"; onTriggered: window.model.selectAll() }
         NookMenuItem { text: "压缩包信息"; iconName: "info"; shortcutText: "Ctrl+I"; onTriggered: infoDialog.open() }
     }
@@ -458,6 +585,137 @@ ArchiveWindow {
         onExtract: choices => window.extractWith(choices)
     }
     ArchiveSettings { id: settingsDialog; app: window.app }
+    NookMenu {
+        id: addMenu
+        NookMenuItem { text: "添加文件…"; iconName: "file"; onTriggered: window.app.choose(window, "add") }
+        NookMenuItem { text: "添加文件夹…"; iconName: "folder"; onTriggered: window.app.choose(window, "addFolders") }
+    }
+
+    NookDialog {
+        id: deleteDialog
+        objectName: "archiveDeleteDialog"
+        danger: true; iconName: "trash"
+        property var entries: []
+        title: entries.length === 1 ? "从压缩包中删除“" + entries[0].split("/").pop() + "”？" : "从压缩包中删除 " + entries.length + " 个项目？"
+        message: "文件夹连同里面的内容一起删除。删除后无法撤销，压缩包外的文件不受影响。"
+        wrapAnywhere: true
+        function openFor() { entries = window.model.selectedPaths(); if (entries.length > 0) open() }
+        onAccepted: { close(); window.deleteSelected() }
+        actions: [
+            ActionButton { text: "取消"; foreground: window.ink; implicitHeight: 38; onClicked: deleteDialog.close() },
+            ActionButton { objectName: "archiveDeleteConfirm"; text: "删除"; accent: true; danger: true; implicitHeight: 38; onClicked: deleteDialog.accepted() }
+        ]
+    }
+
+    NookDialog {
+        id: renameDialog
+        objectName: "archiveRenameDialog"
+        iconName: "rename"
+        title: "重命名"
+        property string from: ""
+        readonly property string oldName: from.split("/").pop()
+        readonly property string parentPath: from.indexOf("/") >= 0 ? from.substring(0, from.lastIndexOf("/") + 1) : ""
+        readonly property string newName: nameField.text.trim()
+        readonly property string problem: newName === "" || newName === oldName ? ""
+                                          : newName.indexOf("/") >= 0 ? "名称里不能有“/”"
+                                          : newName === "." || newName === ".." ? "不能用这个名称"
+                                          : window.model.contains(parentPath + newName) ? "已有名为“" + newName + "”的项目" : ""
+        readonly property bool valid: newName !== "" && newName !== oldName && problem === ""
+        message: "“" + oldName + "”的新名称："
+        wrapAnywhere: true
+        function openFor() {
+            const paths = window.model.selectedPaths()
+            if (paths.length !== 1) return
+            from = paths[0]
+            nameField.text = oldName
+            open()
+            nameField.forceActiveFocus()
+            // The name without its extension, as file managers select it.
+            const current = window.model.entry(window.model.currentRow)
+            const folder = current.path === from ? current.folder : false
+            const dot = !folder && oldName.lastIndexOf(".") > 0 ? oldName.lastIndexOf(".") : oldName.length
+            nameField.select(0, dot)
+        }
+        onAccepted: { if (!valid) return; close(); window.renameEntry(from, newName) }
+        ArchiveField {
+            id: nameField; objectName: "archiveRenameField"
+            Layout.fillWidth: true
+            onAccepted: renameDialog.accepted()
+        }
+        Text { visible: renameDialog.problem !== ""; text: renameDialog.problem; color: window.theme.danger; font.pixelSize: 13 }
+        actions: [
+            ActionButton { text: "取消"; foreground: window.ink; implicitHeight: 38; onClicked: renameDialog.close() },
+            ActionButton { objectName: "archiveRenameConfirm"; text: "重命名"; accent: true; enabled: renameDialog.valid; implicitHeight: 38; onClicked: renameDialog.accepted() }
+        ]
+    }
+
+    // A file opened from the package was saved: ask every time whether it goes back in (Q21).
+    NookDialog {
+        id: modifiedDialog
+        objectName: "archiveModifiedDialog"
+        iconName: "file"
+        property int sessionId: 0
+        property var session: ({})
+        property var waiting: []
+        title: "“" + (session.name || "") + "”已修改"
+        message: session.readOnly ? "这个压缩包不能修改（" + window.document.readOnlyReason + "）。可以把改过的文件另存到别处。"
+                                  : "要把修改写回“" + (session.archiveName || "") + "”吗？以后每次保存都会再问。"
+        wrapAnywhere: true
+        function ask(id) { sessionId = id; session = window.files.session(id); open() }
+        function next() { close() }
+        // Changes saved while this was up (or closing): the answer covered the file it was about.
+        onClosed: {
+            while (waiting.length > 0) {
+                const id = waiting.shift()
+                const other = window.files.session(id)
+                if (id !== sessionId && other.dirty && !other.writing) { ask(id); return }
+            }
+        }
+        actions: [
+            ActionButton {
+                objectName: "archiveModifiedDecline"
+                text: modifiedDialog.session.readOnly ? "不保存" : "不写回"; foreground: window.ink; implicitHeight: 38
+                onClicked: { window.files.decline(modifiedDialog.sessionId); modifiedDialog.next() }
+            },
+            ActionButton {
+                objectName: "archiveModifiedAccept"
+                text: modifiedDialog.session.readOnly ? "另存为…" : "写回"; accent: true; implicitHeight: 38
+                onClicked: {
+                    if (modifiedDialog.session.readOnly) window.app.choose(window, "saveCopy", window.document.folderPath)
+                    else window.files.writeBack(modifiedDialog.sessionId)
+                    modifiedDialog.next()
+                }
+            }
+        ]
+    }
+
+    // Closing with edits not written back (Q21).
+    NookDialog {
+        id: unsavedDialog
+        objectName: "archiveUnsavedDialog"
+        danger: true; iconName: "file"
+        property var edits: []
+        readonly property bool canWrite: edits.some(e => !e.readOnly)
+        title: edits.length === 1 ? "“" + edits[0].name + "”的修改还没有写回" : edits.length + " 个文件的修改还没有写回"
+        message: canWrite ? "关闭窗口后这些修改将丢失。" : "这个压缩包不能修改，关闭后这些修改将丢失；可以先在编辑器里另存一份。"
+        wrapAnywhere: true
+        function finish() { close(); window.closeConfirmed = true; window.close() }
+        actions: [
+            ActionButton { text: "取消"; foreground: window.ink; implicitHeight: 38; onClicked: unsavedDialog.close() },
+            ActionButton {
+                objectName: "archiveUnsavedDiscard"
+                text: "放弃修改并关闭"; accent: !unsavedDialog.canWrite; danger: true; foreground: window.ink; implicitHeight: 38
+                onClicked: { window.files.discard(window.document.path); unsavedDialog.finish() }
+            },
+            ActionButton {
+                objectName: "archiveUnsavedWrite"
+                visible: unsavedDialog.canWrite
+                text: "全部写回"; accent: true; implicitHeight: 38
+                // The writing goes on with the window closed; a question goes to a window of its own.
+                onClicked: { for (const e of unsavedDialog.edits) if (!e.readOnly) window.files.writeBack(e.id); unsavedDialog.finish() }
+            }
+        ]
+    }
     ArchiveTasks { id: tasksDrawer; app: window.app }
     ArchivePrompts { id: prompts; app: window.app; host: window }
 

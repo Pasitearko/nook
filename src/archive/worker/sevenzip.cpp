@@ -62,7 +62,7 @@ class ListFile {
 };
 
 Run run(const QStringList &arguments, const QByteArray &input, const std::function<void(const QByteArray &)> &onLine,
-        const std::function<void(const QByteArray &)> &onProgress) {
+        const std::function<void(const QByteArray &)> &onProgress, const QString &directory = {}) {
     Run result;
     const QString executable = program();
     if (executable.isEmpty()) {
@@ -93,7 +93,10 @@ Run run(const QStringList &arguments, const QByteArray &input, const std::functi
         return result;
     }
     const pid_t pid = ::fork();
+    const QByteArray workingDirectory = directory.toLocal8Bit();
     if (pid == 0) {
+        if (!workingDirectory.isEmpty() && ::chdir(workingDirectory.constData()) != 0)
+            ::_exit(126);
         ::dup2(in[0], 0);
         ::dup2(out[1], 1);
         ::dup2(err[1], 2);
@@ -375,14 +378,14 @@ struct Prepared {
 };
 
 // Lists the package (asking for a header password if needed) before testing or extracting it.
-Prepared prepare(const Request &request, bool emitEntries) {
+Prepared prepare(const Request &request, bool emitEntries, bool keep = false) {
     Prepared prepared;
     if (request.hasPassword)
         prepared.password = request.password;
     const QString archive = volumesOf(request.archive).first;
     const bool split = volumesOf(request.archive).split;
     for (;;) {
-        ListParser parser(emitEntries);
+        ListParser parser(emitEntries, keep);
         const Run result = run(QStringList{"l", "-slt", "-bsp0"} + common() + QStringList{"--", archive},
                                passwordInput(prepared.password),
                                [&](const QByteArray &line) { parser.line(line); }, {});
@@ -412,6 +415,107 @@ Prepared prepare(const Request &request, bool emitEntries) {
     }
 }
 
+}
+
+QStringList sevenZipSwitches() { return common(); }
+
+EditListing sevenZipEditListing(const Request &request, const QString &archive, bool needPassword) {
+    Request copy = request;
+    copy.archive = archive;
+    Prepared prepared = prepare(copy, false, true);
+    EditListing listing;
+    if (!prepared.ok) {
+        listing.done = prepared.done;
+        return listing;
+    }
+    listing.entries = prepared.listing.items;
+    listing.encrypted = prepared.listing.encrypted || prepared.headerEncrypted;
+    listing.headerEncrypted = prepared.headerEncrypted;
+    listing.password = prepared.password;
+    QString sample;
+    for (const auto &value : std::as_const(listing.entries)) {
+        const QJsonObject entry = value.toObject();
+        if (entry.value("encrypted").toBool() && entry.value("type").toString() == "file") {
+            sample = entry.value("path").toString();
+            break;
+        }
+    }
+    // New entries are encrypted with the package's own password, so make sure it is the right one.
+    if (needPassword && !sample.isEmpty()) {
+        bool asked = false;
+        for (;;) {
+            if (!listing.password) {
+                listing.password = askPassword(asked);
+                if (!listing.password) {
+                    listing.done = {{"event", "done"}, {"ok", false}, {"cancelled", true}};
+                    return listing;
+                }
+            }
+            const Run result = run(QStringList{"t", "-spd", "-bsp0"} + common() + QStringList{archive, sample},
+                                   passwordInput(listing.password, 3), {}, {});
+            const Outcome outcome = outcomeOf(result);
+            if (outcome == Outcome::Cancelled) {
+                listing.done = {{"event", "done"}, {"ok", false}, {"cancelled", true}};
+                return listing;
+            }
+            if (outcome == Outcome::WrongPassword || outcome == Outcome::NeedPassword || outcome == Outcome::Failed) {
+                listing.password.reset();
+                asked = true;
+                continue;
+            }
+            break;
+        }
+    }
+    listing.ok = true;
+    return listing;
+}
+
+QJsonObject sevenZipEdit(const QStringList &arguments, const QStringList &listLines, const QString &directory,
+                         const QString &phase, std::optional<QString> &password) {
+    auto &channel = Channel::instance();
+    for (;;) {
+        ListFile list(listLines);
+        QStringList full = arguments;
+        if (!list.argument().isEmpty())
+            full << list.argument();
+        const Run result = run(full, passwordInput(password, 3), {}, [&](const QByteArray &token) {
+            const double fraction = percent(token);
+            if (fraction >= 0)
+                channel.progress({{"phase", phase}, {"fraction", fraction}});
+        }, directory);
+        const Outcome outcome = outcomeOf(result);
+        if (outcome == Outcome::Cancelled)
+            return {{"event", "done"}, {"ok", false}, {"cancelled", true}};
+        if (outcome == Outcome::WrongPassword || outcome == Outcome::NeedPassword) {
+            password = askPassword(password.has_value());
+            if (!password)
+                return {{"event", "done"}, {"ok", false}, {"cancelled", true}};
+            continue;
+        }
+        if (result.exitCode != 0 && result.exitCode != 1)
+            return {{"event", "done"}, {"ok", false}, {"error", errorOf(result, false)}};
+        if (result.exitCode == 1)
+            for (const auto &line : result.errors.split(u'\n'))
+                if (line.startsWith(u"WARNING:") || line.startsWith(u"ERROR:"))
+                    warn("io", {}, line.trimmed());
+        return {};
+    }
+}
+
+QJsonObject sevenZipVerify(const QString &archive, const std::optional<QString> &password) {
+    auto &channel = Channel::instance();
+    const Run result = run(QStringList{"t", "-bsp2"} + common() + QStringList{"--", archive}, passwordInput(password, 3), {},
+                           [&](const QByteArray &token) {
+                               const double fraction = percent(token);
+                               if (fraction >= 0)
+                                   channel.progress({{"phase", "test"}, {"fraction", fraction}});
+                           });
+    const Outcome outcome = outcomeOf(result);
+    if (outcome == Outcome::Cancelled)
+        return {{"event", "done"}, {"ok", false}, {"cancelled", true}};
+    if (outcome != Outcome::Ok || result.exitCode != 0)
+        return {{"event", "done"}, {"ok", false}, {"error", failure("test-failed", "修改后的压缩包没有通过校验，原压缩包未改动")}};
+    return {};
 }
 
 QJsonArray sevenZipEntries(const QString &archive) {

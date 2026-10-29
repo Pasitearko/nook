@@ -33,6 +33,7 @@ struct TaskQueue::Task {
     QString target;
     bool targetIsFolder = false;
     bool createdDeleted = false;
+    QVariantMap result;
 
     bool finished() const { return state == "done" || state == "failed" || state == "cancelled"; }
     bool running() const { return !finished() && state != "queued"; }
@@ -76,7 +77,8 @@ QHash<int, QByteArray> TaskQueue::roleNames() const {
             {CanDeleteCreatedRole, "canDeleteCreated"},
             {TargetRole, "target"},
             {TargetIsFolderRole, "targetIsFolder"},
-            {ArchiveRole, "archive"}};
+            {ArchiveRole, "archive"},
+            {QuietRole, "quiet"}};
 }
 
 QVariant TaskQueue::data(const QModelIndex &index, int role) const {
@@ -90,6 +92,14 @@ QVariant TaskQueue::data(const QModelIndex &index, int role) const {
     case KindRole:
         return task.kind;
     case TitleRole:
+        if (task.kind == "add")
+            return "添加到" + quoted(name);
+        if (task.kind == "delete")
+            return "从" + quoted(name) + "删除";
+        if (task.kind == "rename")
+            return "重命名" + quoted(name) + "中的项目";
+        if (task.kind == "convert")
+            return "转换" + quoted(name);
         return (task.kind == "extract" ? QStringLiteral("解压")
                 : task.kind == "test"  ? QStringLiteral("测试")
                                        : QStringLiteral("压缩为")) +
@@ -99,6 +109,14 @@ QVariant TaskQueue::data(const QModelIndex &index, int role) const {
             return "到 " + QDir::toNativeSeparators(task.request.value("destination").toString());
         if (task.kind == "create")
             return "保存到 " + QDir::toNativeSeparators(QFileInfo(task.archive()).absolutePath());
+        if (task.kind == "convert")
+            return "转换为 " + QFileInfo(task.request.value("output").toString()).fileName();
+        if (task.kind == "rename")
+            return task.request.value("from").toString().section(u'/', -1) + " → " + task.request.value("to").toString().section(u'/', -1);
+        if (task.kind == "delete")
+            return QStringLiteral("%1 个项目").arg(task.request.value("entries").toList().size());
+        if (task.kind == "add")
+            return task.request.value("prefix").toString().isEmpty() ? QStringLiteral("到压缩包根目录") : "到 " + task.request.value("prefix").toString();
         return QDir::toNativeSeparators(QFileInfo(task.archive()).absolutePath());
     case StateRole:
         return task.state;
@@ -136,6 +154,8 @@ QVariant TaskQueue::data(const QModelIndex &index, int role) const {
         return task.targetIsFolder;
     case ArchiveRole:
         return task.archive();
+    case QuietRole:
+        return task.extras.value("quiet").toBool();
     }
     return {};
 }
@@ -155,10 +175,18 @@ QString TaskQueue::stateText(const Task &task) const {
         return QStringLiteral("失败");
     if (task.state == "cancelled")
         return QStringLiteral("已取消");
+    if (task.phase == "copy")
+        return QStringLiteral("正在准备…");
+    if (task.phase == "update")
+        return QStringLiteral("正在写入压缩包…");
     if (task.phase == "commit")
-        return QStringLiteral("正在移入目标位置…");
+        return task.kind == "extract" ? QStringLiteral("正在移入目标位置…") : QStringLiteral("正在完成…");
+    if (task.kind == "convert")
+        return task.phase == "create" ? QStringLiteral("正在压缩为新格式…") : QStringLiteral("正在读取原压缩包…");
     if (task.phase == "test")
-        return task.kind == "create" ? QStringLiteral("正在校验…") : QStringLiteral("正在测试…");
+        return task.kind == "test" ? QStringLiteral("正在测试…") : QStringLiteral("正在校验…");
+    if (task.kind == "add" || task.kind == "delete" || task.kind == "rename")
+        return QStringLiteral("正在修改压缩包…");
     if (task.kind == "extract")
         return QStringLiteral("正在解压…");
     if (task.kind == "create")
@@ -368,6 +396,7 @@ void TaskQueue::finish(Task *task, const QVariantMap &result) {
     // finish() runs inside the job's own signal; it goes once that has returned.
     if (task->job)
         task->job.release()->deleteLater();
+    task->result = result;
     const bool ok = result.value("ok").toBool();
     const bool cancelled = result.value("cancelled").toBool();
     task->state = ok ? "done" : cancelled ? "cancelled" : "failed";
@@ -376,7 +405,7 @@ void TaskQueue::finish(Task *task, const QVariantMap &result) {
     task->conflict.clear();
     const QString archive = task->request.value("archive").toString();
     if (ok && !task->sentPassword.isEmpty()) {
-        if (task->kind != "create")
+        if (task->kind != "create" && task->kind != "convert")
             m_session.insert(archive, task->sentPassword);
         if (!task->saveName.isEmpty() && m_passwords)
             m_passwords->save(task->saveName, task->sentPassword);
@@ -410,6 +439,19 @@ void TaskQueue::finish(Task *task, const QVariantMap &result) {
     } else if (ok && task->kind == "test") {
         const int tested = result.value("tested").toInt();
         task->message = tested > 0 ? QStringLiteral("测试通过：%1 个文件都没有错误").arg(tested) : QStringLiteral("测试通过，没有发现错误");
+    } else if (ok && (task->kind == "add" || task->kind == "delete" || task->kind == "rename")) {
+        const int changed = result.value("changed").toInt();
+        task->message = task->kind == "rename" ? QStringLiteral("已重命名")
+                        : task->kind == "delete" ? QStringLiteral("已删除 %1 个项目").arg(changed)
+                        : changed > 0            ? QStringLiteral("已添加 %1 个项目").arg(changed) + tail
+                                                 : QStringLiteral("没有添加任何项目") + tail;
+        task->target = task->request.value("archive").toString();
+        task->targetIsFolder = false;
+    } else if (ok && task->kind == "convert") {
+        const QString output = result.value("output", task->request.value("output")).toString();
+        task->target = output;
+        task->targetIsFolder = false;
+        task->message = QStringLiteral("已转换为%1（%2）").arg(quoted(QFileInfo(output).fileName()), nook::formatSize(QFileInfo(output).size())) + tail;
     } else if (ok && task->kind == "create") {
         const QString output = result.value("output", task->archive()).toString();
         task->target = output;
@@ -426,6 +468,8 @@ void TaskQueue::finish(Task *task, const QVariantMap &result) {
             task->message += failed ? QStringLiteral("；%1 个源文件没能移到回收站").arg(failed) : QStringLiteral("，源文件已移到回收站");
             task->problem = task->problem || failed > 0;
         }
+    } else if (cancelled && (task->kind == "add" || task->kind == "delete" || task->kind == "rename")) {
+        task->message = QStringLiteral("已取消，压缩包没有改动");
     } else if (cancelled) {
         task->message = task->kind == "extract" && !task->created.isEmpty()
                             ? QStringLiteral("已取消；已完整解压的 %1 个项目保留在目标位置").arg(task->created.size())
@@ -540,6 +584,8 @@ QVariantMap TaskQueue::task(int id) const {
     map.insert("archiveName", QFileInfo(task.archive()).fileName());
     map.insert("archiveStem", QFileInfo(task.archive()).completeBaseName());
     map.insert("openAfter", task.extras.value("openAfter").toBool());
+    map.insert("quiet", task.extras.value("quiet").toBool());
+    map.insert("result", task.result);
     return map;
 }
 

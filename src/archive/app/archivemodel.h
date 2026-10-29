@@ -87,6 +87,8 @@ class ArchiveModel : public QAbstractListModel {
     Q_INVOKABLE QVariantMap entry(int row) const;
     Q_INVOKABLE QStringList selectedPaths() const;
     Q_INVOKABLE bool isFolder(int row) const;
+    // Whether the package has this path (also folders only implied by what is inside them).
+    Q_INVOKABLE bool contains(const QString &path) const { return nodeAt(path) >= 0; }
 
   Q_SIGNALS:
     void rowsChanged();
