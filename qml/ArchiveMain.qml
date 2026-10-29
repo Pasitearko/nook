@@ -6,48 +6,29 @@ import QtQuick.Window
 
 // nook解压缩: one package per window. Empty, it offers to open or create one; open, it browses
 // the package like a folder, with the actions along the toolbar.
-ApplicationWindow {
+ArchiveWindow {
     id: window
     objectName: "archiveWindow"
-    required property var app
     required property var document
-    readonly property var prefs: app.settings.values
-    // What the shared controls (ActionButton, NookDialog, NookMenu …) read from their window.
-    readonly property bool animations: prefs.animations === true
-    readonly property bool dark: prefs.theme === "dark" || (prefs.theme === "system" && app.settings.systemDark)
-    readonly property Theme theme: Theme { dark: window.dark; effects: prefs.effects }
-    readonly property color ink: theme.ink
-    readonly property color muted: theme.muted
-    readonly property color line: theme.line
-    readonly property real uiScale: Math.max(0.75, Math.min(1.5, Number(prefs.uiScale) || 1))
-    readonly property real layoutWidth: width / uiScale
-    readonly property real layoutHeight: height / uiScale
     readonly property var model: document.model
+    readonly property var queue: app.queue
     readonly property bool ready: document.state === "ready"
-    readonly property bool editingText: activeFocusItem instanceof TextInput || activeFocusItem instanceof TextEdit
-    readonly property bool dialogsOpen: passwordDialog.visible || infoDialog.visible
-    property string toastMessage: ""
+    readonly property bool dialogsOpen: passwordDialog.visible || infoDialog.visible || extractDialog.visible || settingsDialog.visible || prompts.busy
     property bool dropping: false
+    property string pendingSave: ""
 
     width: 1102; height: 709
     minimumWidth: 720; minimumHeight: 460
-    visible: true
-    color: "transparent"
     title: document.name !== "" ? document.name + " · nook解压缩" : "nook解压缩"
-    palette.window: theme.raised
-    palette.base: theme.field
-    palette.text: ink
-    palette.windowText: ink
-    palette.buttonText: ink
-    palette.button: theme.raised
-    palette.highlight: theme.selection
-    palette.highlightedText: ink
-    palette.mid: line
-    palette.placeholderText: muted
 
-    function toast(message) { toastMessage = message; toastTimer.restart() }
-    function chooseArchives() { app.chooseArchives(window) }
+    function chooseArchives() { app.choose(window, "archives") }
     // The first package opens here unless this window already shows one; the rest get windows.
+    // Dropped or chosen files: packages open, anything else goes to a new package.
+    function takePaths(paths) {
+        const all = paths.every(p => app.looksLikeArchive(p))
+        if (all) openPaths(paths)
+        else app.openCompose(paths.map(p => app.localPath(p)))
+    }
     function openPaths(paths) {
         let first = true
         for (const path of paths) {
@@ -67,28 +48,71 @@ ApplicationWindow {
         // Tiny packages are larger than what they hold; a ratio above 100% says nothing useful.
         return packed <= total ? "压缩率 " + Math.max(1, Math.round(packed / total * 100)) + "%" : ""
     }
-    function pending(what) { toast(what + "将在下一阶段推出") }
+    function pending(what) { toast(what + "将在后续版本中推出") }
+    function startTask(request, extras) {
+        if (document.encodingChoice !== "auto") request.encoding = document.encodingChoice
+        queue.start(request, extras || {}, window)
+        tasksDrawer.open()
+    }
+    // choices: destination, selection, subfolder, conflict, openAfter.
+    function extractWith(choices) {
+        const request = {op: "extract", archive: document.path, destination: choices.destination,
+                         subfolder: choices.subfolder, conflict: choices.conflict, expectedSize: model.totalSize}
+        if (choices.selection && model.selectedCount > 0) {
+            request.entries = model.selectedPaths()
+            if (model.query === "" && model.folder !== "") request.prefix = model.folder
+            delete request.expectedSize
+        }
+        startTask(request, {openAfter: choices.openAfter === true})
+    }
+    // "解压到当前文件夹": literally the folder the package is in, with the remembered folder rule.
+    function extractHere(subfolder, selection) {
+        extractWith({destination: document.folderPath, selection: selection === true,
+                     subfolder: subfolder || app.prefs.subfolder, conflict: app.prefs.conflict, openAfter: app.prefs.openAfter})
+    }
+    function testArchive() { startTask({op: "test", archive: document.path}) }
 
     Connections {
         target: window.app
-        function onArchivesChosen(requester, paths) { if (requester === window) window.openPaths(paths) }
+        function onChosen(requester, purpose, paths) {
+            if (requester !== window || paths.length === 0) return
+            if (purpose === "archives") window.openPaths(paths)
+            else window.app.openCompose(paths)
+        }
         function onNotice(message) { window.toast(message) }
     }
     Connections {
         target: window.document
-        function onStateChanged() { if (window.ready) Qt.callLater(fileList.focusList) }
+        function onStateChanged() {
+            if (window.ready) {
+                Qt.callLater(fileList.focusList)
+                if (window.pendingSave !== "" && window.document.password !== "") window.app.passwords.save(window.pendingSave, window.document.password)
+            }
+            if (window.document.state !== "loading") window.pendingSave = ""
+        }
         function onPasswordChanged() {
             if (window.document.passwordRequested) passwordDialog.open()
             else if (passwordDialog.visible) passwordDialog.close()
         }
     }
-    Timer { id: toastTimer; interval: 3500; onTriggered: window.toastMessage = "" }
+    Connections {
+        target: window.queue
+        function onTaskFinished(id) {
+            if (window.active && window.queue.ownedBy(id, window)) {
+                const task = window.queue.task(id)
+                if (task.status !== "cancelled") window.toast(task.message)
+            }
+        }
+    }
     Timer { id: searchTimer; interval: 180; onTriggered: window.model.setQuery(searchBox.text) }
 
     Shortcut { sequence: "Ctrl+O"; onActivated: window.chooseArchives() }
     Shortcut { sequence: "Ctrl+W"; onActivated: window.close() }
     Shortcut { sequences: ["Ctrl+F"]; enabled: window.ready; onActivated: { searchBox.forceActiveFocus(); searchBox.selectAll() } }
     Shortcut { sequence: "Ctrl+I"; enabled: window.ready; onActivated: infoDialog.open() }
+    Shortcut { sequence: "Ctrl+E"; enabled: window.ready && !window.dialogsOpen; onActivated: extractDialog.openFor(false) }
+    Shortcut { sequence: "Ctrl+N"; enabled: !window.dialogsOpen; onActivated: window.app.choose(window, "files") }
+    Shortcut { sequence: "Ctrl+,"; enabled: !window.dialogsOpen; onActivated: settingsDialog.open() }
     Shortcut { sequence: "F5"; enabled: document.path !== ""; onActivated: document.reload() }
     Shortcut { sequence: "Alt+Left"; enabled: window.ready; onActivated: model.back() }
     Shortcut { sequence: "Alt+Right"; enabled: window.ready; onActivated: model.forward() }
@@ -100,19 +124,33 @@ ApplicationWindow {
         onActivated: { if (searchBox.text !== "") { searchBox.clear(); fileList.focusList() } else window.model.clearSelection() }
     }
 
-    Binding { target: window.Overlay.overlay; property: "scale"; value: window.uiScale }
-    Binding { target: window.Overlay.overlay; property: "width"; value: window.layoutWidth }
-    Binding { target: window.Overlay.overlay; property: "height"; value: window.layoutHeight }
-    Binding { target: window.Overlay.overlay; property: "transformOrigin"; value: Item.TopLeft }
-
-    component Field: TextField {
-        id: field
-        ContextMenu.menu: null
-        TextMenuArea { target: field }
-        Layout.preferredHeight: 34
-        color: window.ink; font.pixelSize: 14; selectByMouse: true
-        selectionColor: window.theme.selection; selectedTextColor: window.theme.selectionText
-        background: Rectangle { radius: 8; color: window.theme.field; border.width: 1; border.color: field.activeFocus ? window.theme.accent : window.line }
+    component TaskButton: AbstractButton {
+        id: taskButton
+        objectName: "archiveTaskButton"
+        readonly property var queue: window.queue
+        visible: queue.count > 0
+        implicitWidth: 36; implicitHeight: 36
+        hoverEnabled: true
+        background: Rectangle { radius: 8; color: taskButton.down ? window.theme.pressed : taskButton.hovered || tasksDrawer.visible ? window.theme.hover : "transparent" }
+        contentItem: Item {
+            Shape {
+                anchors.centerIn: parent; width: 22; height: 22
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath { strokeColor: window.theme.sunken; strokeWidth: 2.4; fillColor: "transparent"; PathAngleArc { centerX: 11; centerY: 11; radiusX: 9; radiusY: 9; startAngle: 0; sweepAngle: 360 } }
+                ShapePath {
+                    strokeColor: taskButton.queue.attentionCount > 0 ? window.theme.warning : window.theme.accent
+                    strokeWidth: 2.4; fillColor: "transparent"; capStyle: ShapePath.RoundCap
+                    PathAngleArc { centerX: 11; centerY: 11; radiusX: 9; radiusY: 9; startAngle: -90; sweepAngle: taskButton.queue.activeCount > 0 ? Math.max(8, 360 * taskButton.queue.fraction) : 360 }
+                }
+            }
+            Text {
+                anchors.centerIn: parent
+                text: taskButton.queue.activeCount > 0 ? taskButton.queue.activeCount : "✓"
+                color: window.ink; font.pixelSize: 10; font.weight: Font.DemiBold
+            }
+        }
+        NookToolTip { visible: taskButton.hovered; text: taskButton.queue.activeCount > 0 ? taskButton.queue.activeCount + " 个任务进行中" : "任务列表" }
+        onClicked: tasksDrawer.visible ? tasksDrawer.close() : tasksDrawer.open()
     }
     component Chip: Rectangle {
         property alias text: chipLabel.text
@@ -132,14 +170,9 @@ ApplicationWindow {
     }
 
     Item {
-        id: workspace
-        width: window.layoutWidth; height: window.layoutHeight
-        scale: window.uiScale; transformOrigin: Item.TopLeft
-        Rectangle {
+        anchors.fill: parent
+        Item {
             anchors.fill: parent
-            radius: 12
-            color: window.theme.window
-            border.width: 1; border.color: window.line
             ColumnLayout {
                 anchors.fill: parent; anchors.margins: 1; spacing: 0
                 // Where: history, the folder inside the package, and search.
@@ -189,7 +222,7 @@ ApplicationWindow {
                             }
                         }
                     }
-                    Field {
+                    ArchiveField {
                         id: searchBox; objectName: "archiveSearch"
                         visible: window.ready
                         Layout.preferredWidth: Math.min(230, window.layoutWidth * 0.26); Layout.leftMargin: 4
@@ -201,6 +234,8 @@ ApplicationWindow {
                         ActionButton { visible: searchBox.text !== ""; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; implicitWidth: 30; implicitHeight: 30; leftPadding: 7; rightPadding: 7; iconName: "close"; hint: "清除搜索"; foreground: window.muted; onClicked: searchBox.clear() }
                         Keys.onDownPressed: fileList.focusList()
                     }
+                    TaskButton { Layout.leftMargin: 4 }
+                    ActionButton { objectName: "archiveSettingsButton"; iconName: "settings"; hint: "设置 · Ctrl+,"; foreground: window.ink; onClicked: settingsDialog.open() }
                     Rectangle { width: 1; height: 18; color: window.line; Layout.leftMargin: 4; Layout.rightMargin: 2 }
                     WindowCloseButton { objectName: "archiveClose"; hint: "关闭窗口 · Ctrl+W"; onClicked: window.close() }
                 }
@@ -210,8 +245,9 @@ ApplicationWindow {
                     visible: window.ready
                     Layout.fillWidth: true; Layout.preferredHeight: 48
                     Layout.leftMargin: 10; Layout.rightMargin: 12; spacing: 4
-                    ActionButton { objectName: "archiveExtract"; text: "解压到…"; iconName: "extract"; accent: true; hint: "解压全部或选中的项目"; onClicked: window.pending("解压") }
-                    ActionButton { objectName: "archiveTest"; text: "测试"; iconName: "verify"; foreground: window.ink; hint: "检查压缩包是否完整、密码是否正确"; onClicked: window.pending("测试") }
+                    ActionButton { objectName: "archiveExtract"; text: "解压到…"; iconName: "extract"; accent: true; hint: "解压全部或选中的项目 · Ctrl+E"; onClicked: extractDialog.openFor(false) }
+                    ActionButton { objectName: "archiveExtractHere"; text: "解压到此处"; foreground: window.ink; hint: "解压到压缩包所在的文件夹“" + document.folderPath + "”"; onClicked: window.extractHere() }
+                    ActionButton { objectName: "archiveTest"; text: "测试"; iconName: "verify"; foreground: window.ink; hint: "检查压缩包是否完整、密码是否正确"; onClicked: window.testArchive() }
                     Rectangle { width: 1; height: 18; color: window.line; Layout.leftMargin: 4; Layout.rightMargin: 4 }
                     ActionButton { text: "添加"; iconName: "add"; foreground: window.ink; enabled: !document.readOnly; hint: document.readOnly ? "这种格式只能查看和解压" : "向压缩包添加文件"; onClicked: window.pending("添加文件") }
                     ActionButton { text: "删除"; iconName: "trash"; foreground: window.ink; enabled: !document.readOnly && model.selectedCount > 0; hint: "从压缩包中删除选中的项目"; onClicked: window.pending("删除") }
@@ -275,12 +311,12 @@ ApplicationWindow {
                             width: Math.min(560, parent.width - 48)
                             spacing: 0
                             Icon { name: "archive"; Layout.preferredWidth: 64; Layout.preferredHeight: 64; Layout.alignment: Qt.AlignHCenter }
-                            Text { text: window.dropping ? "松开以打开" : "把压缩包拖到这里"; color: window.ink; font.pixelSize: 20; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 16 }
-                            Text { text: "ZIP、7z、RAR、tar 及常见压缩格式，中文文件名自动识别编码"; color: window.muted; font.pixelSize: 13; Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 6 }
+                            Text { text: window.dropping ? "松开即可" : "把压缩包拖到这里"; color: window.ink; font.pixelSize: 20; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 16 }
+                            Text { text: "ZIP、7z、RAR、tar 及常见压缩格式，中文文件名自动识别编码；拖入其他文件则新建压缩包"; color: window.muted; font.pixelSize: 13; Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 6; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap; Layout.fillWidth: true }
                             RowLayout {
                                 Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 22; spacing: 10
                                 ActionButton { objectName: "archiveOpen"; text: "打开压缩包…"; iconName: "extract"; accent: true; implicitHeight: 40; hint: "Ctrl+O"; onClicked: window.chooseArchives() }
-                                ActionButton { objectName: "archiveCreate"; text: "新建压缩包…"; iconName: "compress"; foreground: window.ink; implicitHeight: 40; hint: "把文件压缩成一个压缩包"; onClicked: window.pending("新建压缩包") }
+                                ActionButton { objectName: "archiveCreate"; text: "新建压缩包…"; iconName: "compress"; foreground: window.ink; implicitHeight: 40; hint: "选择要压缩的文件 · Ctrl+N（也可以直接把文件拖进来）"; onClicked: window.app.choose(window, "files") }
                             }
                             Rectangle {
                                 objectName: "archiveRecent"
@@ -384,18 +420,11 @@ ApplicationWindow {
                 const paths = []
                 for (const url of drop.urls) {
                     const uri = String(url)
-                    if (uri.startsWith("file:") && window.app.isFile(uri)) paths.push(uri)
+                    if (uri.startsWith("file:") && window.app.exists(uri)) paths.push(uri)
                 }
-                if (paths.length) { window.openPaths(paths); drop.accept(Qt.CopyAction) }
-                else window.toast("只能打开压缩包文件；压缩文件将在下一阶段推出")
+                if (paths.length) { window.takePaths(paths); drop.accept(Qt.CopyAction) }
+                else window.toast("只能拖入本机的文件和文件夹")
             }
-        }
-        Rectangle {
-            anchors.horizontalCenter: parent.horizontalCenter; anchors.bottom: parent.bottom; anchors.bottomMargin: 56
-            visible: window.toastMessage !== ""; z: 100
-            width: Math.min(window.layoutWidth - 70, toastLabel.implicitWidth + 36); height: toastLabel.implicitHeight + 22; radius: 9
-            color: window.theme.raised; border.color: window.theme.lineStrong
-            Text { id: toastLabel; objectName: "archiveToast"; anchors.centerIn: parent; text: window.toastMessage; color: window.ink; font.pixelSize: 14; width: Math.min(implicitWidth, window.layoutWidth - 106); wrapMode: Text.Wrap }
         }
     }
 
@@ -403,43 +432,34 @@ ApplicationWindow {
         id: contextMenu
         property int row: -1
         NookMenuItem { text: "打开"; iconName: "folder"; visible: window.model.isFolder(contextMenu.row); onTriggered: window.activate(contextMenu.row) }
-        NookMenuItem { text: "解压到…"; iconName: "extract"; onTriggered: window.pending("解压") }
+        NookMenuItem { text: "解压选中的项目到…"; iconName: "extract"; onTriggered: extractDialog.openFor(true) }
+        NookMenuItem { text: "解压选中的项目到当前文件夹"; onTriggered: window.extractHere("", true) }
+        NookMenuItem { text: "解压选中的项目到“" + extractDialog.stem + "”文件夹"; onTriggered: window.extractHere("always", true) }
         NookMenuItem { text: "全选"; iconName: "select-all"; shortcutText: "Ctrl+A"; onTriggered: window.model.selectAll() }
         NookMenuItem { text: "压缩包信息"; iconName: "info"; shortcutText: "Ctrl+I"; onTriggered: infoDialog.open() }
     }
 
-    NookDialog {
+    ArchivePasswordDialog {
         id: passwordDialog
-        objectName: "archivePasswordDialog"
-        iconName: "lock"
-        title: window.document.passwordWrong ? "密码不正确" : "需要密码"
-        message: window.document.passwordWrong ? "请重新输入“" + window.document.name + "”的密码。"
-                                               : "“" + window.document.name + "”的文件列表已加密，输入密码后才能查看。"
-        wrapAnywhere: true
-        closePolicy: Popup.CloseOnEscape
-        function submit() { if (passwordField.text !== "") window.document.submitPassword(passwordField.text) }
-        onOpened: { passwordField.text = ""; passwordField.forceActiveFocus() }
-        onAccepted: submit()
-        onClosed: if (window.document.passwordRequested) window.document.cancelPassword()
-        Field {
-            id: passwordField; objectName: "archivePasswordField"
-            Layout.fillWidth: true; Layout.preferredHeight: 40; leftPadding: 12; rightPadding: 44
-            echoMode: reveal.checked ? TextInput.Normal : TextInput.Password
-            placeholderText: "密码"
-            onAccepted: passwordDialog.submit()
-            ActionButton {
-                id: reveal
-                checkable: true
-                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; anchors.rightMargin: 4
-                implicitWidth: 32; implicitHeight: 32; leftPadding: 7; rightPadding: 7
-                iconName: "hidden"; active: checked; hint: checked ? "隐藏密码" : "显示密码"
-            }
-        }
-        actions: [
-            ActionButton { text: "取消"; foreground: window.ink; implicitHeight: 38; onClicked: passwordDialog.close() },
-            ActionButton { objectName: "archivePasswordOk"; text: "确定"; accent: true; implicitHeight: 38; enabled: passwordField.text !== ""; onClicked: passwordDialog.submit() }
-        ]
+        app: window.app
+        archiveName: window.document.name
+        suggestedName: extractDialog.stem
+        wrong: window.document.passwordWrong
+        listing: true
+        onSubmitted: (password, saveName) => { window.pendingSave = saveName; window.document.submitPassword(password) }
+        onDeclined: if (window.document.passwordRequested) window.document.cancelPassword()
     }
+
+    ArchiveExtractDialog {
+        id: extractDialog
+        app: window.app
+        document: window.document
+        selectedCount: window.model.selectedCount
+        onExtract: choices => window.extractWith(choices)
+    }
+    ArchiveSettings { id: settingsDialog; app: window.app }
+    ArchiveTasks { id: tasksDrawer; app: window.app }
+    ArchivePrompts { id: prompts; app: window.app; host: window }
 
     NookDialog {
         id: infoDialog

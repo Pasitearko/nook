@@ -2,6 +2,7 @@
 #include "archivemodel.h"
 #include <QObject>
 #include <QVariantMap>
+#include <functional>
 #include <memory>
 
 class ArchiveJob;
@@ -26,6 +27,8 @@ class ArchiveDocument : public QObject {
     Q_PROPERTY(bool passwordRequested READ passwordRequested NOTIFY passwordChanged)
     Q_PROPERTY(bool passwordWrong READ passwordWrong NOTIFY passwordChanged)
     Q_PROPERTY(double archiveSize READ archiveSize NOTIFY pathChanged)
+    // The password that opened the file list, if it needed one.
+    Q_PROPERTY(QString password READ password NOTIFY stateChanged)
     Q_PROPERTY(ArchiveModel *model READ model CONSTANT)
   public:
     explicit ArchiveDocument(QObject *parent = nullptr);
@@ -56,6 +59,12 @@ class ArchiveDocument : public QObject {
     Q_INVOKABLE void submitPassword(const QString &password);
     Q_INVOKABLE void cancelPassword();
     QString password() const { return m_password; }
+    // Where a password can come from before the user is asked: one that opened this package
+    // earlier in the session, and the saved ones (tried silently when that setting is on).
+    void setPasswordSources(std::function<QString(const QString &)> session, std::function<QStringList()> saved) {
+        m_sessionPassword = std::move(session);
+        m_savedPasswords = std::move(saved);
+    }
 
   Q_SIGNALS:
     void stateChanged();
@@ -83,4 +92,8 @@ class ArchiveDocument : public QObject {
     QString m_errorCode;
     bool m_passwordRequested = false;
     bool m_passwordWrong = false;
+    bool m_typedPassword = false;
+    QStringList m_candidates;
+    std::function<QString(const QString &)> m_sessionPassword;
+    std::function<QStringList()> m_savedPasswords;
 };

@@ -8,6 +8,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 pkg_check_modules(ICU REQUIRED IMPORTED_TARGET icu-i18n icu-uc)
 pkg_check_modules(LIBARCHIVE REQUIRED IMPORTED_TARGET libarchive)
+pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
 find_package(SQLite3 REQUIRED)
 qt_standard_project_setup(REQUIRES 6.8)
 add_library(nook_core STATIC
@@ -69,19 +70,27 @@ qt_add_shaders(nook "nook-shaders"
     FILES qml/shaders/spotlight.frag qml/shaders/tint.frag)
 target_link_libraries(nook PRIVATE nook_core Qt6::QuickControls2)
 # nook解压缩: its own program and identity (local.nook.archive), sharing nook's look and settings.
-qt_add_executable(nook-archive
-    src/archive/app/main.cpp src/archive/app/archiveapp.cpp src/archive/app/archiveapp.h
+set(NOOK_ARCHIVE_APP_SOURCES
+    src/archive/app/archiveapp.cpp src/archive/app/archiveapp.h
     src/archive/app/archivedocument.cpp src/archive/app/archivedocument.h
-    src/archive/app/archivemodel.cpp src/archive/app/archivemodel.h)
+    src/archive/app/archivemodel.cpp src/archive/app/archivemodel.h
+    src/archive/app/taskqueue.cpp src/archive/app/taskqueue.h
+    src/archive/app/passwordstore.cpp src/archive/app/passwordstore.h
+    src/archive/app/notifier.cpp src/archive/app/notifier.h)
+qt_add_executable(nook-archive src/archive/app/main.cpp ${NOOK_ARCHIVE_APP_SOURCES})
 qt_add_qml_module(nook-archive URI NookArchive VERSION 1.0
     QML_FILES ${NOOK_SHARED_QML} qml/ArchiveMain.qml qml/ArchiveList.qml
+        qml/ArchiveWindow.qml qml/ArchiveField.qml qml/ArchivePasswordField.qml qml/ArchiveCheck.qml
+        qml/ArchiveSwitch.qml qml/ArchiveProgress.qml qml/ArchivePasswordDialog.qml qml/ArchiveConflictDialog.qml
+        qml/ArchivePrompts.qml qml/ArchiveTaskCard.qml qml/ArchiveTasks.qml qml/ArchiveExtractDialog.qml
+        qml/ArchiveSettings.qml qml/ArchiveCompose.qml qml/ArchiveTaskWindow.qml
     RESOURCES ${NOOK_ICONS}
 )
 qt_add_shaders(nook-archive "nook-archive-shaders"
     PREFIX "/qt/qml/NookArchive"
     FILES qml/shaders/spotlight.frag qml/shaders/tint.frag)
 target_include_directories(nook-archive PRIVATE src/archive/app)
-target_link_libraries(nook-archive PRIVATE nook_core nook_archive Qt6::QuickControls2 Qt6::DBus)
+target_link_libraries(nook-archive PRIVATE nook_core nook_archive Qt6::QuickControls2 Qt6::DBus PkgConfig::LIBSECRET)
 add_dependencies(nook-archive nook-archive-worker)
 # Development probe for NTFS volumes (read-only); built, never installed.
 add_executable(nook-ntfs-probe tools/ntfs_probe.cpp)
@@ -129,10 +138,9 @@ if(BUILD_TESTING)
     add_dependencies(nook-archive-tests nook-archive-worker)
     add_test(NAME archive COMMAND nook-archive-tests)
     set_tests_properties(archive PROPERTIES ENVIRONMENT "NOOK_ARCHIVE_WORKER=$<TARGET_FILE:nook-archive-worker>;LANG=zh_CN.UTF-8")
-    qt_add_executable(nook-archive-app-tests tests/archive_app_test.cpp
-        src/archive/app/archiveapp.cpp src/archive/app/archivedocument.cpp src/archive/app/archivemodel.cpp)
+    qt_add_executable(nook-archive-app-tests tests/archive_app_test.cpp ${NOOK_ARCHIVE_APP_SOURCES})
     target_include_directories(nook-archive-app-tests PRIVATE src/archive/app)
-    target_link_libraries(nook-archive-app-tests PRIVATE nook_core nook_archive Qt6::Test Qt6::QuickControls2 Qt6::DBus PkgConfig::LIBARCHIVE)
+    target_link_libraries(nook-archive-app-tests PRIVATE nook_core nook_archive Qt6::Test Qt6::QuickControls2 Qt6::DBus PkgConfig::LIBARCHIVE PkgConfig::LIBSECRET)
     target_compile_definitions(nook-archive-app-tests PRIVATE NOOK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" NOOK_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}")
     add_dependencies(nook-archive-app-tests nook-archive-worker)
     add_test(NAME archive-app COMMAND nook-archive-app-tests)

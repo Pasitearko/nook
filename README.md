@@ -12,7 +12,7 @@
 - **快速预览**：空格打开／关闭预览；可开启静态文件悬停预览，预览窗口支持调整大小。
 - **简洁的右键菜单**：保留常用操作，支持新建文件、打开方式、快速访问、属性和权限设置。
 - **按习惯调整**：深浅主题、界面缩放、列宽保存、快速访问排序，以及数据盘自动挂载设置。
-- **nook解压缩**（开发中）：独立的压缩软件 `nook-archive`，与 nook 同一风格。目前可浏览 ZIP、7z、RAR、tar 等压缩包，中文旧编码文件名自动识别；解压、压缩和右键集成按[设计文档](docs/ARCHIVE-DESIGN.md)分阶段推进。
+- **nook解压缩**（开发中）：独立的压缩软件 `nook-archive`，与 nook 同一风格。浏览、解压、测试 ZIP、7z、RAR、tar 等压缩包，中文旧编码文件名自动识别；新建 ZIP、7z、tar.* 压缩包，支持 AES-256 加密、7z 分卷；任务排队、关窗后台继续、完成通知，密码可存入系统密钥环。nook 右键集成与压缩包内编辑按[设计文档](docs/ARCHIVE-DESIGN.md)分阶段推进。
 - **替代系统文件管理器**：提供 `org.freedesktop.FileManager1`（其他应用的“在文件夹中显示”会打开 nook），并自带与 nook 同风格的“打开／保存”文件选择器（xdg-desktop-portal 后端）。
 
 ## 实机截图
@@ -74,7 +74,7 @@ niri 下让选择器浮动打开的窗口规则见 `/usr/share/doc/nook/niri.exa
 ## 从源码构建
 
 ```bash
-sudo pacman -S --needed base-devel cmake ninja pkgconf qt6-base qt6-declarative qt6-shadertools qt6-svg qt6-imageformats glib2 sqlite icu polkit python libarchive 7zip
+sudo pacman -S --needed base-devel cmake ninja pkgconf qt6-base qt6-declarative qt6-shadertools qt6-svg qt6-imageformats glib2 sqlite icu polkit python libarchive 7zip libsecret
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure

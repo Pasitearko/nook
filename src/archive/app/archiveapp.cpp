@@ -1,5 +1,6 @@
 #include "archiveapp.h"
 #include "application.h"
+#include "archivedocument.h"
 #include "filechooser.h"
 #include "files.h"
 #include <QDBusConnection>
@@ -11,7 +12,10 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QPointer>
+#include <QTimer>
 #include <QUrl>
+#include <QWindow>
+#include <array>
 #include <limits>
 #include <unistd.h>
 
@@ -24,11 +28,30 @@ const QStringList ArchivePatterns{"*.zip", "*.7z", "*.rar", "*.tar", "*.tar.gz",
                                   "*.gz", "*.bz2", "*.xz", "*.zst", "*.lzma", "*.lz4", "*.iso", "*.cab", "*.cpio",
                                   "*.deb", "*.rpm", "*.xar", "*.lzh", "*.lha", "*.wim", "*.jar", "*.apk",
                                   "*.001", "*.r00", "*.z01", "*.zipx", "*.epub"};
-}
+
+
+const QVariantMap PrefDefaults{{"concurrency", 1},       {"conflict", "ask"},      {"subfolder", "smart"},
+                                {"notify", true},         {"autoTryPasswords", false}, {"openAfter", false},
+                                {"format", "zip"},        {"levelStep", 3},          {"testAfter", false},
+                                {"encryptNames", true},   {"zipCrypto", false}};
+
+// What each format calls its suffix, in the order the compression window offers them.
+const QList<QPair<QString, QString>> Formats{{"zip", ".zip"},         {"7z", ".7z"},          {"tar.gz", ".tar.gz"},
+                                             {"tar.xz", ".tar.xz"},   {"tar.zst", ".tar.zst"}, {"tar.bz2", ".tar.bz2"},
+                                             {"tar", ".tar"},         {"gz", ".gz"},          {"xz", ".xz"},
+                                             {"zst", ".zst"},         {"bz2", ".bz2"}};
+} // namespace
 
 ArchiveApp::ArchiveApp(AppSettings *settings, std::function<void(const QString &)> openWindow, QObject *parent)
     : QObject(parent), m_settings(settings), m_openWindow(std::move(openWindow)),
-      m_store(QSettings::IniFormat, QSettings::UserScope, "nook", "archive") {
+      m_store(QSettings::IniFormat, QSettings::UserScope, "nook", "archive"), m_queue(&m_passwords) {
+    m_queue.setConcurrency(prefs().value("concurrency").toInt());
+    m_queue.setAutoTryPasswords(prefs().value("autoTryPasswords").toBool());
+    connect(&m_queue, &TaskQueue::taskFinished, this, &ArchiveApp::finished);
+    connect(&m_queue, &TaskQueue::attention, this, &ArchiveApp::needsAnswer);
+    connect(&m_passwords, &PasswordStore::failed, this, &ArchiveApp::notice);
+    if (prefs().value("autoTryPasswords").toBool())
+        m_passwords.load();
     // nook writes its preferences from another process; pick its changes up as they land.
     const QString preferences = m_settings->store().fileName();
     const auto watch = [this, preferences] {
@@ -106,20 +129,36 @@ bool ArchiveApp::isFile(const QString &location) const {
     return QFileInfo(url.isLocalFile() ? url.toLocalFile() : location).isFile();
 }
 
-void ArchiveApp::chooseArchives(QObject *requester) {
+void ArchiveApp::choose(QObject *requester, const QString &purpose, const QString &startFolder) {
     using nook::portal::Filter;
     using nook::portal::FilterRule;
-    Filter archives{"压缩包", {}};
-    for (const auto &pattern : ArchivePatterns)
-        archives.rules.append(FilterRule{0, pattern});
-    const QList<Filter> filters{archives, Filter{"所有文件", {FilterRule{0, "*"}}}};
-    QString folder = m_store.value("lastFolder").toString();
+    QString folder = startFolder.isEmpty() ? m_store.value("lastFolder").toString() : startFolder;
     if (folder.isEmpty() || !QFileInfo(folder).isDir())
         folder = QDir::homePath();
-    QVariantMap options{{"multiple", true},
-                        {"filters", QVariant::fromValue(filters)},
-                        {"current_folder", QVariant::fromValue(QFile::encodeName(folder) + '\0')},
-                        {"accept_label", "打开"}};
+    QVariantMap options{{"current_folder", QVariant::fromValue(QFile::encodeName(folder) + '\0')}};
+    QString title;
+    if (purpose == "archives") {
+        Filter archives{"压缩包", {}};
+        for (const auto &pattern : ArchivePatterns)
+            archives.rules.append(FilterRule{0, pattern});
+        options.insert("filters", QVariant::fromValue(QList<Filter>{archives, Filter{"所有文件", {FilterRule{0, "*"}}}}));
+        options.insert("multiple", true);
+        options.insert("accept_label", "打开");
+        title = "打开压缩包";
+    } else if (purpose == "files") {
+        options.insert("multiple", true);
+        options.insert("accept_label", "添加");
+        title = "选择要压缩的文件";
+    } else if (purpose == "folders") {
+        options.insert("multiple", true);
+        options.insert("directory", true);
+        options.insert("accept_label", "添加");
+        title = "选择要压缩的文件夹";
+    } else {
+        options.insert("directory", true);
+        options.insert("accept_label", "选择");
+        title = purpose == "save" ? "选择保存位置" : "选择解压位置";
+    }
     // Nook's own chooser, whichever chooser the desktop portal is set up with (same package).
     QDBusMessage call = QDBusMessage::createMethodCall("org.freedesktop.impl.portal.desktop.nook",
                                                        "/org/freedesktop/portal/desktop",
@@ -127,12 +166,12 @@ void ArchiveApp::chooseArchives(QObject *requester) {
     const QString handle = QStringLiteral("/org/freedesktop/portal/desktop/request/nook_archive/r%1_%2")
                                .arg(::getpid())
                                .arg(++m_requests);
-    call << QVariant::fromValue(QDBusObjectPath(handle)) << QStringLiteral("local.nook.archive") << QString()
-         << QStringLiteral("打开压缩包") << options;
+    call << QVariant::fromValue(QDBusObjectPath(handle)) << QStringLiteral("local.nook.archive") << QString() << title
+         << options;
     auto *watcher = new QDBusPendingCallWatcher(
         QDBusConnection::sessionBus().asyncCall(call, std::numeric_limits<int>::max()), this);
     const QPointer<QObject> target(requester);
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, target] {
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, target, purpose] {
         watcher->deleteLater();
         const QDBusMessage reply = watcher->reply();
         QStringList paths;
@@ -147,13 +186,240 @@ void ArchiveApp::chooseArchives(QObject *requester) {
             }
         }
         if (target)
-            Q_EMIT archivesChosen(target, paths);
+            Q_EMIT chosen(target, purpose, paths);
     });
 }
 
-void ArchiveApp::showInFolder(const QString &path) {
+void ArchiveApp::reveal(const QString &path, bool isFolder) {
     QDBusMessage call = QDBusMessage::createMethodCall("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
-                                                       "org.freedesktop.FileManager1", "ShowItems");
+                                                       "org.freedesktop.FileManager1",
+                                                       isFolder ? "ShowFolders" : "ShowItems");
     call << QStringList{QUrl::fromLocalFile(path).toString()} << QString();
     QDBusConnection::sessionBus().asyncCall(call);
 }
+
+QVariantMap ArchiveApp::prefs() const {
+    QVariantMap values = PrefDefaults;
+    for (auto it = PrefDefaults.begin(); it != PrefDefaults.end(); ++it) {
+        const QVariant stored = m_store.value("prefs/" + it.key());
+        if (!stored.isValid())
+            continue;
+        // QSettings hands INI values back as strings.
+        if (it.value().typeId() == QMetaType::Bool)
+            values.insert(it.key(), stored.toString() == "true" || stored.toString() == "1");
+        else if (it.value().typeId() == QMetaType::Int)
+            values.insert(it.key(), stored.toInt());
+        else
+            values.insert(it.key(), stored.toString());
+    }
+    return values;
+}
+
+void ArchiveApp::setPref(const QString &key, const QVariant &value) {
+    if (!PrefDefaults.contains(key))
+        return;
+    m_store.setValue("prefs/" + key, value);
+    if (key == "concurrency")
+        m_queue.setConcurrency(value.toInt());
+    else if (key == "autoTryPasswords") {
+        m_queue.setAutoTryPasswords(value.toBool());
+        if (value.toBool())
+            m_passwords.load();
+    }
+    Q_EMIT prefsChanged();
+}
+
+void ArchiveApp::attach(ArchiveDocument *document) {
+    document->setPasswordSources([this](const QString &path) { return m_queue.sessionPassword(path); },
+                                 [this] { return prefs().value("autoTryPasswords").toBool() ? m_passwords.passwords() : QStringList(); });
+    connect(document, &ArchiveDocument::opened, this, [this, document](const QString &path) {
+        m_queue.rememberPassword(path, document->password());
+    });
+}
+
+void ArchiveApp::openCompose(const QStringList &items) {
+    if (m_factory)
+        m_factory("ArchiveCompose", {{"items", items}});
+}
+
+void ArchiveApp::openTaskWindow(int id) {
+    if (m_factory && !m_queue.task(id).isEmpty())
+        m_factory("ArchiveTaskWindow", {{"taskId", id}});
+}
+
+void ArchiveApp::needsAnswer(int id) {
+    // A window that started the task asks itself; with that one gone, the task gets its own.
+    auto *window = qobject_cast<QWindow *>(m_queue.owner(id));
+    if (!window || !window->isVisible())
+        openTaskWindow(id);
+}
+
+void ArchiveApp::finished(int id) {
+    const QVariantMap task = m_queue.task(id);
+    const QString state = task.value("status").toString();
+    if (state == "done" && task.value("openAfter").toBool() && !task.value("target").toString().isEmpty())
+        reveal(task.value("target").toString(), task.value("targetIsFolder").toBool());
+    if (state == "cancelled" || !prefs().value("notify").toBool())
+        return;
+    // The window that started it shows the outcome itself while someone looks at it.
+    auto *window = qobject_cast<QWindow *>(m_queue.owner(id));
+    if (window && window->isVisible() && window->isActive() && !m_queue.closesOnSuccess(id))
+        return;
+    if (window && m_queue.closesOnSuccess(id) && state != "done")
+        return; // a progress window stays open on failure and says so there
+    const QString kind = task.value("kind").toString();
+    const bool ok = state == "done";
+    const QString title = kind == "extract" ? (ok ? "解压完成" : "解压失败")
+                          : kind == "test"  ? (ok ? "测试通过" : "测试未通过")
+                                            : (ok ? "压缩完成" : "压缩失败");
+    const QString body = task.value("archiveName").toString() + "\n" + task.value("message").toString();
+    if (ok && !task.value("target").toString().isEmpty()) {
+        const QString target = task.value("target").toString();
+        const bool folder = task.value("targetIsFolder").toBool();
+        m_notifier.notify(title, body, false, kind == "test" ? QString() : "打开位置",
+                          kind == "test" ? std::function<void()>() : [this, target, folder] { reveal(target, folder); });
+    } else {
+        m_notifier.notify(title, body, !ok, ok ? QString() : "查看详情",
+                          ok ? std::function<void()>() : [this, id] { openTaskWindow(id); });
+    }
+}
+
+bool ArchiveApp::exists(const QString &path) const { return QFileInfo::exists(localPath(path)); }
+
+QString ArchiveApp::localPath(const QString &location) const {
+    const QUrl url(location);
+    return url.isLocalFile() ? url.toLocalFile() : location;
+}
+
+bool ArchiveApp::looksLikeArchive(const QString &location) const {
+    const QString name = QFileInfo(localPath(location)).fileName().toLower();
+    for (const auto &pattern : ArchivePatterns)
+        if (name.endsWith(QStringView(pattern).mid(1)))
+            return QFileInfo(localPath(location)).isFile();
+    return false;
+}
+
+QString ArchiveApp::folderOf(const QString &path) const { return QFileInfo(localPath(path)).absolutePath(); }
+
+QString ArchiveApp::freeName(const QString &folder, const QString &name) const {
+    const QDir dir(folder);
+    if (!dir.exists(name))
+        return name;
+    // "报告.tar.gz" becomes "报告 (2).tar.gz": the number goes before the whole suffix.
+    QString stem = name, suffix;
+    for (const auto &format : Formats)
+        if (name.endsWith(format.second) && name.size() > format.second.size()) {
+            stem = name.chopped(format.second.size());
+            suffix = format.second;
+            break;
+        }
+    for (int n = 2; n < 10000; ++n) {
+        const QString candidate = QStringLiteral("%1 (%2)%3").arg(stem).arg(n).arg(suffix);
+        if (!dir.exists(candidate))
+            return candidate;
+    }
+    return name;
+}
+
+QVariantList ArchiveApp::formats() const {
+    static const QHash<QString, QString> notes{
+        {"zip", "兼容性最好，Windows 和 macOS 直接打开"}, {"7z", "压缩率高，可加密文件名、分卷"},
+        {"tar.gz", "Linux 常用，速度快"},                 {"tar.xz", "Linux 常用，压缩率高"},
+        {"tar.zst", "速度快，压缩率也不错"},              {"tar.bz2", "较旧的 Linux 格式"},
+        {"tar", "只打包，不压缩"},                        {"gz", "单个文件"},
+        {"xz", "单个文件"},                               {"zst", "单个文件"},
+        {"bz2", "单个文件"}};
+    QVariantList list;
+    for (const auto &[format, suffix] : Formats)
+        list << QVariantMap{{"value", format},
+                            {"suffix", suffix},
+                            {"note", notes.value(format)},
+                            {"single", format == "gz" || format == "xz" || format == "zst" || format == "bz2"},
+                            {"encrypts", format == "zip" || format == "7z"},
+                            {"levels", format != "tar"},
+                            {"volumes", format == "7z"}};
+    return list;
+}
+
+QString ArchiveApp::suffixFor(const QString &format) const {
+    for (const auto &[value, suffix] : Formats)
+        if (value == format)
+            return suffix;
+    return {};
+}
+
+int ArchiveApp::levelFor(const QString &format, int step) const {
+    step = qBound(0, step, 5);
+    static const QHash<QString, std::array<int, 6>> levels{
+        {"zip", {0, 1, 3, 5, 7, 9}},    {"7z", {0, 1, 3, 5, 7, 9}},     {"gz", {0, 1, 3, 6, 8, 9}},
+        {"xz", {0, 1, 3, 6, 8, 9}},     {"bz2", {1, 1, 3, 6, 8, 9}},    {"zst", {1, 1, 2, 3, 9, 19}}};
+    const QString filter = format.startsWith(u"tar.") ? format.mid(4) : format;
+    const auto it = levels.find(filter);
+    return it == levels.end() ? -1 : it.value()[size_t(step)];
+}
+
+QVariantMap ArchiveApp::compressDefaults(const QStringList &items) const {
+    if (items.isEmpty())
+        return {};
+    const QFileInfo first(localPath(items.first()));
+    const QString folder = first.absolutePath();
+    QString name;
+    if (items.size() == 1)
+        name = first.isDir() || first.completeBaseName().isEmpty() ? first.fileName() : first.completeBaseName();
+    else
+        name = QFileInfo(folder).fileName().isEmpty() ? QStringLiteral("压缩包") : QFileInfo(folder).fileName();
+    return {{"name", name},
+            {"folder", folder},
+            {"single", items.size() == 1 && first.isFile()},
+            {"fileName", first.fileName()},
+            {"writable", QFileInfo(folder).isWritable()}};
+}
+
+QVariantList ArchiveApp::compressRequests(const QStringList &items, const QVariantMap &choices) const {
+    const QString format = choices.value("format").toString();
+    const QString suffix = suffixFor(format);
+    const bool single = format == "gz" || format == "xz" || format == "zst" || format == "bz2";
+    const QString folder = choices.value("folder").toString();
+    QVariantMap options;
+    const int level = levelFor(format, choices.value("levelStep").toInt());
+    if (level >= 0)
+        options.insert("level", level);
+    if (format == "7z") {
+        options.insert("encryptNames", choices.value("encryptNames").toBool());
+        if (choices.value("volumeSize").toDouble() > 0)
+            options.insert("volumeSize", choices.value("volumeSize").toDouble());
+    }
+    if (format == "zip")
+        options.insert("zipEncryption", choices.value("zipCrypto").toBool() ? "ZipCrypto" : "AES256");
+    const auto request = [&](const QStringList &group, QString name) {
+        if (single && name.isEmpty())
+            name = QFileInfo(group.first()).fileName();
+        if (!name.endsWith(suffix, Qt::CaseInsensitive))
+            name += suffix;
+        QVariantMap map{{"op", "create"},
+                        {"format", format},
+                        {"output", folder + u'/' + name},
+                        {"items", group},
+                        {"conflict", "ask"},
+                        {"testAfter", choices.value("testAfter").toBool()},
+                        {"options", options}};
+        const QString password = choices.value("password").toString();
+        if (!password.isEmpty() && (format == "zip" || format == "7z"))
+            map.insert("password", password);
+        return QVariant(map);
+    };
+    QStringList paths;
+    for (const auto &item : items)
+        paths << QFileInfo(localPath(item)).absoluteFilePath();
+    QVariantList requests;
+    if (choices.value("separate").toBool() && paths.size() > 1) {
+        for (const auto &path : std::as_const(paths)) {
+            const QVariantMap defaults = compressDefaults({path});
+            requests << request({path}, single ? QString() : defaults.value("name").toString());
+        }
+    } else {
+        requests << request(paths, choices.value("name").toString().trimmed());
+    }
+    return requests;
+}
+

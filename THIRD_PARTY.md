@@ -11,6 +11,7 @@ The application source is Apache-2.0. Dependency licenses remain their own:
 | SQLite | Filename index, FTS5 | Public domain; https://sqlite.org/copyright.html |
 | ICU | Unicode case handling / Han-to-Latin transliteration | Unicode-3.0 and bundled notices; https://unicode-org.github.io/icu/userguide/icu4c/faq.html |
 | libarchive | nook解压缩: reading ZIP, tar and other formats; writing tar and single-file streams | BSD-2-Clause and component notices; https://www.libarchive.org/ |
+| libsecret | nook解压缩: keeping chosen passwords in the desktop keyring (Secret Service) | LGPL-2.1-or-later; https://gitlab.gnome.org/GNOME/libsecret |
 | 7-Zip (separate system executable `7z`) | nook解压缩: 7z, RAR and split volumes; creating 7z and ZIP | LGPL-2.1-or-later with BSD-3-Clause parts and the unRAR license restriction (RAR code may not be used to re-create the RAR compression algorithm); https://www.7-zip.org/license.txt |
 | Poppler utilities (optional, separate system executable) | PDF metadata and page rendering | GPL-2.0-or-later and component notices; https://poppler.freedesktop.org/ |
 | FFmpeg utilities (optional, separate system executable) | Media metadata and cover | License depends on distribution build; https://ffmpeg.org/legal.html |

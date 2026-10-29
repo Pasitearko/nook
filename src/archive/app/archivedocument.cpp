@@ -115,6 +115,13 @@ void ArchiveDocument::start() {
     Q_EMIT loadedChanged();
     setState("loading");
     QVariantMap request{{"op", "list"}, {"archive", m_path}, {"encoding", m_encoding}};
+    m_candidates = m_savedPasswords ? m_savedPasswords() : QStringList();
+    m_typedPassword = false;
+    if (!m_hasPassword && m_sessionPassword) {
+        const QString known = m_sessionPassword(m_path);
+        if (!known.isEmpty())
+            m_candidates.prepend(known);
+    }
     if (m_hasPassword)
         request.insert("password", m_password);
     m_job->start(request);
@@ -129,7 +136,12 @@ void ArchiveDocument::handle(const QVariantMap &event) {
         m_info = event;
         Q_EMIT infoChanged();
     } else if (type == "need-password") {
-        m_passwordWrong = event.value("wrong").toBool();
+        if (!m_candidates.isEmpty()) {
+            m_pendingPassword = m_candidates.takeFirst();
+            m_job->sendPassword(m_pendingPassword);
+            return;
+        }
+        m_passwordWrong = event.value("wrong").toBool() && m_typedPassword;
         m_passwordRequested = true;
         Q_EMIT passwordChanged();
     } else if (type == "done") {
@@ -162,6 +174,7 @@ void ArchiveDocument::submitPassword(const QString &password) {
     if (!m_job || !m_passwordRequested)
         return;
     m_pendingPassword = password;
+    m_typedPassword = true;
     m_passwordRequested = false;
     Q_EMIT passwordChanged();
     m_job->sendPassword(password);

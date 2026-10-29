@@ -2,6 +2,8 @@
 #include "archiveapp.h"
 #include "archivedocument.h"
 #include "archivemodel.h"
+#include "passwordstore.h"
+#include "taskqueue.h"
 #include <QDir>
 #include <QQmlComponent>
 #include <QQmlEngine>
@@ -75,6 +77,33 @@ void writeZip(const QString &target, const QList<QPair<QByteArray, QByteArray>> 
     setlocale(LC_CTYPE, locale.constData());
 }
 
+QString read(const QString &path) {
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString();
+}
+
+void put(const QString &path, const QByteArray &data) {
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(data);
+}
+
+// The application as the tests use it: no keyring, no notifications.
+struct TestApp {
+    AppSettings settings;
+    ArchiveApp app{&settings, [](const QString &) {}};
+    TestApp() {
+        app.passwords()->setMemoryOnly(true);
+        app.setPref("notify", false);
+        app.setPref("autoTryPasswords", false);
+        app.setPref("concurrency", 1);
+    }
+    TaskQueue *queue() { return app.queue(); }
+};
+
+QString status(TaskQueue *queue, int id) { return queue->task(id).value("status").toString(); }
+
 } // namespace
 
 // nook解压缩's browsing side: the tree model, a document backed by the worker, and the window.
@@ -87,6 +116,9 @@ class ArchiveAppTest : public QObject {
         fixture = std::make_unique<QTemporaryDir>(QString(NOOK_BINARY_DIR) + "/archive-app-fixture-XXXXXX");
         QVERIFY(fixture->isValid());
         qputenv("XDG_CONFIG_HOME", QFile::encodeName(fixture->path() + "/config"));
+        // The trash goes where the fixtures are (same filesystem), never the real one.
+        qputenv("XDG_DATA_HOME", QFile::encodeName(fixture->path() + "/data"));
+        QDir().mkpath(fixture->path() + "/data");
     }
 
     void modelTreeAndNavigation() {
@@ -274,6 +306,315 @@ class ArchiveAppTest : public QObject {
         QVERIFY(!document.passwordRequested());
         QVERIFY(document.model()->data(document.model()->index(0), ArchiveModel::EncryptedRole).toBool());
         QVERIFY(document.formatLabel().contains("已加密"));
+    }
+
+    // Phase 3: the task queue.
+    void queueExtractAsksAboutExistingNames() {
+        TestApp t;
+        const QString zip = fixture->path() + "/two.zip";
+        writeZip(zip, {{"a.txt", "new a"}, {"b.txt", "new b"}});
+        const QString target = fixture->path() + "/conflict-target";
+        put(target + "/a.txt", "old a");
+        QSignalSpy attention(t.queue(), &TaskQueue::attention);
+        const int id = t.queue()->start({{"op", "extract"}, {"archive", zip}, {"destination", target}, {"subfolder", "never"}, {"conflict", "ask"}}, {}, nullptr);
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("conflict"), 10000);
+        QCOMPARE(attention.size(), 1);
+        const QVariantMap conflict = t.queue()->task(id).value("conflict").toMap();
+        QCOMPARE(conflict.value("path").toString(), QStringLiteral("a.txt"));
+        QCOMPARE(t.queue()->attentionCount(), 1);
+        t.queue()->resolveConflict(id, "rename", true);
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("done"), 10000);
+        QCOMPARE(read(target + "/a.txt"), QStringLiteral("old a"));
+        QCOMPARE(read(target + "/a (2).txt"), QStringLiteral("new a"));
+        QCOMPARE(read(target + "/b.txt"), QStringLiteral("new b"));
+        const QVariantMap task = t.queue()->task(id);
+        QVERIFY(task.value("message").toString().startsWith("已解压 2 个项目"));
+        QVERIFY(task.value("targetIsFolder").toBool());
+        QCOMPARE(t.queue()->activeCount(), 0);
+    }
+
+    void queueSmartFolderAndDeleteCreated() {
+        TestApp t;
+        const QString zip = fixture->path() + "/smart.zip";
+        writeZip(zip, {{"one.txt", "1"}, {"two.txt", "2"}});
+        const QString target = fixture->path() + "/smart-target";
+        QDir().mkpath(target);
+        const int id = t.queue()->start({{"op", "extract"}, {"archive", zip}, {"destination", target}, {"subfolder", "smart"}}, {}, nullptr);
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("done"), 10000);
+        // Two top-level items: they go into a folder named after the package.
+        QCOMPARE(read(target + "/smart/one.txt"), QStringLiteral("1"));
+        const QVariantMap task = t.queue()->task(id);
+        QCOMPARE(task.value("target").toString(), target + "/smart");
+        QVERIFY(!task.value("targetIsFolder").toBool());
+        QVERIFY(task.value("canDeleteCreated").toBool());
+        t.queue()->deleteCreated(id);
+        QVERIFY(!QFileInfo::exists(target + "/smart"));
+        QVERIFY(!t.queue()->task(id).value("canDeleteCreated").toBool());
+        QVERIFY(t.queue()->task(id).value("message").toString().contains("回收站"));
+    }
+
+    void queuePasswordsSessionAndKeyring() {
+        TestApp t;
+        const QString zip = fixture->path() + "/locked.zip";
+        writeZip(zip, {{"secret.txt", "classified"}}, "right");
+        const QString target = fixture->path() + "/locked-target";
+        QDir().mkpath(target);
+        const int id = t.queue()->start({{"op", "extract"}, {"archive", zip}, {"destination", target}, {"subfolder", "never"}}, {}, nullptr);
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("password"), 10000);
+        QVERIFY(!t.queue()->task(id).value("passwordWrong").toBool());
+        t.queue()->submitPassword(id, "wrong", "");
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("password"), 10000);
+        QTRY_VERIFY(t.queue()->task(id).value("passwordWrong").toBool());
+        t.queue()->submitPassword(id, "right", "工作资料");
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("done"), 10000);
+        QCOMPARE(read(target + "/secret.txt"), QStringLiteral("classified"));
+        // Kept under the chosen name, and remembered for this session.
+        QCOMPARE(t.app.passwords()->entries().size(), 1);
+        QCOMPARE(t.app.passwords()->entries().first().toMap().value("name").toString(), QStringLiteral("工作资料"));
+        QCOMPARE(t.queue()->sessionPassword(zip), QStringLiteral("right"));
+        const int again = t.queue()->start({{"op", "test"}, {"archive", zip}}, {}, nullptr);
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), again), QStringLiteral("done"), 10000);
+        QVERIFY(t.queue()->task(again).value("message").toString().startsWith("测试通过"));
+
+        // Another package with the same password: tried silently once that is switched on.
+        const QString other = fixture->path() + "/locked-too.zip";
+        writeZip(other, {{"x.txt", "x"}}, "right");
+        t.app.passwords()->save("别的", "nope");
+        t.app.setPref("autoTryPasswords", true);
+        QSignalSpy attention(t.queue(), &TaskQueue::attention);
+        const int silent = t.queue()->start({{"op", "test"}, {"archive", other}}, {}, nullptr);
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), silent), QStringLiteral("done"), 10000);
+        QCOMPARE(attention.size(), 0);
+    }
+
+    void queueOrderConcurrencyAndCancel() {
+        TestApp t;
+        const QString zip = fixture->path() + "/order.zip";
+        writeZip(zip, {{"f.txt", QByteArray(1000, 'f')}});
+        const int a = t.queue()->start({{"op", "test"}, {"archive", zip}}, {}, nullptr);
+        const int b = t.queue()->start({{"op", "test"}, {"archive", zip}}, {}, nullptr);
+        const int c = t.queue()->start({{"op", "test"}, {"archive", zip}}, {}, nullptr);
+        QCOMPARE(status(t.queue(), a), QStringLiteral("running"));
+        QCOMPARE(status(t.queue(), b), QStringLiteral("queued"));
+        QVERIFY(t.queue()->task(c).value("canMoveUp").toBool());
+        QVERIFY(!t.queue()->task(b).value("canMoveUp").toBool());
+        t.queue()->move(c, -1);
+        QCOMPARE(t.queue()->data(t.queue()->index(1), TaskQueue::IdRole).toInt(), c);
+        t.queue()->cancel(b);
+        QCOMPARE(status(t.queue(), b), QStringLiteral("cancelled"));
+        QTRY_COMPARE_WITH_TIMEOUT(t.queue()->activeCount(), 0, 10000);
+        QCOMPARE(status(t.queue(), c), QStringLiteral("done"));
+        QCOMPARE(t.queue()->finishedCount(), 3);
+        t.queue()->clearFinished();
+        QCOMPARE(t.queue()->count(), 0);
+
+        t.app.setPref("concurrency", 2);
+        const int d = t.queue()->start({{"op", "test"}, {"archive", zip}}, {}, nullptr);
+        const int e = t.queue()->start({{"op", "test"}, {"archive", zip}}, {}, nullptr);
+        QCOMPARE(status(t.queue(), d), QStringLiteral("running"));
+        QCOMPARE(status(t.queue(), e), QStringLiteral("running"));
+        QTRY_COMPARE_WITH_TIMEOUT(t.queue()->activeCount(), 0, 10000);
+    }
+
+    void compressChoicesBecomeRequests() {
+        TestApp t;
+        const QString base = fixture->path() + "/compress";
+        put(base + "/报告.pdf", "pdf");
+        put(base + "/照片/1.jpg", "jpg");
+        put(base + "/notes", "plain");
+        ArchiveApp &app = t.app;
+        QCOMPARE(app.compressDefaults({base + "/报告.pdf"}).value("name").toString(), QStringLiteral("报告"));
+        QCOMPARE(app.compressDefaults({base + "/照片"}).value("name").toString(), QStringLiteral("照片"));
+        QCOMPARE(app.compressDefaults({base + "/notes"}).value("name").toString(), QStringLiteral("notes"));
+        QCOMPARE(app.compressDefaults({base + "/报告.pdf", base + "/照片"}).value("name").toString(), QStringLiteral("compress"));
+        QVERIFY(app.compressDefaults({base + "/报告.pdf"}).value("single").toBool());
+        QCOMPARE(app.levelFor("zip", 3), 5);
+        QCOMPARE(app.levelFor("tar.zst", 5), 19);
+        QCOMPARE(app.levelFor("tar.bz2", 0), 1);
+        QCOMPARE(app.levelFor("tar", 3), -1);
+        put(base + "/out.tar.gz", "x");
+        QCOMPARE(app.freeName(base, "out.tar.gz"), QStringLiteral("out (2).tar.gz"));
+
+        const QVariantMap choices{{"name", "合集"}, {"folder", base}, {"format", "7z"}, {"levelStep", 3},
+                                  {"password", "pw"}, {"encryptNames", true}, {"volumeSize", 1048576.0}};
+        const QVariantList one = app.compressRequests({base + "/报告.pdf", base + "/照片"}, choices);
+        QCOMPARE(one.size(), 1);
+        const QVariantMap request = one.first().toMap();
+        QCOMPARE(request.value("output").toString(), base + "/合集.7z");
+        QCOMPARE(request.value("password").toString(), QStringLiteral("pw"));
+        QCOMPARE(request.value("options").toMap().value("level").toInt(), 5);
+        QVERIFY(request.value("options").toMap().value("encryptNames").toBool());
+        QCOMPARE(request.value("options").toMap().value("volumeSize").toDouble(), 1048576.0);
+
+        QVariantMap separate = choices;
+        separate.insert("format", "zip");
+        separate.insert("separate", true);
+        separate.insert("password", "");
+        const QVariantList two = app.compressRequests({base + "/报告.pdf", base + "/照片"}, separate);
+        QCOMPARE(two.size(), 2);
+        QCOMPARE(two[0].toMap().value("output").toString(), base + "/报告.zip");
+        QCOMPARE(two[1].toMap().value("output").toString(), base + "/照片.zip");
+        QVERIFY(!two[0].toMap().contains("password"));
+        QCOMPARE(two[0].toMap().value("options").toMap().value("zipEncryption").toString(), QStringLiteral("AES256"));
+
+        // Single-file formats keep the whole file name: notes → notes.gz.
+        QVariantMap stream = choices;
+        stream.insert("format", "gz");
+        stream.insert("name", "");
+        QCOMPARE(app.compressRequests({base + "/notes"}, stream).first().toMap().value("output").toString(), base + "/notes.gz");
+        QVERIFY(!app.compressRequests({base + "/notes"}, stream).first().toMap().contains("password"));
+
+        // Run the separate ones, moving the sources to the trash afterwards.
+        QList<int> ids;
+        for (const auto &r : two)
+            ids << t.queue()->start(r.toMap(), {{"deleteSources", true}}, nullptr);
+        for (int id : ids)
+            QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("done"), 15000);
+        QVERIFY(QFileInfo(base + "/报告.zip").size() > 0);
+        QVERIFY(QFileInfo(base + "/照片.zip").size() > 0);
+        QVERIFY(!QFileInfo::exists(base + "/报告.pdf"));
+        QVERIFY(!QFileInfo::exists(base + "/照片"));
+        QVERIFY(t.queue()->task(ids.first()).value("message").toString().contains("回收站"));
+    }
+
+    void composeWindowCompressesAndCloses() {
+        TestApp t;
+        const QString base = fixture->path() + "/compose";
+        put(base + "/a.txt", "aaa");
+        put(base + "/b.txt", "bbb");
+        QQmlEngine engine;
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveCompose.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        std::unique_ptr<QObject> root(component.createWithInitialProperties(
+            {{"app", QVariant::fromValue(&t.app)}, {"items", QStringList{base + "/a.txt", base + "/b.txt"}}}));
+        QVERIFY2(root, qPrintable(component.errorString()));
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *name = findVisual(window->contentItem(), "archiveComposeName");
+        QVERIFY(name);
+        QCOMPARE(name->property("text").toString(), QStringLiteral("compose"));
+        name->setProperty("text", "两个文件");
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-compose.png"));
+        auto *start = findVisual(window->contentItem(), "archiveComposeStart");
+        QVERIFY(start && start->isEnabled());
+        QMetaObject::invokeMethod(start, "clicked");
+        QTRY_COMPARE_WITH_TIMEOUT(t.queue()->count(), 1, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!window->isVisible(), 15000);
+        QVERIFY(QFileInfo(base + "/两个文件.zip").size() > 0);
+        QCOMPARE(status(t.queue(), t.queue()->data(t.queue()->index(0), TaskQueue::IdRole).toInt()), QStringLiteral("done"));
+    }
+
+    void mainWindowExtractsAndAsks() {
+        TestApp t;
+        const QString zip = fixture->path() + "/ui-extract.zip";
+        writeZip(zip, {{"only/x.txt", "fresh"}});
+        const QString target = fixture->path() + "/ui-target";
+        put(target + "/only/x.txt", "stale");
+        ArchiveDocument document;
+        t.app.attach(&document);
+        QQmlEngine engine;
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveMain.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        std::unique_ptr<QObject> root(component.createWithInitialProperties(
+            {{"app", QVariant::fromValue(&t.app)}, {"document", QVariant::fromValue(&document)}}));
+        QVERIFY2(root, qPrintable(component.errorString()));
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        document.open(zip);
+        QTRY_COMPARE_WITH_TIMEOUT(document.state(), QStringLiteral("ready"), 10000);
+
+        auto *button = findVisual(window->contentItem(), "archiveExtract");
+        QVERIFY(button);
+        QMetaObject::invokeMethod(button, "clicked");
+        auto *destination = findVisual(window->contentItem(), "archiveExtractDestination");
+        QTRY_VERIFY(destination && destination->isVisible());
+        QCOMPARE(destination->property("text").toString(), fixture->path());
+        destination->setProperty("text", target);
+        QTest::qWait(400); // let the dialog finish appearing
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-extract.png"));
+        QMetaObject::invokeMethod(findVisual(window->contentItem(), "archiveExtractStart"), "clicked");
+        QTRY_COMPARE_WITH_TIMEOUT(t.queue()->count(), 1, 5000);
+        const int id = t.queue()->data(t.queue()->index(0), TaskQueue::IdRole).toInt();
+        // The existing file is asked about in this window.
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("conflict"), 10000);
+        QQuickItem *overwrite = nullptr;
+        QTRY_VERIFY((overwrite = findVisual(window->contentItem(), "archiveConflictOverwrite")) && overwrite->isVisible());
+        QTest::qWait(400);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-conflict.png"));
+        QMetaObject::invokeMethod(overwrite, "clicked");
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("done"), 10000);
+        QCOMPARE(read(target + "/only/x.txt"), QStringLiteral("fresh"));
+        auto *drawer = findVisual(window->contentItem(), "archiveTaskCard");
+        QTRY_VERIFY(drawer && drawer->isVisible());
+        QTest::qWait(300);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-tasks.png"));
+        // The rule chosen in the dialog is remembered.
+        QCOMPARE(t.app.prefs().value("subfolder").toString(), QStringLiteral("smart"));
+    }
+
+    void orphanTaskGetsItsOwnWindow() {
+        TestApp t;
+        QQmlEngine engine;
+        std::vector<std::unique_ptr<QObject>> windows;
+        QStringList opened;
+        t.app.setWindowFactory([&](const QString &type, const QVariantMap &properties) -> QObject * {
+            opened << type;
+            QVariantMap initial = properties;
+            initial.insert("app", QVariant::fromValue(&t.app));
+            QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/" + type + ".qml"));
+            if (!component.isReady())
+                qWarning() << component.errorString();
+            windows.emplace_back(component.createWithInitialProperties(initial));
+            return windows.back().get();
+        });
+        const QString zip = fixture->path() + "/orphan.zip";
+        writeZip(zip, {{"o.txt", "new"}});
+        const QString target = fixture->path() + "/orphan-target";
+        put(target + "/o.txt", "old");
+        // Started by no window (as from nook's menu, or after its window closed).
+        const int id = t.queue()->start({{"op", "extract"}, {"archive", zip}, {"destination", target}, {"subfolder", "never"}}, {}, nullptr);
+        QTRY_COMPARE_WITH_TIMEOUT(opened, QStringList{"ArchiveTaskWindow"}, 10000);
+        auto *window = qobject_cast<QQuickWindow *>(windows.back().get());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QVERIFY(t.queue()->ownedBy(id, window));
+        QQuickItem *skip = nullptr;
+        QTRY_VERIFY((skip = findVisual(window->contentItem(), "archiveConflictSkip")) && skip->isVisible());
+        QTest::qWait(300);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-task-window.png"));
+        QMetaObject::invokeMethod(skip, "clicked");
+        QTRY_COMPARE_WITH_TIMEOUT(status(t.queue(), id), QStringLiteral("done"), 10000);
+        QCOMPARE(read(target + "/o.txt"), QStringLiteral("old"));
+        // Done: the little window goes away by itself.
+        QTRY_VERIFY_WITH_TIMEOUT(!window->isVisible(), 5000);
+    }
+
+    void settingsManageSavedPasswords() {
+        TestApp t;
+        t.app.passwords()->save("网盘", "abc123");
+        ArchiveDocument document;
+        QQmlEngine engine;
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/ArchiveMain.qml"));
+        std::unique_ptr<QObject> root(component.createWithInitialProperties(
+            {{"app", QVariant::fromValue(&t.app)}, {"document", QVariant::fromValue(&document)}}));
+        QVERIFY2(root, qPrintable(component.errorString()));
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QMetaObject::invokeMethod(findVisual(window->contentItem(), "archiveSettingsButton"), "clicked");
+        QQuickItem *name = nullptr;
+        QTRY_VERIFY((name = findVisual(window->contentItem(), "archiveNewPasswordName")) && name->isVisible());
+        name->setProperty("text", "公司");
+        findVisual(window->contentItem(), "archiveNewPassword")->setProperty("text", "s3cret");
+        QMetaObject::invokeMethod(findVisual(window->contentItem(), "archiveAddPassword"), "clicked");
+        QCOMPARE(t.app.passwords()->entries().size(), 2);
+        QCOMPARE(t.app.passwords()->entries().first().toMap().value("name").toString(), QStringLiteral("公司"));
+        QTest::qWait(400);
+        QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/archive-app-settings.png"));
+        t.app.passwords()->remove("网盘");
+        QCOMPARE(t.app.passwords()->entries().size(), 1);
     }
 };
 
