@@ -27,14 +27,45 @@ ApplicationWindow {
     property var contextArchive: ({})
     property var deleteUris: []
     property string quickAccessUri: ""
+    property string menuTag: ""
+    // Panel widths while their edge is being dragged (-1: the saved width).
+    property real liveSidebarWidth: -1
+    property real liveDetailsWidth: -1
+    readonly property real sidebarWidth: Math.min(liveSidebarWidth >= 0 ? liveSidebarWidth : prefs.sidebarWidth, Math.max(150, layoutWidth * 0.3))
+    readonly property real detailsWidth: liveDetailsWidth >= 0 ? liveDetailsWidth : prefs.detailsWidth
+    // The file view's size for each view (the toolbar slider), live while its dot is dragged.
+    property real liveListZoom: -1
+    property real liveGridZoom: -1
+    readonly property real listZoom: liveListZoom > 0 ? liveListZoom : Number(prefs.listZoom) || 1
+    readonly property real gridZoom: liveGridZoom > 0 ? liveGridZoom : Number(prefs.gridZoom) || 1
+    function zoomView(value) {
+        app.settings.set(app.grid ? "gridZoom" : "listZoom", value)
+        liveListZoom = -1; liveGridZoom = -1
+    }
+    // The details pane needs the room of a maximized window, and a wide one. Tiling compositors
+    // (niri's full-width column) fill the screen without saying "maximized", so a window that
+    // covers most of its screen counts too.
+    readonly property bool fillsScreen: Screen.width > 0 && width >= Screen.width * 0.9 && height >= Screen.height * 0.85
+    property bool roomy: (visibility === Window.Maximized || visibility === Window.FullScreen || fillsScreen) && layoutWidth >= 1100
+    // Alt+1 … Alt+7 put a colour tag on the selection (or take it off); Alt+0 takes all off.
+    function toggleTag(number) {
+        const model = currentModel()
+        if (!model || !model.selectedCount) return
+        const uris = model.selectedUris
+        if (number === 0) { app.tags.clear(uris); toast("已去掉所选项目的标签"); return }
+        const color = app.tags.tags[number - 1].id
+        const adding = app.tags.state(uris, color) !== 2
+        app.tags.toggle(uris, color)
+        toast((adding ? "已加上标签“" : "已去掉标签“") + app.tags.nameOf(color) + "”")
+    }
     property string inputKind: "mkdir"
     property string inputDestination: ""
     readonly property real uiScale: Math.max(0.75, Math.min(1.5, Number(prefs.uiScale) || 1))
     readonly property real layoutWidth: width / uiScale
     readonly property real layoutHeight: height / uiScale
     readonly property bool editingText: activeFocusItem instanceof TextInput || activeFocusItem instanceof TextEdit
-    readonly property bool dialogsOpen: settingsDialog.visible || propertiesDialog.visible || nameDialog.visible || deleteDialog.visible || conflictDialog.visible || closeDialog.visible || errorsDialog.visible
-    readonly property bool menusOpen: contextMenu.visible || blankMenu.visible || quickAccessMenu.visible || sortBox.popup.visible || scopeBox.popup.visible || typeBox.popup.visible || afterDate.pickerOpen || beforeDate.pickerOpen
+    readonly property bool dialogsOpen: settingsDialog.visible || propertiesDialog.visible || nameDialog.visible || deleteDialog.visible || conflictDialog.visible || closeDialog.visible || errorsDialog.visible || tagNameDialog.visible
+    readonly property bool menusOpen: contextMenu.visible || blankMenu.visible || quickAccessMenu.visible || tagMenu.visible || sortBox.popup.visible || scopeBox.popup.visible || typeBox.popup.visible || afterDate.pickerOpen || beforeDate.pickerOpen
     property bool closingAfterTask: false
     property var hoveredEntry: ({})
     property string suppressedHoverUri: ""
@@ -396,10 +427,7 @@ ApplicationWindow {
                 RowLayout {
                     id: tabBar
                     anchors.fill: parent; anchors.leftMargin: 18; anchors.rightMargin: 14; spacing: 12
-                    Rectangle {
-                        width: 26; height: 26; radius: 8; color: theme.accentSoft
-                        Icon { anchors.centerIn: parent; name: "folder"; width: 20; height: 20 }
-                    }
+                    Icon { objectName: "appLogo"; name: "nook"; width: 30; height: 30; Layout.leftMargin: -2; Layout.rightMargin: -2 }
                     Text { text: "nook"; color: ink; font.pixelSize: 16; font.weight: Font.DemiBold }
                     Rectangle { width: 1; height: 18; color: line; Layout.leftMargin: 4; Layout.rightMargin: 4 }
                     // The tabs as a ListModel kept in step with app.tabs, so a new tab can pop in
@@ -728,11 +756,11 @@ ApplicationWindow {
             Rectangle { Layout.fillWidth: true; height: 1; color: line; opacity: 0.7 }
             RowLayout {
                 Layout.fillWidth: true; Layout.preferredHeight: 51; Layout.leftMargin: 18; Layout.rightMargin: 18; spacing: 5
-                ActionButton { text: window.layoutWidth < 1050 ? "新建" : "新建文件夹"; iconName: "add"; accent: true; enabled: !searching && !app.activePane.uri.startsWith("trash:"); onClicked: window.openInput("mkdir") }
+                ActionButton { text: window.layoutWidth < 1050 ? "新建" : "新建文件夹"; iconName: "add"; accent: true; enabled: !searching && !app.activePane.uri.startsWith("trash:") && !app.activePane.tagView; onClicked: window.openInput("mkdir") }
                 Rectangle { width: 1; height: 19; color: line; Layout.leftMargin: 9; Layout.rightMargin: 9 }
                 ActionButton { plate: toolPlate; iconName: "cut"; hint: "剪切 · Ctrl+X"; foreground: ink; enabled: currentModel().selectedCount > 0; onClicked: { app.copy(true, currentModel()); confirm() } }
                 ActionButton { plate: toolPlate; iconName: "copy"; hint: "复制 · Ctrl+C"; foreground: ink; enabled: currentModel().selectedCount > 0; onClicked: { app.copy(false, currentModel()); confirm() } }
-                ActionButton { plate: toolPlate; iconName: "paste"; hint: "粘贴 · Ctrl+V"; foreground: ink; enabled: !searching; onClicked: app.paste() }
+                ActionButton { plate: toolPlate; iconName: "paste"; hint: "粘贴 · Ctrl+V"; foreground: ink; enabled: !searching && !app.activePane.tagView; onClicked: app.paste() }
                 ActionButton { plate: toolPlate; iconName: "rename"; hint: "重命名 · F2"; foreground: ink; enabled: currentModel().selectedCount === 1 && !app.activePane.uri.startsWith("trash:"); onClicked: window.openInput("rename") }
                 ActionButton { plate: toolPlate; iconName: "trash"; hint: "移入回收站 · Delete"; enabled: currentModel().selectedCount > 0; onClicked: window.removeSelection(false) }
                 Rectangle { width: 1; height: 19; color: line; Layout.leftMargin: 9; Layout.rightMargin: 9 }
@@ -747,18 +775,28 @@ ApplicationWindow {
                     onClicked: { selectionMode = !selectionMode; window.focusActivePane() }
                 }
                 Item { Layout.fillWidth: true }
+                ZoomSlider {
+                    objectName: "viewZoomSlider"
+                    Layout.preferredWidth: window.layoutWidth < 1050 ? 96 : 120; Layout.rightMargin: 6
+                    value: app.grid ? window.gridZoom : window.listZoom
+                    from: app.grid ? 0.6 : 0.8; to: app.grid ? 2.0 : 1.6
+                    label: app.grid ? "网格大小" : "列表大小"
+                    onMoved: value => { if (app.grid) window.liveGridZoom = value; else window.liveListZoom = value }
+                    onCommitted: value => window.zoomView(value)
+                }
                 ActionButton { plate: toolPlate; iconName: "list"; hint: "列表视图"; active: !app.grid; foreground: ink; onClicked: app.grid = false }
                 ActionButton { plate: toolPlate; iconName: "grid"; hint: "网格视图"; active: app.grid; foreground: ink; onClicked: app.grid = true }
                 Rectangle { width: 1; height: 19; color: line; Layout.leftMargin: 4; Layout.rightMargin: 4 }
                 ActionButton { plate: toolPlate; objectName: "dualPaneButton"; iconName: "split"; hint: "左右双栏 · Ctrl+2"; active: app.dual; foreground: ink; onClicked: app.dual = !app.dual }
-                ActionButton { plate: toolPlate; iconName: "terminal"; hint: "在此处打开 kitty"; foreground: ink; onClicked: app.terminal() }
+                ActionButton { plate: toolPlate; objectName: "toolbarTerminalButton"; iconName: "terminal"; hint: "在此处打开 kitty"; foreground: ink; onClicked: app.terminal() }
+                ActionButton { plate: toolPlate; objectName: "detailsPaneButton"; visible: window.roomy; iconName: "details"; hint: "详细信息窗格"; active: prefs.detailsPane === true; foreground: ink; onClicked: app.settings.set("detailsPane", prefs.detailsPane !== true) }
             }
             RowLayout {
                 Layout.fillWidth: true; Layout.fillHeight: true
                 Layout.leftMargin: 10; Layout.rightMargin: 14; Layout.bottomMargin: 10; spacing: 12
                 ColumnLayout {
                     id: sidebarColumn
-                    Layout.preferredWidth: window.layoutWidth < 1000 ? 202 : 224; Layout.minimumWidth: window.layoutWidth < 1000 ? 202 : 224; Layout.maximumWidth: window.layoutWidth < 1000 ? 202 : 224; Layout.fillHeight: true
+                    Layout.preferredWidth: window.sidebarWidth; Layout.minimumWidth: window.sidebarWidth; Layout.maximumWidth: window.sidebarWidth; Layout.fillHeight: true
                     spacing: 10
                     Sidebar {
                         id: sidebar
@@ -766,6 +804,24 @@ ApplicationWindow {
                         Layout.fillWidth: true; Layout.fillHeight: true
                         controller: app; host: window; searching: window.searching
                         onActivate: place => { searchBox.clear(); app.activatePlace(place) }
+                        onOpenTag: color => { searchBox.clear(); app.navigate("tag:" + color) }
+                        onTagMenuRequested: (color, x, y) => {
+                            menuTag = color
+                            const p = sidebar.mapToItem(workspace, x, y)
+                            tagMenu.x = Math.min(p.x, layoutWidth - tagMenu.width - 8)
+                            tagMenu.y = Math.min(p.y, layoutHeight - tagMenu.implicitHeight - 8)
+                            tagMenu.reopen()
+                        }
+                        // Its right edge drags the sidebar's width (double-click: the default).
+                        ResizeGrip {
+                            objectName: "sidebarGrip"
+                            reference: workspace
+                            x: parent.width + 1; height: parent.height
+                            value: window.sidebarWidth; minimum: 150; maximum: 380
+                            onMoved: width => window.liveSidebarWidth = width
+                            onFinished: width => { app.settings.set("sidebarWidth", Math.round(width)); window.liveSidebarWidth = -1 }
+                            onReset: app.settings.set("sidebarWidth", 224)
+                        }
                         onRemoveRequested: (uri, x, y) => {
                             quickAccessUri = uri
                             const p = sidebar.mapToItem(workspace, x, y)
@@ -843,6 +899,8 @@ ApplicationWindow {
                             SplitView.fillWidth: true; SplitView.minimumWidth: 240
                             directoryModel: window.searching ? app.search.model : app.left
                             controller: app; gridMode: app.grid; focusedPane: app.activeSide === 0; searchMode: window.searching; dark: window.dark; dense: prefs.dense
+                            listZoom: window.listZoom; gridZoom: window.gridZoom; interfaceScale: window.uiScale
+                            onZoomStep: delta => window.zoomView(Math.round(((app.grid ? window.gridZoom : window.listZoom) + delta) * 100) / 100)
                             onFocused: app.activeSide = 0
                             onActivated: entry => window.activate(entry)
                             onPreviewRequested: entry => window.preview(entry)
@@ -857,6 +915,8 @@ ApplicationWindow {
                             visible: app.dual && !window.searching
                             SplitView.fillWidth: false; SplitView.preferredWidth: splitView.width / 2; SplitView.minimumWidth: visible ? 240 : 0
                             directoryModel: app.right; controller: app; gridMode: app.grid; focusedPane: app.activeSide === 1; dark: window.dark; dense: prefs.dense
+                            listZoom: window.listZoom; gridZoom: window.gridZoom; interfaceScale: window.uiScale
+                            onZoomStep: delta => window.zoomView(Math.round(((app.grid ? window.gridZoom : window.listZoom) + delta) * 100) / 100)
                             onFocused: app.activeSide = 1
                             onActivated: entry => window.activate(entry)
                             onPreviewRequested: entry => window.preview(entry)
@@ -868,6 +928,32 @@ ApplicationWindow {
                         }
                     }
                     ActionButton { visible: searching && app.search.hasMore; text: "加载更多结果"; foreground: ink; Layout.alignment: Qt.AlignHCenter; onClicked: app.search.nextPage() }
+                }
+                DetailsPane {
+                    id: detailsPane
+                    objectName: "detailsPane"
+                    readonly property bool wanted: window.roomy && prefs.detailsPane === true
+                    controller: app; host: window; model: window.currentModel()
+                    Layout.fillHeight: true
+                    // Slides open from the right edge and closes back into it; its left edge drags its width.
+                    Layout.preferredWidth: wanted ? Math.min(window.detailsWidth, Math.max(260, window.layoutWidth * 0.4)) : 0
+                    Layout.maximumWidth: Layout.preferredWidth
+                    Behavior on Layout.preferredWidth { enabled: prefs.animations && window.liveDetailsWidth < 0 && !detailsGrip.dragging; NumberAnimation { duration: Motion.smooth.ms; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.smooth.curve } }
+                    visible: Layout.preferredWidth > 1
+                    opacity: wanted ? 1 : 0
+                    Behavior on opacity { enabled: prefs.animations; NumberAnimation { duration: 160 } }
+                    onHideRequested: app.settings.set("detailsPane", false)
+                    ResizeGrip {
+                        id: detailsGrip
+                        objectName: "detailsGrip"
+                        reference: workspace
+                        x: 0; height: parent.height; z: 10
+                        direction: -1
+                        value: window.detailsWidth; minimum: 260; maximum: 560
+                        onMoved: width => window.liveDetailsWidth = width
+                        onFinished: width => { app.settings.set("detailsWidth", Math.round(width)); window.liveDetailsWidth = -1 }
+                        onReset: app.settings.set("detailsWidth", 304)
+                    }
                 }
             }
             Rectangle {
@@ -894,6 +980,15 @@ ApplicationWindow {
     // Backspace goes up one level, as in Windows Explorer; never while typing in a field.
     Shortcut { sequence: "Backspace"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && !window.searching && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: app.activePane.up() }
     Shortcut { sequence: "Delete"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: window.removeSelection(false) }
+    Instantiator {
+        model: 8
+        delegate: Shortcut {
+            required property int index
+            sequence: "Alt+" + index
+            enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive || detailsPane.activeFocus)
+            onActivated: window.toggleTag(index)
+        }
+    }
     Shortcut { sequence: "Shift+Delete"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: window.removeSelection(true) }
 
     NookMenu {
@@ -921,7 +1016,50 @@ ApplicationWindow {
         }
         NookMenuItem { text: "快速预览"; iconName: "document"; shortcutText: "Space"; onTriggered: window.preview(contextEntry) }
         NookMenuItem { objectName: "addQuickAccessMenuItem"; text: "添加到快速访问"; iconName: "add"; enabled: !!contextEntry.folder && contextModel && contextModel.selectedCount === 1 && !contextEntry.fileUri.startsWith("trash:"); onTriggered: app.addQuickAccess(contextEntry.fileUri) }
-        NookMenuItem { text: "打开所在位置"; iconName: "folder"; visible: window.searching; onTriggered: { let uri = contextEntry.fileUri; searchBox.clear(); app.reveal(uri) } }
+        NookMenuItem { text: "打开所在位置"; iconName: "folder"; visible: window.searching || app.activePane.tagView; onTriggered: { let uri = contextEntry.fileUri; searchBox.clear(); app.reveal(uri) } }
+        // The colour tags, as a row of dots: each puts its tag on the selection or takes it off,
+        // and the menu stays open for another.
+        MenuItem {
+            id: tagMenuRow
+            objectName: "tagMenuRow"
+            visible: contextModel && contextModel.selectedCount > 0 && contextModel.selectedUris.every(u => String(u).startsWith("file:"))
+            implicitWidth: 264; implicitHeight: visible ? 42 : 0; height: implicitHeight
+            leftPadding: 11; rightPadding: 8
+            hoverEnabled: false
+            background: Item {}
+            contentItem: RowLayout {
+                spacing: 2
+                Icon { name: "tag"; Layout.preferredWidth: 17; Layout.preferredHeight: 17 }
+                Text { text: "标签"; color: ink; font.pixelSize: 14; Layout.leftMargin: 8; Layout.fillWidth: true }
+                Repeater {
+                    model: app.tags.tags
+                    AbstractButton {
+                        id: tagDotButton
+                        required property var modelData
+                        required property int index
+                        objectName: "tagMenuDot_" + modelData.id
+                        readonly property int state: contextModel ? (app.tags.tags, app.tags.state(contextModel.selectedUris, modelData.id)) : 0
+                        implicitWidth: 22; implicitHeight: 24
+                        hoverEnabled: true
+                        focusPolicy: Qt.NoFocus
+                        onClicked: app.tags.toggle(contextModel.selectedUris, modelData.id)
+                        background: Rectangle {
+                            radius: 11
+                            color: tagDotButton.hovered ? theme.hover : "transparent"
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: tagDotButton.state > 0 ? 16 : 12; height: width; radius: width / 2
+                                color: theme.tagColor(tagDotButton.modelData.id)
+                                Behavior on width { enabled: prefs.animations; NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+                                Text { anchors.centerIn: parent; visible: tagDotButton.state === 2; text: "✓"; color: "white"; font.pixelSize: 10; font.bold: true }
+                                Rectangle { anchors.centerIn: parent; visible: tagDotButton.state === 1; width: 6; height: 2; radius: 1; color: "white" }
+                            }
+                        }
+                        NookToolTip { visible: tagDotButton.hovered; text: tagDotButton.modelData.name + " · Alt+" + (tagDotButton.index + 1); delay: 400 }
+                    }
+                }
+            }
+        }
         NookMenuItem { objectName: "copyPathMenuItem"; text: contextModel && contextModel.selectedCount > 1 ? "复制完整路径（" + contextModel.selectedCount + " 项）" : "复制完整路径"; iconName: "copy"; shortcutText: "Ctrl Shift C"; enabled: contextModel && contextModel.selectedCount > 0; onTriggered: app.copyPaths(contextModel.selectedUris) }
         MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
         NookMenuItem { objectName: "extractHereMenuItem"; text: contextArchive.single ? "解压到当前文件夹" : "解压到当前文件夹（各自的文件夹）"; iconName: "extract"; visible: !!contextArchive.extract; onTriggered: app.archive("extract-here", contextModel.selectedUris) }
@@ -932,7 +1070,7 @@ ApplicationWindow {
         MenuSeparator { visible: !!contextArchive.compress; height: visible ? implicitHeight : 0; contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
         NookMenuItem { text: "复制"; iconName: "copy"; shortcutText: "Ctrl C"; onTriggered: app.copy(false, contextModel) }
         NookMenuItem { text: "剪切"; iconName: "cut"; shortcutText: "Ctrl X"; onTriggered: app.copy(true, contextModel) }
-        NookMenuItem { text: "粘贴到此处"; iconName: "paste"; shortcutText: "Ctrl V"; enabled: !window.searching; onTriggered: app.paste() }
+        NookMenuItem { text: "粘贴到此处"; iconName: "paste"; shortcutText: "Ctrl V"; enabled: !window.searching && !app.activePane.tagView; onTriggered: app.paste() }
         NookMenuItem { text: "重命名"; iconName: "rename"; shortcutText: "F2"; enabled: currentModel().selectedCount === 1 && !app.activePane.uri.startsWith("trash:"); onTriggered: window.openInput("rename") }
         NookMenuItem { text: "从回收站恢复"; iconName: "refresh"; visible: app.activePane.uri.startsWith("trash:"); onTriggered: app.operations.run("restore", currentModel().selectedUris) }
         MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
@@ -944,19 +1082,71 @@ ApplicationWindow {
     NookMenu {
         id: blankMenu
         objectName: "blankContextMenu"
+        NookMenuItem { objectName: "blankRefreshMenuItem"; text: "刷新"; iconName: "refresh"; shortcutText: "F5"; enabled: !!contextModel; onTriggered: { contextModel.refresh(); app.refreshPlaces() } }
         NookMenuItem { objectName: "undoFileOperationMenuItem"; text: app.operations.undoText; iconName: "undo"; shortcutText: "Ctrl Z"; enabled: app.operations.canUndo; onTriggered: app.operations.undo() }
         MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
         NookMenu {
             title: "新建"; objectName: "createSubmenu"
-            enabled: !window.searching && contextModel && !contextModel.uri.startsWith("trash:")
+            enabled: !window.searching && contextModel && !contextModel.uri.startsWith("trash:") && !contextModel.tagView
             NookMenuItem { objectName: "newFolderMenuItem"; text: "文件夹"; iconName: "folder"; onTriggered: { window.openInput("mkdir"); inputDestination = contextModel.uri } }
             NookMenuItem { objectName: "newTextMenuItem"; text: "文本文档"; iconName: "document"; onTriggered: { window.openInput("touch"); inputDestination = contextModel.uri } }
         }
-        NookMenuItem { objectName: "blankTerminalMenuItem"; text: "在此处打开 kitty"; iconName: "terminal"; enabled: !window.searching && contextModel && !contextModel.uri.startsWith("trash:"); onTriggered: app.terminal(contextModel.uri) }
-        NookMenuItem { text: "粘贴"; iconName: "paste"; enabled: !window.searching && contextModel && !contextModel.uri.startsWith("trash:"); onTriggered: app.paste() }
+        NookMenuItem { objectName: "blankTerminalMenuItem"; text: "在此处打开 kitty"; iconName: "terminal"; enabled: !window.searching && contextModel && !contextModel.uri.startsWith("trash:") && !contextModel.tagView; onTriggered: app.terminal(contextModel.uri) }
+        NookMenuItem { text: "粘贴"; iconName: "paste"; enabled: !window.searching && contextModel && !contextModel.uri.startsWith("trash:") && !contextModel.tagView; onTriggered: app.paste() }
         NookMenuItem { objectName: "copyCurrentPathMenuItem"; text: "复制当前路径"; iconName: "copy"; enabled: !window.searching && !!contextModel; onTriggered: app.copyPaths([contextModel.uri]) }
         MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
         NookMenuItem { objectName: "blankPropertiesMenuItem"; text: "属性"; iconName: "settings"; enabled: !window.searching && !!contextModel; onTriggered: window.inspectProperties(contextModel.uri) }
+    }
+    NookMenu {
+        id: tagMenu
+        objectName: "tagMenu"
+        NookMenuItem { objectName: "openTagMenuItem"; text: "打开"; iconName: "tag"; onTriggered: { searchBox.clear(); app.navigate("tag:" + menuTag) } }
+        NookMenuItem { objectName: "renameTagMenuItem"; text: "重命名…"; iconName: "rename"; onTriggered: tagNameDialog.openFor(menuTag) }
+        MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
+        NookMenuItem {
+            objectName: "clearTagMenuItem"
+            readonly property int count: menuTag ? (app.tags.tags.find(t => t.id === menuTag) || {count: 0}).count : 0
+            text: count > 0 ? "从 " + count + " 个项目去掉此标签" : "从所有项目去掉此标签"; iconName: "close"; danger: true
+            enabled: count > 0
+            onTriggered: app.tags.clearColor(menuTag)
+        }
+    }
+    NookDialog {
+        id: tagNameDialog
+        objectName: "tagNameDialog"
+        property string color: ""
+        function openFor(id) {
+            color = id
+            tagNameInput.text = app.tags.nameOf(id)
+            open()
+            tagNameInput.forceActiveFocus(); tagNameInput.selectAll()
+        }
+        function submit() { app.tags.rename(color, tagNameInput.text); close() }
+        iconName: "tag"
+        title: "重命名标签"
+        message: "颜色不变，只改名字。名字留空会恢复默认名称。"
+        onAccepted: submit()
+        onClosed: window.focusActivePane()
+        RowLayout {
+            Layout.fillWidth: true; spacing: 10
+            Rectangle { width: 14; height: 14; radius: 7; color: theme.tagColor(tagNameDialog.color) }
+            TextField {
+                id: tagNameInput; objectName: "tagNameInput"
+                ContextMenu.menu: null
+                TextMenuArea { target: tagNameInput }
+                Layout.fillWidth: true; Layout.preferredHeight: 40
+                selectByMouse: true; maximumLength: 40
+                font.pixelSize: 15; color: ink
+                leftPadding: 12; rightPadding: 12
+                selectionColor: theme.selection; selectedTextColor: theme.selectionText
+                onAccepted: { if (!inputMethodComposing) tagNameDialog.submit() }
+                background: Rectangle { radius: 9; color: theme.field; border.width: 1; border.color: tagNameInput.activeFocus ? accent : line }
+            }
+        }
+        actions: [
+            ActionButton { text: "取消"; foreground: ink; implicitHeight: 38; onClicked: tagNameDialog.close() },
+            ActionButton { objectName: "saveTagNameButton"; text: "保存"; accent: true; implicitHeight: 38; onClicked: tagNameDialog.submit() }
+        ]
     }
     NookMenu {
         id: quickAccessMenu

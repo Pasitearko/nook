@@ -74,4 +74,17 @@ QtObject {
     readonly property color tooltip: dark ? "#3a3834" : "#2d2924"
     readonly property color tooltipText: dark ? "#ece8df" : "#f4f1ea"
     readonly property color shadow: dark ? "#40000000" : "#1f2a1d10"
+
+    // Colour tags, muted to sit with the warm neutrals; a touch lighter on dark.
+    function tagColor(id) {
+        switch (id) {
+        case "red": return dark ? "#e5766b" : "#cf5246"
+        case "orange": return dark ? "#eb9c5c" : "#d9803a"
+        case "yellow": return dark ? "#e2c25c" : "#c9a02e"
+        case "green": return dark ? "#8cbd7f" : "#5c9a57"
+        case "blue": return dark ? "#78a6dc" : "#4a82c3"
+        case "purple": return dark ? "#b496e0" : "#8d66c0"
+        default: return dark ? "#aaa397" : "#8f887c"
+        }
+    }
 }

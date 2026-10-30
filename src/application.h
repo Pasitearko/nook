@@ -6,6 +6,7 @@
 #include "operations.h"
 #include "preview.h"
 #include "searchindex.h"
+#include "tags.h"
 #include "appearance.h"
 #include <QJsonObject>
 #include <QSettings>
@@ -58,6 +59,11 @@ class Application : public QObject {
     Q_PROPERTY(Operations *operations READ operations CONSTANT)
     Q_PROPERTY(SearchIndex *search READ search CONSTANT)
     Q_PROPERTY(Preview *preview READ preview CONSTANT)
+    // The details pane (beside the files in a maximized window): its own preview, and the facts
+    // describe() gathered about the selection.
+    Q_PROPERTY(Preview *glance READ glance CONSTANT)
+    Q_PROPERTY(QVariantMap facts READ facts NOTIFY factsChanged)
+    Q_PROPERTY(TagStore *tags READ tags CONSTANT)
     Q_PROPERTY(FileProperties *properties READ properties CONSTANT)
     Q_PROPERTY(DiskMounts *diskMounts READ diskMounts CONSTANT)
     Q_PROPERTY(AppSettings *settings READ settings CONSTANT)
@@ -95,6 +101,20 @@ class Application : public QObject {
     Preview *preview() {
         return &m_preview;
     }
+    Preview *glance() {
+        return &m_glance;
+    }
+    QVariantMap facts() const {
+        return m_facts;
+    }
+    TagStore *tags() const {
+        return TagStore::instance();
+    }
+    // One item: where it is, its size (a folder's is added up in the background), what it holds
+    // and its times. Several: how many and their size together.
+    Q_INVOKABLE void describe(const QStringList &uris);
+    // A folder opens in a new tab; a file's folder does, with the file selected.
+    Q_INVOKABLE void openInNewTab(const QString &uri);
     FileProperties *properties() { return &m_properties; }
     DiskMounts *diskMounts() { return &m_diskMounts; }
     AppSettings *settings() const {
@@ -179,6 +199,7 @@ class Application : public QObject {
     void notice(const QString &message);
     void ntfsBusyChanged();
     void restartRequested();
+    void factsChanged();
     void installedVersionChanged();
 
   private:
@@ -194,7 +215,10 @@ class Application : public QObject {
     SearchIndex *m_search;
     Operations *m_ops;
     AppSettings *m_settings;
-    Preview m_preview;
+    Preview m_preview, m_glance;
+    QVariantMap m_facts;
+    QStringList m_described;
+    std::shared_ptr<std::atomic_bool> m_describing;
     FileProperties m_properties;
     DiskMounts m_diskMounts;
     QList<QFutureWatcher<QString> *> m_openWatchers;

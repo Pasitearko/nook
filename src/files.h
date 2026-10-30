@@ -25,6 +25,12 @@ QString iconFor(const QString &name, bool directory);
 QVariantMap entryMap(const Entry &entry);
 QList<Entry> enumerate(const QString &uri, bool hidden, const Cancel &cancel, QString *error,
                        const std::function<void(QList<Entry>)> &batch = {});
+// One item, described as enumerate() describes a folder's; false when it is gone.
+bool entryAt(const QString &uri, Entry *entry);
+// A tag view ("tag:red"): every item carrying that colour, wherever it is.
+inline bool tagUri(const QString &uri) {
+    return uri.startsWith(QLatin1String("tag:"));
+}
 QStringList localRoots();
 bool sidebarDataPartition(const QString &filesystem, const QString &partitionType, const QString &label);
 bool excludedPath(const QByteArray &path, const QStringList &extra);

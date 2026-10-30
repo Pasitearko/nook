@@ -4,6 +4,10 @@
 #include <QClipboard>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFileInfo>
+#include <QPointer>
+#include <QElapsedTimer>
+#include <QDirIterator>
 #include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -15,11 +19,14 @@
 #include <QStyleHints>
 #include <QUrl>
 #include <QSaveFile>
+#include <QStringDecoder>
 #include <algorithm>
 #include <utility>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cmath>
+
+extern char **environ;
 #include <QtConcurrent>
 
 AppSettings::AppSettings(QObject *parent)
@@ -49,11 +56,19 @@ QVariantMap AppSettings::values() const {
             {"quickAccess", list("quickAccess")},
             {"quickAccessOrder", list("quickAccessOrder")},
             {"uiScale", m_store->value("uiScale", 1.0).toDouble()},
+            // The file view's own size, one for the list and one for the grid. Until first set it
+            // is the interface scale, which used to size the file view too, so nothing jumps.
+            {"listZoom", m_store->value("listZoom", m_store->value("uiScale", 1.0)).toDouble()},
+            {"gridZoom", m_store->value("gridZoom", m_store->value("uiScale", 1.0)).toDouble()},
             {"startFolder", m_store->value("startFolder", QDir::homePath()).toString()},
             {"hiddenPlaces", list("hiddenPlaces")},
             {"backgroundIndex", flag("backgroundIndex", true)},
             {"ntfsJournal", flag("ntfsJournal", false)},
             {"chooserGrid", flag("chooserGrid", false)},
+            {"detailsPane", flag("detailsPane", true)},
+            {"detailsWidth", m_store->value("detailsWidth", 304).toInt()},
+            {"sidebarWidth", m_store->value("sidebarWidth", 224).toInt()},
+            {"sidebarSections", m_store->value("sidebarSections", QStringList{"places", "tags", "disks"}).toStringList()},
             {"indexSystem", flag("indexSystem", false)},
             {"indexNoise", flag("indexNoise", false)},
             {"roots", list("roots")},
@@ -68,8 +83,27 @@ void AppSettings::set(const QString &key, const QVariant &value) {
         if (!std::isfinite(scale)) return;
         safeValue = qBound(0.75, scale, 1.5);
     }
+    if (key == "listZoom" || key == "gridZoom") {
+        const auto zoom = value.toDouble();
+        if (!std::isfinite(zoom)) return;
+        safeValue = key == "listZoom" ? qBound(0.8, zoom, 1.6) : qBound(0.6, zoom, 2.0);
+    }
     if (key == "scrollSpeed")
         safeValue = qBound(1, value.toInt(), 8);
+    if (key == "detailsWidth")
+        safeValue = qBound(260, value.toInt(), 560);
+    if (key == "sidebarWidth")
+        safeValue = qBound(150, value.toInt(), 380);
+    if (key == "sidebarSections") {
+        // The three sections, each once, in the order given.
+        QStringList order;
+        for (const auto &name : value.toStringList())
+            if (QStringList{"places", "tags", "disks"}.contains(name) && !order.contains(name))
+                order << name;
+        if (order.size() != 3)
+            return;
+        safeValue = order;
+    }
     if (key == "columnWidths") {
         const auto widths = value.toList();
         if (!widths.isEmpty() && widths.size() != 4)
@@ -95,7 +129,7 @@ QStringList quickAccessState(AppSettings *settings) {
 } // namespace
 Application::Application(SearchIndex *search, Operations *ops, AppSettings *settings, bool restore,
                          QObject *parent, const QJsonObject &state)
-    : QObject(parent), m_search(search), m_ops(ops), m_settings(settings), m_preview(this) {
+    : QObject(parent), m_search(search), m_ops(ops), m_settings(settings), m_preview(this), m_glance(this) {
     m_search = search->createSession(this);
     // Migrate away from visit tracking; executable undo history stays in memory.
     settings->store().remove("recentLocations");
@@ -152,6 +186,8 @@ Application::Application(SearchIndex *search, Operations *ops, AppSettings *sett
     refreshPlaces();
 }
 Application::~Application() {
+    if (m_describing)
+        *m_describing = true;
     for (auto *watcher : m_openWatchers) {
         watcher->disconnect(this);
         watcher->waitForFinished();
@@ -392,7 +428,25 @@ void Application::terminal(const QString &uri) {
         Q_EMIT notice(QStringLiteral("此位置无法打开终端"));
         return;
     }
-    if (!QProcess::startDetached("kitty", {"--directory", path}))
+    // kitty is a Python program and quits before its window opens when any variable it hands to
+    // the shell is not valid UTF-8 (a shell can leave "_" holding a mangled path), so it gets
+    // only the variables that are, and never "_", which names nook and not kitty.
+    QProcessEnvironment environment;
+    for (char **entry = environ; *entry; ++entry) {
+        QStringDecoder utf8(QStringDecoder::Utf8);
+        const QString text = utf8(QByteArrayView(*entry));
+        const qsizetype equals = text.indexOf('=');
+        if (utf8.hasError() || equals <= 0 || text.startsWith(QLatin1String("_=")))
+            continue;
+        environment.insert(text.left(equals), text.mid(equals + 1));
+    }
+    QProcess kitty;
+    kitty.setProgram(QStringLiteral("kitty"));
+    kitty.setArguments({QStringLiteral("--directory"), path});
+    kitty.setWorkingDirectory(path);
+    kitty.setProcessEnvironment(environment);
+    kitty.setStandardInputFile(QProcess::nullDevice());
+    if (!kitty.startDetached())
         Q_EMIT notice(QStringLiteral("无法启动 kitty，请检查安装"));
 }
 void Application::copy(bool cut, DirectoryModel *source) {
@@ -414,7 +468,7 @@ void Application::copy(bool cut, DirectoryModel *source) {
     Q_EMIT notice(cut ? QStringLiteral("已剪切选中项目") : QStringLiteral("已复制选中项目"));
 }
 void Application::paste() {
-    if (!activePane())
+    if (!activePane() || nook::tagUri(activePane()->uri()))
         return;
     const auto *mime = QGuiApplication::clipboard()->mimeData();
     QStringList uris;
@@ -448,7 +502,7 @@ QStringList Application::dropSources(const QStringList &uris, const QString &des
     return result;
 }
 bool Application::canDrop(const QStringList &uris, const QString &destination) const {
-    return !destination.isEmpty() && !dropSources(uris, destination).isEmpty();
+    return !destination.isEmpty() && !nook::tagUri(destination) && !dropSources(uris, destination).isEmpty();
 }
 QString Application::dropAction(const QStringList &uris, const QString &destination) const {
     const auto sources = dropSources(uris, destination);
@@ -848,6 +902,112 @@ void Application::saveSession() {
     auto data = QJsonDocument(state()["tabs"].toArray()).toJson(QJsonDocument::Compact);
     if (m_settings->store().value("session").toByteArray() != data)
         m_settings->store().setValue("session", data);
+}
+namespace {
+QString timeText(const QDateTime &time) {
+    return time.isValid() ? time.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")) : QStringLiteral("—");
+}
+// A folder's contents added up, giving up after a while on very large trees (then "partial").
+struct Tally {
+    qint64 bytes = 0;
+    int files = 0, folders = 0;
+    bool partial = false;
+};
+void tally(const QString &path, Tally *total, const std::shared_ptr<std::atomic_bool> &cancel, QElapsedTimer &clock) {
+    QDirIterator it(path, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        if (cancel->load() || clock.elapsed() > 4000) {
+            total->partial = true;
+            return;
+        }
+        const QFileInfo info = it.nextFileInfo();
+        if (info.isDir() && !info.isSymLink())
+            ++total->folders;
+        else {
+            ++total->files;
+            total->bytes += info.isSymLink() ? 0 : info.size();
+        }
+    }
+}
+} // namespace
+void Application::describe(const QStringList &uris) {
+    if (uris == m_described && !m_facts.isEmpty())
+        return;
+    m_described = uris;
+    if (m_describing)
+        *m_describing = true;
+    auto cancel = std::make_shared<std::atomic_bool>(false);
+    m_describing = cancel;
+    m_facts = {{"uris", uris}, {"busy", true}};
+    Q_EMIT factsChanged();
+    QPointer<Application> guard(this);
+    (void)QtConcurrent::run([guard, uris, cancel] {
+        QVariantMap facts{{"uris", uris}};
+        QElapsedTimer clock;
+        clock.start();
+        Tally total;
+        int folders = 0, files = 0;
+        for (const auto &uri : uris) {
+            const QString path = nook::localPath(uri);
+            const QFileInfo info(path);
+            if (path.isEmpty() || !(info.exists() || info.isSymLink()))
+                continue;
+            if (info.isDir() && !info.isSymLink()) {
+                ++folders;
+                tally(path, &total, cancel, clock);
+            } else {
+                ++files;
+                total.bytes += info.isSymLink() ? 0 : info.size();
+            }
+            if (uris.size() == 1) {
+                facts["name"] = info.fileName().isEmpty() ? path : info.fileName();
+                facts["path"] = path;
+                facts["location"] = info.absolutePath();
+                facts["folder"] = info.isDir();
+                facts["created"] = timeText(info.birthTime());
+                facts["modified"] = timeText(info.lastModified());
+                facts["accessed"] = timeText(info.lastRead());
+                if (info.isDir()) {
+                    // Direct contents, as the folder shows them.
+                    const QDir dir(path);
+                    facts["children"] = int(dir.entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System).size());
+                }
+            }
+        }
+        if (cancel->load())
+            return;
+        facts["folders"] = folders;
+        facts["files"] = files;
+        facts["bytes"] = total.bytes;
+        facts["sizeText"] = (total.partial ? QStringLiteral("至少 ") : QString()) + nook::formatSize(total.bytes) +
+                            (total.bytes >= 1024 ? QStringLiteral("（%L1 字节）").arg(total.bytes) : QString());
+        facts["contents"] = total.files + total.folders > 0
+                                ? QStringLiteral("%1 个文件，%2 个文件夹").arg(total.files).arg(total.folders)
+                                : QString();
+        facts["partial"] = total.partial;
+        facts["busy"] = false;
+        QMetaObject::invokeMethod(
+            qApp,
+            [guard, facts, cancel] {
+                if (!guard || cancel->load())
+                    return;
+                guard->m_facts = facts;
+                Q_EMIT guard->factsChanged();
+            },
+            Qt::QueuedConnection);
+    });
+}
+void Application::openInNewTab(const QString &uri) {
+    const QString path = nook::localPath(uri);
+    if (path.isEmpty())
+        return;
+    if (QFileInfo(path).isDir()) {
+        addTab(uri);
+        return;
+    }
+    addTab(nook::parentUri(uri));
+    left()->selectUri(uri);
 }
 void Application::checkInstalledVersion() {
     const bool upgraded = nook::executableReplaced();

@@ -10,8 +10,27 @@ Rectangle {
     property bool gridMode: false
     property bool focusedPane: false
     property bool searchMode: false
+    // Items from many folders (search results, a tag view): each row says where it is.
+    readonly property bool listing: searchMode || directoryModel.tagView === true
+    readonly property var tagStore: controller.tags
+    // Pressing a row's tag dot: this folder shows only that tag; in a tag view, opens its view.
+    function pickTag(color) {
+        if (searchMode) return
+        if (directoryModel.tagView) controller.navigate("tag:" + color)
+        else directoryModel.tagFilter = directoryModel.tagFilter === color ? "" : color
+    }
     property bool dark: true
     property bool dense: false
+    // The view's own size (the toolbar slider), as seen on screen: one for the list, one for the
+    // grid. The window scales everything by its interface scale, which is undone here, so that
+    // setting sizes the rest of nook and these the files.
+    property real listZoom: 1
+    property real gridZoom: 1
+    property real interfaceScale: 1
+    readonly property real ls: listZoom / interfaceScale
+    readonly property real gs: gridZoom / interfaceScale
+    // Grid names stay readable when the tiles get small.
+    readonly property real gridFont: Math.max(11, 13 * gridZoom) / interfaceScale
     property bool thumbnails: true
     property bool showHeader: true // folder title, column-width button and item count
     property string emptyText: "这个文件夹是空的"
@@ -113,9 +132,11 @@ Rectangle {
     function appearOpacity() { return Math.max(0, Math.min(1, (motionMs - 60) / 160)) }
     // Where a row is, in pane coordinates; the arguments name what it depends on.
     function placeOf(view, x, y, contentX, contentY) { return view.contentItem.mapToItem(pane, x, y) }
-    // The icon of a row placed at `at`: the list's 23 px icon, or the grid's 112 px picture square.
+    // The icon of a row placed at `at`: the list's 23 px icon, or the grid's 112 px picture square
+    // (at the view's zoom).
     function iconRect(at, inGrid, height) {
-        return inGrid ? Qt.rect(at.x + 32, at.y + 12, 112, 112) : Qt.rect(at.x + 16, at.y + (height - 23) / 2, 23, 23)
+        return inGrid ? Qt.rect(at.x + (grid.cellWidth - 112 * gs) / 2, at.y + 12 * gs, 112 * gs, 112 * gs)
+                      : Qt.rect(at.x + 9 + 7 * ls, at.y + (height - 23 * ls) / 2, 23 * ls, 23 * ls)
     }
     // An icon on its way from its old rect to `to`: offset and scale for its transform.
     function flight(from, to, p) {
@@ -199,19 +220,22 @@ Rectangle {
     readonly property string savedSignature: JSON.stringify(savedWidths)
     onSavedSignatureChanged: localWidths = []
     readonly property real columnsWidth: columnWidth(0) + columnWidth(1) + columnWidth(2) + columnWidth(3)
-    function columnWidth(index) {
+    // Widths are kept at the list's own size and grow with its zoom, so the columns keep fitting
+    // their text; by default the name column takes what the others leave.
+    function baseWidth(index) {
         const minimums = [140, 100, 70, 65]
-        const defaults = [Math.max(200, pane.width - 370), 150, 100, 85]
+        const defaults = [Math.max(200, (pane.width - 35) / ls - 335), 150, 100, 85]
         const widths = localWidths.length === 4 ? localWidths : savedWidths
         return widths.length === 4 ? Math.max(minimums[index], Math.min(1600, Number(widths[index]) || defaults[index])) : defaults[index]
     }
+    function columnWidth(index) { return baseWidth(index) * ls }
     function resizeColumn(index, value) {
-        let widths = [columnWidth(0), columnWidth(1), columnWidth(2), columnWidth(3)]
-        widths[index] = Math.max([140, 100, 70, 65][index], Math.min(1600, value))
+        let widths = [baseWidth(0), baseWidth(1), baseWidth(2), baseWidth(3)]
+        widths[index] = Math.max([140, 100, 70, 65][index], Math.min(1600, value / ls))
         localWidths = widths
     }
     function saveColumns() {
-        controller.settings.set("columnWidths", [columnWidth(0), columnWidth(1), columnWidth(2), columnWidth(3)])
+        controller.settings.set("columnWidths", [baseWidth(0), baseWidth(1), baseWidth(2), baseWidth(3)])
         localWidths = []
         columnsSaved()
     }
@@ -224,6 +248,8 @@ Rectangle {
         function onColumnWidthsReset() { pane.localWidths = [] }
     }
     signal columnsSaved()
+    // Ctrl and the wheel over the files: the view's size, in steps of 5%.
+    signal zoomStep(real delta)
     signal activated(var entry)
     signal previewRequested(var entry)
     signal contextRequested(var model, real x, real y)
@@ -257,13 +283,14 @@ Rectangle {
         pane.focusFiles()
     }
     function currentEntry() { return directoryModel.firstSelected() }
-    readonly property real rowHeight: searchMode ? 62 : (dense ? 36 : 43)
+    readonly property real rowHeight: Math.round((listing ? 62 : (dense ? 36 : 43)) * ls)
     // Rows whose visual box intersects the band (content coordinates), for list or grid.
     function rowsIn(x1, y1, x2, y2) {
         let rows = []
         const count = directoryModel.count
         if (!gridMode) {
-            if (x1 > columnsWidth + 18 || x2 < 9) return rows
+            // A row reaches across the whole list, past its last column.
+            if (x2 < 9) return rows
             const first = Math.max(0, Math.floor(y1 / rowHeight)), last = Math.min(count - 1, Math.floor(y2 / rowHeight))
             for (let i = first; i <= last; ++i) rows.push(i)
             return rows
@@ -286,7 +313,7 @@ Rectangle {
         focus: pane.focusedPane
         Keys.onPressed: event => {
             if (event.key === Qt.Key_Down || event.key === Qt.Key_Up) {
-                let step = pane.gridMode ? Math.max(1, Math.floor(files.width / 176)) : 1
+                let step = pane.gridMode ? Math.max(1, Math.floor(grid.width / grid.cellWidth)) : 1
                 let row = Math.max(0, Math.min(directoryModel.count - 1, pane.currentRow + (event.key === Qt.Key_Down ? step : -step)))
                 pane.selectRow(row, event.modifiers)
                 if (pane.gridMode) grid.positionViewAtIndex(row, GridView.Contain)
@@ -306,8 +333,35 @@ Rectangle {
                 color: "transparent"
                 RowLayout {
                     anchors.fill: parent; anchors.leftMargin: 15; anchors.rightMargin: 12
-                    Icon { name: pane.searchMode ? "search" : "folder"; width: 16; height: 16 }
+                    Icon { visible: !directoryModel.tagView; name: pane.searchMode ? "search" : "folder"; width: 16; height: 16 }
+                    Rectangle {
+                        visible: directoryModel.tagView === true && !pane.searchMode
+                        width: 12; height: 12; radius: 6; Layout.leftMargin: 2; Layout.rightMargin: 2
+                        color: pane.theme.tagColor(String(directoryModel.uri).slice(4))
+                    }
                     Text { text: pane.searchMode ? "搜索结果" : directoryModel.title; color: pane.ink; font.pixelSize: 15; font.weight: Font.DemiBold; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideMiddle }
+                    // This folder narrowed to one tag (a row's dot was pressed): the chip clears it.
+                    AbstractButton {
+                        objectName: "tagFilterChip"
+                        visible: directoryModel.tagFilter !== "" && !pane.searchMode
+                        focusPolicy: Qt.NoFocus
+                        hoverEnabled: true
+                        implicitHeight: 28; implicitWidth: chipRow.implicitWidth + 20
+                        onClicked: directoryModel.tagFilter = ""
+                        background: Rectangle {
+                            radius: 14
+                            color: parent.hovered ? pane.theme.hover : pane.theme.sunken
+                            border.color: pane.theme.line
+                        }
+                        contentItem: Row {
+                            id: chipRow
+                            spacing: 7; leftPadding: 10
+                            Rectangle { width: 9; height: 9; radius: 4.5; anchors.verticalCenter: parent.verticalCenter; color: pane.theme.tagColor(directoryModel.tagFilter) }
+                            Text { text: "仅显示“" + (pane.tagStore.tags, pane.tagStore.nameOf(directoryModel.tagFilter)) + "”"; color: pane.ink; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
+                            Icon { name: "close"; width: 13; height: 13; anchors.verticalCenter: parent.verticalCenter }
+                        }
+                        NookToolTip { visible: parent.hovered; text: "显示全部项目"; delay: 600 }
+                    }
                     ActionButton {
                         objectName: "saveColumnWidthsButton"
                         // Never a focus stop: inside the pane's FocusScope it would keep coming back as
@@ -333,20 +387,20 @@ Rectangle {
             }
             Rectangle {
                 visible: !pane.gridMode
-                Layout.fillWidth: true; Layout.preferredHeight: 34
+                Layout.fillWidth: true; Layout.preferredHeight: Math.round(34 * Math.max(0.9, pane.ls))
                 color: pane.theme.sunken
                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: pane.theme.line }
                 clip: true
                 Row {
                     x: 14 - list.contentX; height: parent.height
                     Repeater {
-                        model: [pane.searchMode ? "名称 / 位置" : "名称", "修改时间", "类型", "大小"]
+                        model: [pane.listing ? "名称 / 位置" : "名称", "修改时间", "类型", "大小"]
                         Item {
                             id: column
                             required property int index
                             required property string modelData
-                            width: pane.columnWidth(index); height: 34
-                            Text { x: 7; width: parent.width - 20; anchors.verticalCenter: parent.verticalCenter; text: column.modelData + (pane.sortColumn === column.index ? (pane.descending ? "  ↓" : "  ↑") : ""); color: pane.muted; font.pixelSize: 13; elide: Text.ElideRight }
+                            width: pane.columnWidth(index); height: parent.height
+                            Text { x: 7 * pane.ls; width: parent.width - 20; anchors.verticalCenter: parent.verticalCenter; text: column.modelData + (pane.sortColumn === column.index ? (pane.descending ? "  ↓" : "  ↑") : ""); color: pane.muted; font.pixelSize: 13 * pane.ls; elide: Text.ElideRight }
                             MouseArea {
                                 anchors.fill: parent; anchors.rightMargin: 7
                                 enabled: !pane.searchMode
@@ -377,6 +431,10 @@ Rectangle {
                 id: files
                 Layout.fillWidth: true; Layout.fillHeight: true
                 transform: Translate { id: filesShift }
+                WheelHandler {
+                    acceptedModifiers: Qt.ControlModifier
+                    onWheel: event => { if (event.angleDelta.y !== 0) pane.zoomStep(event.angleDelta.y > 0 ? 0.05 : -0.05) }
+                }
                 // Rows kept in the cache buffer above the viewport must not paint over, or take
                 // clicks from, the column header.
                 clip: true
@@ -449,7 +507,10 @@ Rectangle {
                     opacity: pane.morphFrom === "grid" ? pane.leavingOpacity : 1
                     objectName: "fileGrid"
                     onCurrentIndexChanged: if (pane.gridMode && currentIndex !== pane.currentRow) pane.currentRow = currentIndex
-                    cellWidth: 176; cellHeight: 180
+                    // As many 176 px tiles as fit, widened to share the row, so no strip is left over.
+                    cellWidth: Math.floor(width / Math.max(1, Math.floor(width / (176 * pane.gs))))
+                    // Its picture, the gaps and two lines of name (180 at the grid's own size).
+                    cellHeight: Math.round(144 * pane.gs + pane.gridFont * 3.08 - 4)
                     reuseItems: true; cacheBuffer: 180
                     boundsBehavior: Flickable.StopAtBounds
                     ScrollBar.vertical: NookScrollBar {}
@@ -524,10 +585,9 @@ Rectangle {
                         const p = mapToItem(view, x, y)
                         return view.indexAt(p.x + view.contentX, p.y + view.contentY)
                     }
+                    // Past the last column is still the row (a click there picks it, a drag draws a band).
                     function emptyAt(x, y) {
                         if (onScrollbar(x, y)) return false
-                        const p = mapToItem(view, x, y)
-                        if (!pane.gridMode && p.x + view.contentX > pane.columnsWidth + 18) return true
                         return rowAt(x, y) < 0
                     }
                     function bandAt(x, y) {
@@ -621,7 +681,10 @@ Rectangle {
                     anchors.centerIn: parent; spacing: 12
                     visible: directoryModel.count === 0 && !directoryModel.loading
                     Icon { anchors.horizontalCenter: parent.horizontalCenter; name: pane.searchMode ? "search" : "folder"; width: 46; height: 46; opacity: 0.5 }
-                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: directoryModel.error || (pane.searchMode ? "没有匹配的项目" : pane.emptyText); color: pane.muted; font.pixelSize: 16; width: Math.min(320, pane.width - 40); wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter }
+                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: directoryModel.error || (pane.searchMode ? "没有匹配的项目"
+                          : directoryModel.tagView ? "还没有带“" + directoryModel.title + "”标签的项目。右键文件选择标签，或按 Alt+数字键"
+                          : directoryModel.tagFilter !== "" ? "这个文件夹里没有带“" + pane.tagStore.nameOf(directoryModel.tagFilter) + "”标签的项目"
+                          : pane.emptyText); color: pane.muted; font.pixelSize: 16; width: Math.min(320, pane.width - 40); wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter }
                     Text { anchors.horizontalCenter: parent.horizontalCenter; visible: pane.searchMode; text: "索引更新期间，结果可能尚不完整"; color: pane.muted; font.pixelSize: 13 }
                 }
                 DropArea {
@@ -650,7 +713,7 @@ Rectangle {
                         // A folder under the pointer is the target, unless it is one of the dragged items.
                         let uri = "", name = ""
                         if (e && e.folder && urls.indexOf(e.fileUri) < 0) { uri = e.fileUri; name = e.fileName; pane.dropRow = row }
-                        else { pane.dropRow = -1; if (!pane.searchMode) { uri = directoryModel.uri; name = directoryModel.title } }
+                        else { pane.dropRow = -1; if (!pane.listing) { uri = directoryModel.uri; name = directoryModel.title } }
                         const mods = controller.modifiers()
                         if (uri !== targetUri || mods !== modifiers) {
                             targetUri = uri; targetName = name; modifiers = mods
@@ -799,6 +862,8 @@ Rectangle {
             required property bool selected
             required property double bytes
             required property bool hiddenItem
+            required property var tags
+            readonly property real dotsWidth: tags.length ? (tags.length * 13 + 6) * pane.ls : 0
             property bool removing: false
             property bool pooled: false
             readonly property bool live: !removing && !pooled && index >= 0
@@ -820,8 +885,8 @@ Rectangle {
             readonly property bool inGrid: ownView === grid
             readonly property bool leaving: pane.morphFrom !== "" && inGrid !== pane.gridMode
             objectName: leaving ? "fileEntryLeaving" : "fileEntry"
-            width: inGrid ? 176 : list.contentWidth
-            height: inGrid ? 180 : pane.searchMode ? 62 : (pane.dense ? 36 : 43)
+            width: inGrid ? grid.cellWidth : list.contentWidth
+            height: inGrid ? grid.cellHeight : pane.rowHeight
             // Its part in a reflow or morph (see motionKind): where it was, where it is now, and
             // how far along this row is.
             readonly property bool moving: pane.motionKind !== "" && live && !leaving
@@ -897,7 +962,7 @@ Rectangle {
                 anchors.fill: parent; anchors.margins: item.inGrid ? 4 : 1
                 active: pane.animated && item.hovered && !dragHandler.active && !item.dropTarget
                 center: Qt.point(mouse.mouseX - (item.inGrid ? 4 : 1), mouse.mouseY - (item.inGrid ? 4 : 1))
-                radius: item.inGrid ? 130 : 190
+                radius: item.inGrid ? 130 * pane.gs : 190 * pane.ls
                 strength: item.selected ? 0.3 : 0.42
                 tint: pane.theme.selectionGlow
                 opacity: active ? (pane.dark ? 0.55 : 0.3) : 0
@@ -909,29 +974,31 @@ Rectangle {
                 Item {
                     width: pane.columnWidth(0); height: parent.height
                     Icon {
-                        x: 7; anchors.verticalCenter: parent.verticalCenter; name: item.iconName; width: 23; height: 23; opacity: item.ghost * item.iconOpacity
+                        x: 7 * pane.ls; anchors.verticalCenter: parent.verticalCenter; name: item.iconName; width: 23 * pane.ls; height: 23 * pane.ls; opacity: item.ghost * item.iconOpacity
                         transform: [Scale { xScale: item.flight.scale; yScale: item.flight.scale }, Translate { x: item.flight.dx; y: item.flight.dy }]
                     }
                     Column {
+                        id: nameColumn
                         opacity: item.contentOpacity
-                        x: 39; width: parent.width - 51; anchors.verticalCenter: parent.verticalCenter; spacing: 3
-                        Text { width: parent.width; text: item.fileName + (item.isLink ? " ↗" : ""); color: pane.ink; opacity: item.hiddenItem ? 0.62 : 1; font.pixelSize: 15; elide: Text.ElideMiddle }
-                        Text { visible: pane.searchMode; width: parent.width; text: item.fullPath; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 12; elide: Text.ElideMiddle }
+                        x: 39 * pane.ls; width: parent.width - 51 * pane.ls; anchors.verticalCenter: parent.verticalCenter; spacing: 3 * pane.ls
+                        // Room is left after the name for its tag dots (drawn above the row's pointer area).
+                        Text { id: nameText; width: Math.min(implicitWidth, parent.width - item.dotsWidth); text: item.fileName + (item.isLink ? " ↗" : ""); color: pane.ink; opacity: item.hiddenItem ? 0.62 : 1; font.pixelSize: 15 * pane.ls; elide: Text.ElideMiddle }
+                        Text { visible: pane.listing; width: parent.width; text: item.fullPath; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 12 * pane.ls; elide: Text.ElideMiddle }
                     }
                 }
-                Text { width: pane.columnWidth(1); height: parent.height; leftPadding: 7; rightPadding: 10; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.modifiedText; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 13 }
-                Text { width: pane.columnWidth(2); height: parent.height; leftPadding: 7; rightPadding: 10; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.kind; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 12 }
-                Text { width: pane.columnWidth(3); height: parent.height; leftPadding: 7; rightPadding: 10; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.sizeText; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 13; horizontalAlignment: Text.AlignRight }
+                Text { width: pane.columnWidth(1); height: parent.height; leftPadding: 7 * pane.ls; rightPadding: 10 * pane.ls; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.modifiedText; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 13 * pane.ls }
+                Text { width: pane.columnWidth(2); height: parent.height; leftPadding: 7 * pane.ls; rightPadding: 10 * pane.ls; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.kind; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 12 * pane.ls }
+                Text { width: pane.columnWidth(3); height: parent.height; leftPadding: 7 * pane.ls; rightPadding: 10 * pane.ls; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.sizeText; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 13 * pane.ls; horizontalAlignment: Text.AlignRight }
             }
             Column {
                 visible: item.inGrid
-                anchors.fill: parent; anchors.margins: 12; spacing: 8
+                anchors.fill: parent; anchors.margins: 12 * pane.gs; spacing: 8 * pane.gs
                 Item {
-                    width: parent.width; height: 112
+                    width: parent.width; height: 112 * pane.gs
                     opacity: item.iconOpacity
                     // Flies about the centred 112 px square that iconRect() names.
-                    transform: [Scale { origin.x: 20; xScale: item.flight.scale; yScale: item.flight.scale }, Translate { x: item.flight.dx; y: item.flight.dy }]
-                    Icon { objectName: "gridFallbackIcon"; anchors.centerIn: parent; name: item.iconName; width: 84; height: 84; visible: thumbnail.status !== Image.Ready; opacity: item.ghost }
+                    transform: [Scale { origin.x: 20 * pane.gs; xScale: item.flight.scale; yScale: item.flight.scale }, Translate { x: item.flight.dx; y: item.flight.dy }]
+                    Icon { objectName: "gridFallbackIcon"; anchors.centerIn: parent; name: item.iconName; width: 84 * pane.gs; height: 84 * pane.gs; visible: thumbnail.status !== Image.Ready; opacity: item.ghost }
                     Image {
                         id: thumbnail
                         anchors.fill: parent
@@ -942,16 +1009,16 @@ Rectangle {
                         opacity: item.ghost
                     }
                 }
-                Text { width: parent.width; height: 40; text: item.fileName; color: pane.ink; opacity: (item.hiddenItem ? 0.62 : 1) * item.contentOpacity; font.pixelSize: 13; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter }
+                Text { width: parent.width; height: pane.gridFont * 3.08; text: item.fileName; color: pane.ink; opacity: (item.hiddenItem ? 0.62 : 1) * item.contentOpacity; font.pixelSize: pane.gridFont; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter }
             }
             // Selection mode marker: a check circle on the icon.
             Rectangle {
                 objectName: "pickMark"
                 visible: pane.pickMode
                 opacity: item.contentOpacity
-                width: item.inGrid ? 22 : 14; height: width; radius: width / 2
-                x: item.inGrid ? 14 : 9 + 7 + 23 - width + 4
-                y: item.inGrid ? 14 : item.height / 2 + 11.5 - width + 4
+                width: item.inGrid ? 22 * pane.gs : 14 * pane.ls; height: width; radius: width / 2
+                x: item.inGrid ? 14 * pane.gs : 9 + (7 + 23 + 4) * pane.ls - width
+                y: item.inGrid ? 14 * pane.gs : item.height / 2 + (11.5 + 4) * pane.ls - width
                 color: item.selected ? pane.theme.accent : pane.theme.pane
                 border.width: 1.5; border.color: item.selected ? pane.theme.accent : pane.theme.lineStrong
                 Text { anchors.centerIn: parent; visible: item.selected; text: "✓"; color: pane.theme.accentInk; font.pixelSize: parent.width * 0.68; font.bold: true }
@@ -973,6 +1040,37 @@ Rectangle {
                 onDoubleClicked: event => { if (event.button === Qt.LeftButton) pane.activated(directoryModel.entry(item.index)) }
                 onEntered: if (item.live) { pane.hoverOwner = item; pane.hovered(directoryModel.entry(item.index)) }
                 onExited: item.clearHover()
+            }
+            // The item's colour tags: after the name in the list, at the icon's corner in the grid.
+            // Pressing one shows only that tag's items in this folder (again: all of them).
+            Row {
+                objectName: "tagDots"
+                visible: item.tags.length > 0
+                opacity: item.contentOpacity
+                readonly property real zoom: item.inGrid ? pane.gs : pane.ls
+                spacing: 3 * zoom
+                x: item.inGrid ? item.width - 18 * zoom - width : 9 + (39 + 6) * zoom + nameText.width
+                y: item.inGrid ? 18 * zoom : nameColumn.y + (nameText.height - height) / 2
+                Repeater {
+                    model: item.tags
+                    AbstractButton {
+                        required property string modelData
+                        objectName: "tagDot"
+                        width: 10 * parent.zoom; height: width
+                        focusPolicy: Qt.NoFocus
+                        hoverEnabled: true
+                        onClicked: pane.pickTag(modelData)
+                        background: Rectangle {
+                            radius: width / 2
+                            scale: parent.hovered ? 1.3 : 1
+                            Behavior on scale { enabled: pane.animated; NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+                            color: pane.theme.tagColor(parent.modelData)
+                            border.width: directoryModel.tagFilter === parent.modelData ? 2 : 0
+                            border.color: pane.theme.ink
+                        }
+                        NookToolTip { visible: parent.hovered; text: (pane.tagStore.tags, pane.tagStore.nameOf(parent.modelData)) + (pane.searchMode ? "" : directoryModel.tagView ? " · 打开此标签" : " · 只看此标签"); delay: 500 }
+                    }
+                }
             }
             NookToolTip { objectName: "fileEntryToolTip"; visible: item.hovered && !dragHandler.active; text: item.fileName + "\n" + item.fullPath; delay: 1000 }
         }

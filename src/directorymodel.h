@@ -14,6 +14,8 @@ struct EntryFilter {
     QList<QRegularExpression> globs;
     QStringList mimeTypes;
     bool foldersOnly = false;
+    // A tag filter: only these items (folders included).
+    std::shared_ptr<const QSet<QString>> tagged;
     bool accepts(const Entry &entry) const;
 };
 } // namespace nook
@@ -32,6 +34,9 @@ class DirectoryModel : public QAbstractListModel {
     Q_PROPERTY(QStringList selectedUris READ selectedUris NOTIFY selectionChanged)
     Q_PROPERTY(bool canBack READ canBack NOTIFY locationChanged)
     Q_PROPERTY(bool canForward READ canForward NOTIFY locationChanged)
+    // Shows only the items carrying this colour tag ("" shows all); cleared on leaving the folder.
+    Q_PROPERTY(QString tagFilter READ tagFilter WRITE setTagFilter NOTIFY tagFilterChanged)
+    Q_PROPERTY(bool tagView READ tagView NOTIFY locationChanged)
   public:
     enum Role {
         NameRole = Qt::UserRole + 1,
@@ -46,7 +51,8 @@ class DirectoryModel : public QAbstractListModel {
         FullPathRole,
         BytesRole,
         OriginalRole,
-        HiddenRole
+        HiddenRole,
+        TagsRole
     };
     explicit DirectoryModel(QObject *parent = nullptr);
     ~DirectoryModel() override;
@@ -56,12 +62,17 @@ class DirectoryModel : public QAbstractListModel {
     QString uri() const {
         return m_uri;
     }
-    QString title() const {
-        return nook::displayName(m_uri);
+    QString title() const;
+    bool tagView() const {
+        return nook::tagUri(m_uri);
     }
+    QString tagFilter() const {
+        return m_tagFilter;
+    }
+    void setTagFilter(const QString &color);
     QVariantList breadcrumbs() const;
     QString displayPath() const {
-        return m_uri.startsWith("trash:") ? QStringLiteral("回收站") : nook::localPath(m_uri);
+        return m_uri.startsWith("trash:") ? QStringLiteral("回收站") : tagView() ? QStringLiteral("标签：") + title() : nook::localPath(m_uri);
     }
     bool loading() const {
         return m_loading;
@@ -127,16 +138,18 @@ class DirectoryModel : public QAbstractListModel {
     void statusChanged();
     void countChanged();
     void showHiddenChanged();
+    void tagFilterChanged();
     void selectionChanged();
     void firstBatch(qint64 milliseconds);
 
   private:
     // keep: refresh in place (diffed, scroll and selection kept) instead of clearing first.
     void load(bool keep = false);
+    void clearTagFilter();
     void apply(const QList<Change> &changes);
     void notifySelection(const QSet<QString> &previous);
     void notifySelection();
-    QString m_uri, m_error, m_sort = "name", m_pendingSelection;
+    QString m_uri, m_error, m_sort = "name", m_pendingSelection, m_tagFilter;
     QStringList m_history;
     int m_historyAt = -1, m_anchor = -1;
     quint64 m_generation = 0;

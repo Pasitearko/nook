@@ -23,6 +23,8 @@ class UiTest : public QObject {
         AppSettings settings;
         settings.set("startFolder", fixture.path());
         settings.set("theme", "dark");
+        // The offscreen screen is smaller than the window, which would otherwise count as roomy.
+        settings.set("detailsPane", false);
         SearchIndex search;
         Operations ops;
         Application controller(&search, &ops, &settings, false);
@@ -184,6 +186,8 @@ class UiTest : public QObject {
         AppSettings settings;
         settings.set("startFolder", fixture.path());
         settings.set("theme", "dark");
+        // The offscreen screen is smaller than the window, which would otherwise count as roomy.
+        settings.set("detailsPane", false);
         settings.set("columnWidths", QVariantList{});
         settings.set("quickAccess", QStringList{});
         SearchIndex search;
@@ -473,6 +477,8 @@ class UiTest : public QObject {
         QCOMPARE(settings.values()["roots"].toStringList(), QStringList{scopeRoot});
         QCOMPARE(settings.values()["exclusions"].toStringList(), QStringList{excluded});
         settings.set("theme", "light");
+        // The offscreen screen is smaller than the window, which would otherwise count as roomy.
+        settings.set("detailsPane", false);
         settingsPanel->setProperty("category", 0);
         QTest::qWait(150);
         QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-settings-light.png"));

@@ -1,4 +1,6 @@
 #include "application.h"
+#include "tags.h"
+#include <QClipboard>
 #include <QGuiApplication>
 #include <QImage>
 #include <QQmlComponent>
@@ -198,6 +200,7 @@ class FollowupUiTest : public QObject {
         operations = std::make_unique<Operations>();
         controller = std::make_unique<Application>(search.get(), operations.get(), settings.get(), false);
         controller->preview()->setWorkerExecutable(QCoreApplication::applicationDirPath() + "/nook");
+        controller->glance()->setWorkerExecutable(QCoreApplication::applicationDirPath() + "/nook");
         engine = std::make_unique<QQmlEngine>();
         engine->addImageProvider("thumb", new ThumbnailProvider);
         QQmlComponent component(engine.get(),
@@ -207,6 +210,9 @@ class FollowupUiTest : public QObject {
             component.createWithInitialProperties({{"controller", QVariant::fromValue(controller.get())}}));
         QVERIFY2(root, qPrintable(component.errorString()));
         window = qobject_cast<QQuickWindow *>(root.get());
+        // The test window is larger than the offscreen screen, which would count as filling it
+        // (as a maximized window does) and bring up the details pane; detailsPane() turns it on.
+        root->setProperty("roomy", false);
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
         window->requestActivate();
@@ -771,6 +777,52 @@ class FollowupUiTest : public QObject {
     }
 
     // A new tab opens at the start folder (home by default), not where the current tab is.
+    // "在此处打开 kitty" starts kitty in the folder, from the toolbar and from the blank menu.
+    void terminalOpensHere() {
+        QTemporaryDir bin;
+        QVERIFY(bin.isValid());
+        const QString log = bin.filePath("args");
+        QFile fake(bin.filePath("kitty"));
+        QVERIFY(fake.open(QIODevice::WriteOnly));
+        fake.write(QStringLiteral("#!/bin/sh\n{ printf '%s\\n' \"$@\"; pwd; env; } > '%1'\n").arg(log).toUtf8());
+        fake.close();
+        fake.setPermissions(fake.permissions() | QFileDevice::ExeOwner);
+        const QByteArray path = qgetenv("PATH");
+        qputenv("PATH", bin.path().toUtf8() + ":" + path);
+        // kitty quits on a variable that is not UTF-8, which a shell can leave behind.
+        qputenv("NOOK_GARBLED", QByteArray("/home/\xe9\x83\x81\xb9/nook"));
+        QSignalSpy notices(controller.get(), &Application::notice);
+        click(item("toolbarTerminalButton"));
+        QTRY_VERIFY(QFile::exists(log));
+        qputenv("PATH", path);
+        qunsetenv("NOOK_GARBLED");
+        QFile args(log);
+        QVERIFY(args.open(QIODevice::ReadOnly));
+        const QByteArray seen = args.readAll();
+        QVERIFY(notices.isEmpty());
+        QVERIFY(seen.startsWith(("--directory\n" + fixture->path() + "\n" + fixture->path() + "\n").toUtf8()));
+        QVERIFY(!seen.contains("NOOK_GARBLED"));
+        QVERIFY(seen.contains("\nHOME="));
+        // And from the blank area's menu.
+        QFile::remove(log);
+        qputenv("PATH", bin.path().toUtf8() + ":" + path);
+        blankContext();
+        click(item("blankTerminalMenuItem"));
+        QTRY_VERIFY(QFile::exists(log));
+        qputenv("PATH", path);
+    }
+
+    // The blank area's menu reloads the folder, as F5 does.
+    void blankMenuRefreshes() {
+        QSignalSpy loads(controller->left(), &DirectoryModel::statusChanged);
+        blankContext();
+        click(item("blankRefreshMenuItem"));
+        QTRY_VERIFY(!object("blankContextMenu")->property("visible").toBool());
+        QTRY_VERIFY(loads.size() >= 2);
+        QTRY_VERIFY(!controller->left()->loading());
+        QCOMPARE(controller->left()->count(), 2);
+    }
+
     void newTabOpensStartFolder() {
         controller->navigate(uri("folder"));
         QTRY_COMPARE(controller->left()->uri(), uri("folder"));
@@ -787,6 +839,319 @@ class FollowupUiTest : public QObject {
         controller->closeTab(1);
         controller->navigate(nook::normalizeUri(fixture->path()));
         QTRY_VERIFY(!controller->left()->loading());
+    }
+
+    // Colour tags: put on from the context menu's dots and Alt+number, shown as dots after the
+    // name, a dot narrows the folder to its tag, the sidebar opens a tag's view, a tag can be
+    // renamed, and nook's own renames carry an item's tags along.
+    // The toolbar's size slider: list and grid each keep their own size, the dot rests at 100%
+    // on the way past, and the interface scale no longer sizes the files.
+    void viewZoomSlider() {
+        auto *slider = item("viewZoomSlider");
+        auto *knob = findVisual(slider, "zoomSliderKnob");
+        QVERIFY(slider && knob);
+        auto *settings = controller->settings();
+        QCOMPARE(settings->values().value("listZoom").toDouble(), 1.0);
+        auto *row = entry(uri("sample.txt"));
+        QVERIFY(row);
+        QCOMPARE(row->height(), 43.0);
+        const QPointF dot = knob->mapToScene({knob->width() / 2, knob->height() / 2});
+        const QPointF end = slider->mapToScene({slider->width() - 4, slider->height() / 2});
+        auto drag = [&](QPointF from, QPointF to, auto during) {
+            QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, from.toPoint());
+            for (int i = 1; i <= 10; ++i) {
+                QTest::mouseMove(window, (from + (to - from) * i / 10).toPoint());
+                QTest::qWait(10);
+            }
+            during();
+            QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, to.toPoint());
+        };
+        // Bigger as the dot moves, saved when let go.
+        drag(dot, end, [&] {
+            QTRY_COMPARE(root->property("listZoom").toDouble(), 1.6);
+            QCOMPARE(settings->values().value("listZoom").toDouble(), 1.0);
+            QTRY_COMPARE(entry(uri("sample.txt"))->height(), 69.0);
+        });
+        QTRY_COMPARE(settings->values().value("listZoom").toDouble(), 1.6);
+        QCOMPARE(settings->values().value("gridZoom").toDouble(), 1.0);
+        // The grid has its own size.
+        controller->setGrid(true);
+        QTRY_COMPARE(slider->property("value").toDouble(), 1.0);
+        auto *grid = item("fileGrid");
+        const qreal across = grid->width();
+        auto tile = [&](qreal zoom) { return std::floor(across / std::max(1.0, std::floor(across / (176 * zoom)))); };
+        QTRY_COMPARE(grid->property("cellWidth").toReal(), tile(1));
+        QTRY_COMPARE(grid->property("cellHeight").toReal(), 180.0);
+        QTest::qWait(400);
+        const QPointF gridDot = knob->mapToScene({knob->width() / 2, knob->height() / 2});
+        drag(gridDot, slider->mapToScene({4, slider->height() / 2}), [] {});
+        QTRY_COMPARE(settings->values().value("gridZoom").toDouble(), 0.6);
+        QTRY_COMPARE(grid->property("cellWidth").toReal(), tile(0.6));
+        QCOMPARE(settings->values().value("listZoom").toDouble(), 1.6);
+        // Past 100% the dot rests there.
+        QTest::qWait(400);
+        const QPointF small = knob->mapToScene({knob->width() / 2, knob->height() / 2});
+        const qreal hundred = slider->property("railLeft").toReal() + slider->property("railWidth").toReal() * (1.0 - 0.6) / 1.4;
+        drag(small, slider->mapToScene({hundred + 2, slider->height() / 2}), [] {});
+        QTRY_COMPARE(settings->values().value("gridZoom").toDouble(), 1.0);
+        // Ctrl and the wheel over the files.
+        const QPointF over = grid->mapToScene({grid->width() / 2, grid->height() - 30});
+        QWheelEvent wheel(over, window->mapToGlobal(over), QPoint(), QPoint(0, 120), Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase, false);
+        QGuiApplication::sendEvent(window, &wheel);
+        QTRY_COMPARE(settings->values().value("gridZoom").toDouble(), 1.05);
+        // A double-click goes back to 100%.
+        QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, end.toPoint());
+        QTRY_COMPARE(settings->values().value("gridZoom").toDouble(), 1.0);
+        controller->setGrid(false);
+        QTRY_COMPARE(slider->property("value").toDouble(), 1.6);
+        // The interface scale sizes the rest of nook; the files keep their size on screen.
+        settings->set("listZoom", 1.0);
+        settings->set("uiScale", 1.25);
+        QTRY_COMPARE(left->property("ls").toReal(), 0.8);
+        QTRY_COMPARE(entry(uri("sample.txt"))->height(), 34.0);
+        settings->set("uiScale", 1.0);
+        QTRY_COMPARE(entry(uri("sample.txt"))->height(), 43.0);
+    }
+
+    void viewZoomFrames() {
+        if (qEnvironmentVariableIsEmpty("NOOK_FRAME_DUMP"))
+            QSKIP("Set NOOK_FRAME_DUMP to a folder to look at the file view's sizes.");
+        const QString out = qEnvironmentVariable("NOOK_FRAME_DUMP");
+        auto *settings = controller->settings();
+        for (int i = 0; i < 8; ++i) {
+            QFile file(fixture->path() + QString("/photo-%1.txt").arg(i));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+        }
+        QTRY_COMPARE(controller->left()->count(), 10);
+        TagStore::instance()->set({uri("sample.txt")}, "blue", true);
+        auto shot = [&](const QString &name) {
+            QTest::qWait(450);
+            window->grabWindow().save(out + "/" + name + ".png");
+        };
+        settings->set("listZoom", 0.8);
+        shot("zoom-list-80");
+        settings->set("listZoom", 1.4);
+        shot("zoom-list-140");
+        controller->setGrid(true);
+        settings->set("gridZoom", 0.6);
+        shot("zoom-grid-60");
+        settings->set("gridZoom", 1.6);
+        shot("zoom-grid-160");
+        // The slider held: the dot lifted, the size beside it.
+        auto *slider = item("viewZoomSlider");
+        auto *knob = findVisual(slider, "zoomSliderKnob");
+        const QPointF dot = knob->mapToScene({knob->width() / 2, knob->height() / 2});
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, dot.toPoint());
+        QTest::mouseMove(window, (dot - QPointF(8, 0)).toPoint());
+        QTest::qWait(300);
+        const QRect area = slider->mapRectToScene(QRectF(-60, -12, slider->width() + 120, slider->height() + 60)).toRect();
+        window->grabWindow().copy(area).scaled(area.size() * 3, Qt::KeepAspectRatio, Qt::SmoothTransformation).save(out + "/zoom-slider-held.png");
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, (dot - QPointF(8, 0)).toPoint());
+        controller->setGrid(false);
+    }
+
+    void colourTags() {
+        auto *tags = TagStore::instance();
+        const QString sample = uri("sample.txt");
+        QCOMPARE(tags->tagsOf(sample), QStringList());
+        click(entry(sample), Qt::RightButton);
+        auto *menu = object("fileContextMenu");
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QTest::qWait(100);
+        click(item("tagMenuDot_red"));
+        QCOMPARE(tags->tagsOf(sample), QStringList{"red"});
+        QVERIFY(menu->property("visible").toBool()); // stays open for another
+        const QString dump = qEnvironmentVariable("NOOK_FRAME_DUMP");
+        if (!dump.isEmpty())
+            window->grabWindow().save(dump + "/tag-menu.png");
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!menu->property("visible").toBool());
+        // The dot after the name narrows the folder to the tag; the header chip undoes it.
+        QQuickItem *dot = nullptr;
+        QTRY_VERIFY((dot = item("tagDot")) && dot->isVisible());
+        click(dot);
+        QTRY_COMPARE(controller->left()->tagFilter(), QString("red"));
+        QTRY_COMPARE(controller->left()->count(), 1);
+        auto *chip = item("tagFilterChip");
+        QTRY_VERIFY(chip && chip->isVisible());
+        click(chip);
+        QTRY_COMPARE(controller->left()->count(), 2);
+        QCOMPARE(controller->left()->tagFilter(), QString());
+        // Alt+2 puts the second colour on the selection.
+        click(entry(sample));
+        QTRY_COMPARE(controller->left()->selectedCount(), 1);
+        QTest::keyClick(window, Qt::Key_2, Qt::AltModifier);
+        QTRY_COMPARE(tags->tagsOf(sample), (QStringList{"red", "orange"}));
+        // The sidebar's red row opens the tag's view, listing it with where it is.
+        QQuickItem *red = nullptr;
+        for (auto *row : visualItems(item("sidebar"), "tagPlace"))
+            if (row->property("tag").toMap().value("id") == "red")
+                red = row;
+        QVERIFY(red);
+        QCOMPARE(red->property("tag").toMap().value("count").toInt(), 1);
+        auto *places = item("sidebarScroll")->property("contentItem").value<QQuickItem *>();
+        places->setProperty("contentY", red->mapToItem(places->property("contentItem").value<QQuickItem *>(), {0, 0}).y() - 20);
+        QTest::qWait(100);
+        click(red);
+        QTRY_COMPARE(controller->left()->uri(), QString("tag:red"));
+        QTRY_COMPARE(controller->left()->count(), 1);
+        QCOMPARE(controller->left()->entry(0).value("fileUri").toString(), sample);
+        if (!dump.isEmpty()) {
+            QTest::qWait(300);
+            window->grabWindow().save(dump + "/tag-view.png");
+        }
+        // Renamed from its menu: the colour stays, the name changes everywhere.
+        QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, red->mapToScene({40, red->height() / 2}).toPoint());
+        QTRY_VERIFY(object("tagMenu")->property("opened").toBool());
+        QTest::qWait(100);
+        click(item("renameTagMenuItem"));
+        auto *input = item("tagNameInput");
+        QTRY_VERIFY(input && input->hasActiveFocus());
+        for (const char c : QByteArray("Urgent"))
+            QTest::keyClick(window, c);
+        click(item("saveTagNameButton"));
+        QCOMPARE(tags->nameOf("red"), QString("Urgent"));
+        QTRY_COMPARE(controller->left()->title(), QString("Urgent"));
+        tags->rename("red", {});
+        QCOMPARE(tags->nameOf("red"), QString("红色"));
+        // Renamed by nook, the file keeps its tags.
+        controller->navigate(nook::normalizeUri(fixture->path()));
+        QTRY_VERIFY(!controller->left()->loading());
+        QSignalSpy done(operations.get(), &Operations::finished);
+        operations->run("rename", {sample}, {}, "renamed.txt");
+        QTRY_COMPARE(done.size(), 1);
+        QTRY_COMPARE(tags->tagsOf(uri("renamed.txt")), (QStringList{"red", "orange"}));
+        QCOMPARE(tags->tagsOf(sample), QStringList());
+        tags->clear({uri("renamed.txt")});
+        operations->run("rename", {uri("renamed.txt")}, {}, "sample.txt");
+        QTRY_COMPARE(done.size(), 2);
+        QTRY_COMPARE(controller->left()->count(), 2);
+    }
+
+    // The details pane: only in a maximized window; the selection's preview, facts and tags,
+    // and its three actions.
+    void detailsPane() {
+        auto *pane = item("detailsPane");
+        QVERIFY(pane);
+        QVERIFY(!pane->isVisible());
+        QVERIFY(!item("detailsPaneButton")->isVisible());
+        // A window that covers its screen counts as maximized (niri's full-width column).
+        QVERIFY(root->property("fillsScreen").toBool());
+        window->resize(1600, 1000);
+        root->setProperty("roomy", true); // as maximized on a wide screen
+        QTRY_VERIFY(pane->isVisible());
+        QTRY_COMPARE(pane->width(), 304.0);
+        const QString sample = uri("sample.txt");
+        click(entry(sample));
+        QTRY_COMPARE(item("detailsName")->property("text").toString(), QString("sample.txt"));
+        QTRY_VERIFY(item("detailsText")->isVisible());
+        QVERIFY(item("detailsText")->property("text").toString().contains("Followup preview fixture"));
+        QTRY_VERIFY(controller->facts().value("sizeText").toString().contains("25 字节"));
+        click(item("detailsCopyPath"));
+        QCOMPARE(QGuiApplication::clipboard()->text(), fixture->path() + "/sample.txt");
+        click(item("detailsTag_green"));
+        QCOMPARE(TagStore::instance()->tagsOf(sample), QStringList{"green"});
+        if (!qEnvironmentVariableIsEmpty("NOOK_FRAME_DUMP")) {
+            settings->set("theme", qEnvironmentVariable("NOOK_FRAME_THEME", "dark"));
+            QTest::qWait(400);
+            window->grabWindow().save(qEnvironmentVariable("NOOK_FRAME_DUMP") + "/details.png");
+        }
+        TagStore::instance()->clear({sample});
+        // Its left edge drags its width.
+        auto *grip = item("detailsGrip");
+        const QPointF edge = grip->mapToScene({grip->width() / 2, grip->height() / 2});
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, edge.toPoint());
+        for (int i = 1; i <= 10; ++i) {
+            QTest::mouseMove(window, (edge - QPointF(8.0 * i, 0)).toPoint());
+            QTest::qWait(10);
+        }
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, (edge - QPointF(80, 0)).toPoint());
+        QTRY_COMPARE(settings->values().value("detailsWidth").toInt(), 384);
+        QTRY_COMPARE(pane->width(), 384.0);
+        settings->set("detailsWidth", 304);
+        click(item("detailsNewTab"));
+        QTRY_COMPARE(controller->tabs().size(), 2);
+        QTRY_COMPARE(controller->left()->selectedUris(), QStringList{sample});
+        controller->closeTab(1);
+        // Hidden from its toolbar button; shown again the same way.
+        click(item("detailsPaneButton"));
+        QTRY_VERIFY(!pane->isVisible());
+        click(item("detailsPaneButton"));
+        QTRY_VERIFY(pane->isVisible());
+        root->setProperty("roomy", false);
+        QTRY_VERIFY(!pane->isVisible());
+        window->resize(1280, 820);
+    }
+
+    // Past the last column a row is still the row: a click there selects it.
+    void clickPastColumnsSelects() {
+        // Narrow columns stop well before the pane's edge.
+        left->setProperty("localWidths", QVariantList{220, 120, 90, 80});
+        QTRY_VERIFY(left->width() > left->property("columnsWidth").toReal() + 120);
+        auto *row = entry(uri("sample.txt"));
+        QVERIFY(row);
+        const QPointF past = row->mapToScene({left->property("columnsWidth").toReal() + 60, row->height() / 2});
+        QVERIFY(past.x() < left->mapToScene({left->width() - 30, 0}).x());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, past.toPoint());
+        QTRY_COMPARE(controller->left()->selectedUris(), QStringList{uri("sample.txt")});
+        left->setProperty("localWidths", QVariantList{});
+    }
+
+    // The sidebar: sections and colour tags move by dragging, and its edge drags its width;
+    // narrow, disks go by their short names.
+    void sidebarArrangement() {
+        auto drag = [this](QQuickItem *from, qreal dy) {
+            const QPointF start = from->mapToScene({from->width() / 2, from->height() / 2});
+            QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start.toPoint());
+            for (int i = 1; i <= 12; ++i) {
+                QTest::mouseMove(window, (start + QPointF(0, dy * i / 12)).toPoint());
+                QTest::qWait(10);
+            }
+            QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, (start + QPointF(0, dy)).toPoint());
+        };
+        auto *sidebar = item("sidebar");
+        // Tags above the quick-access places.
+        auto *tagsHeader = findVisual(sidebar, "sectionHeader_tags");
+        auto *places = findVisual(sidebar, "sectionHeader_places");
+        QVERIFY(tagsHeader && places);
+        drag(tagsHeader, places->mapToItem(tagsHeader, 0, 0).y());
+        QTRY_COMPARE(settings->values().value("sidebarSections").toStringList(), (QStringList{"tags", "places", "disks"}));
+        settings->set("sidebarSections", QStringList{"places", "tags", "disks"});
+        QTest::qWait(100);
+        // Blue to the top of the tags.
+        QQuickItem *blue = nullptr, *red = nullptr;
+        for (auto *row : visualItems(sidebar, "tagPlace")) {
+            const auto id = row->property("tag").toMap().value("id").toString();
+            if (id == "blue") blue = row;
+            if (id == "red") red = row;
+        }
+        QVERIFY(blue && red);
+        auto *scroll = item("sidebarScroll")->property("contentItem").value<QQuickItem *>();
+        scroll->setProperty("contentY", red->mapToItem(scroll->property("contentItem").value<QQuickItem *>(), {0, 0}).y() - 40);
+        QTest::qWait(100);
+        drag(blue, red->mapToItem(blue, 0, 0).y() - 6);
+        QTRY_COMPARE(TagStore::instance()->tags().first().toMap().value("id").toString(), QString("blue"));
+        TagStore::instance()->move("blue", 4);
+        QCOMPARE(TagStore::instance()->tags().at(4).toMap().value("id").toString(), QString("blue"));
+        // The edge: narrower, and disks shorten their names.
+        auto *grip = item("sidebarGrip");
+        QVERIFY(grip);
+        const QPointF edge = grip->mapToScene({grip->width() / 2, grip->height() / 2});
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, edge.toPoint());
+        for (int i = 1; i <= 10; ++i) {
+            QTest::mouseMove(window, (edge - QPointF(5.0 * i, 0)).toPoint());
+            QTest::qWait(10);
+        }
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, (edge - QPointF(50, 0)).toPoint());
+        QTRY_COMPARE(settings->values().value("sidebarWidth").toInt(), 174);
+        QTRY_VERIFY(sidebar->property("narrow").toBool());
+        QTRY_COMPARE(sidebar->width(), 174.0);
+        if (!qEnvironmentVariableIsEmpty("NOOK_FRAME_DUMP")) {
+            QTest::qWait(300);
+            window->grabWindow().save(qEnvironmentVariable("NOOK_FRAME_DUMP") + "/sidebar-narrow.png");
+        }
+        settings->set("sidebarWidth", 224);
+        QTRY_VERIFY(!sidebar->property("narrow").toBool());
     }
 
     void middleClickClosesTab() {

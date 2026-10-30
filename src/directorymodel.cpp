@@ -1,4 +1,5 @@
 #include "directorymodel.h"
+#include "tags.h"
 #include <QCollator>
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -12,6 +13,26 @@ DirectoryModel::DirectoryModel(QObject *parent) : QAbstractListModel(parent) {
     m_refreshTimer.setInterval(180);
     connect(&m_refreshTimer, &QTimer::timeout, this, &DirectoryModel::refresh);
     connect(&m_watcher, &QFileSystemWatcher::directoryChanged, this, [this] { m_refreshTimer.start(); });
+    connect(TagStore::instance(), &TagStore::changed, this, [this] {
+        if (!m_entries.isEmpty())
+            Q_EMIT dataChanged(index(0), index(m_entries.size() - 1), {TagsRole});
+        // A tag view lists what carries the tag; a filtered folder shows what does.
+        if (tagView() || !m_tagFilter.isEmpty()) {
+            Q_EMIT locationChanged(); // a renamed tag renames its view
+            m_refreshTimer.start();
+        }
+    });
+}
+QString DirectoryModel::title() const {
+    return tagView() ? TagStore::instance()->nameOf(m_uri.mid(4)) : nook::displayName(m_uri);
+}
+void DirectoryModel::setTagFilter(const QString &color) {
+    if (color == m_tagFilter)
+        return;
+    m_tagFilter = color;
+    Q_EMIT tagFilterChanged();
+    Q_EMIT rearranging();
+    refresh();
 }
 DirectoryModel::~DirectoryModel() {
     if (m_cancel)
@@ -25,7 +46,7 @@ QHash<int, QByteArray> DirectoryModel::roleNames() const {
             {LinkRole, "isLink"},       {SizeRole, "sizeText"}, {ModifiedRole, "modifiedText"},
             {KindRole, "kind"},         {IconRole, "iconName"}, {SelectedRole, "selected"},
             {FullPathRole, "fullPath"}, {BytesRole, "bytes"},   {OriginalRole, "originalUri"},
-            {HiddenRole, "hiddenItem"}};
+            {HiddenRole, "hiddenItem"}, {TagsRole, "tags"}};
 }
 QVariant DirectoryModel::data(const QModelIndex &idx, int role) const {
     if (!idx.isValid() || idx.row() < 0 || idx.row() >= m_entries.size())
@@ -58,6 +79,8 @@ QVariant DirectoryModel::data(const QModelIndex &idx, int role) const {
         return e.originalUri;
     case HiddenRole:
         return e.hidden;
+    case TagsRole:
+        return TagStore::instance()->tagsOf(e.uri);
     default:
         return {};
     }
@@ -89,6 +112,8 @@ QVariantList DirectoryModel::selectedEntries() const {
     return result;
 }
 QVariantList DirectoryModel::breadcrumbs() const {
+    if (tagView())
+        return {QVariantMap{{"title", title()}, {"uri", m_uri}}};
     QVariantList result;
     QString current = m_uri;
     for (int i = 0; i < 64 && !current.isEmpty(); ++i) {
@@ -128,6 +153,7 @@ void DirectoryModel::navigate(const QString &input) {
     m_uri = u;
     m_selected.clear();
     m_anchor = -1;
+    clearTagFilter();
     Q_EMIT locationChanged();
     notifySelection();
     load();
@@ -136,8 +162,15 @@ void DirectoryModel::refresh() {
     if (!m_uri.isEmpty())
         load(true);
 }
+void DirectoryModel::clearTagFilter() {
+    if (m_tagFilter.isEmpty())
+        return;
+    m_tagFilter.clear();
+    Q_EMIT tagFilterChanged();
+}
 void DirectoryModel::back() {
     if (canBack()) {
+        clearTagFilter();
         m_uri = m_history[--m_historyAt];
         clearSelection();
         Q_EMIT locationChanged();
@@ -146,6 +179,7 @@ void DirectoryModel::back() {
 }
 void DirectoryModel::forward() {
     if (canForward()) {
+        clearTagFilter();
         m_uri = m_history[++m_historyAt];
         clearSelection();
         Q_EMIT locationChanged();
@@ -153,7 +187,7 @@ void DirectoryModel::forward() {
     }
 }
 void DirectoryModel::up() {
-    if (!m_uri.startsWith("trash:"))
+    if (!m_uri.startsWith("trash:") && !tagView())
         navigate(nook::parentUri(m_uri));
 }
 void DirectoryModel::setBusy(bool value, QString error) {
@@ -169,7 +203,14 @@ void DirectoryModel::load(bool keep) {
     const auto generation = ++m_generation;
     const QString uri = m_uri, sort = m_sort;
     const bool hidden = m_hidden, descending = m_descending;
-    const auto filter = m_filter;
+    auto filter = m_filter;
+    if (!m_tagFilter.isEmpty()) {
+        auto tagged = std::make_shared<nook::EntryFilter>(m_filter ? *m_filter : nook::EntryFilter{});
+        const auto uris = TagStore::instance()->urisWith(m_tagFilter);
+        tagged->tagged = std::make_shared<const QSet<QString>>(uris.begin(), uris.end());
+        filter = std::move(tagged);
+    }
+    const QStringList tagged = tagView() ? TagStore::instance()->urisWith(uri.mid(4)) : QStringList();
     if (!m_watcher.directories().isEmpty())
         m_watcher.removePaths(m_watcher.directories());
     const QString local = nook::localPath(uri);
@@ -187,12 +228,29 @@ void DirectoryModel::load(bool keep) {
     QPointer<DirectoryModel> guard(this);
     // Implicitly shared: the worker diffs against this snapshot without copying rows.
     const QList<nook::Entry> previous = keep ? m_entries : QList<nook::Entry>();
-    (void)QtConcurrent::run([guard, uri, sort, hidden, descending, cancel, generation, keep, previous, filter] {
+    (void)QtConcurrent::run([guard, uri, sort, hidden, descending, cancel, generation, keep, previous, filter,
+                             tagged] {
         QElapsedTimer timer;
         timer.start();
         QList<nook::Entry> all, pending;
         QString error;
-        nook::enumerate(uri, hidden, cancel, &error, [&](QList<nook::Entry> batch) {
+        auto list = [&](const std::function<void(QList<nook::Entry>)> &batch) {
+            if (!nook::tagUri(uri)) {
+                nook::enumerate(uri, hidden, cancel, &error, batch);
+                return;
+            }
+            // Items gone from their place (or on a disk not mounted now) are left out.
+            QList<nook::Entry> found;
+            for (const auto &item : tagged) {
+                if (cancel->load())
+                    return;
+                nook::Entry entry;
+                if (nook::entryAt(item, &entry))
+                    found << entry;
+            }
+            batch(std::move(found));
+        };
+        list([&](QList<nook::Entry> batch) {
             if (filter)
                 batch.removeIf([&filter](const nook::Entry &entry) { return !filter->accepts(entry); });
             all.append(batch);
@@ -262,6 +320,8 @@ void DirectoryModel::load(bool keep) {
     });
 }
 bool nook::EntryFilter::accepts(const Entry &entry) const {
+    if (tagged && !tagged->contains(entry.uri))
+        return false;
     if (entry.directory)
         return true;
     if (foldersOnly)

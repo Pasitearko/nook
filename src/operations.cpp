@@ -1,5 +1,6 @@
 #include "operations.h"
 #include "files.h"
+#include "tags.h"
 #include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
@@ -10,6 +11,19 @@
 #include <cstring>
 
 namespace {
+// Tags follow an item nook moves or renames, and leave with one it deletes for good (to empty).
+// Called from the worker thread; the store lives on the GUI thread.
+void followTags(const QString &from, const QString &to) {
+    QMetaObject::invokeMethod(
+        qApp,
+        [from, to] {
+            if (to.isEmpty())
+                TagStore::instance()->removed(from);
+            else
+                TagStore::instance()->moved(from, to);
+        },
+        Qt::QueuedConnection);
+}
 struct FileRef {
     GFile *p;
     explicit FileRef(GFile *value) : p(value) {}
@@ -467,6 +481,8 @@ void Operations::start(const QString &kind, const QStringList &uris, const QStri
                     ok = nook::undoMove(item, &error);
                 }
                 if (ok) {
+                    if (!item.original.isEmpty())
+                        followTags(nook::normalizeUri(item.current), nook::normalizeUri(item.original));
                     if (!item.trashInfo.isEmpty())
                         QFile::remove(item.trashInfo);
                     remaining.items.removeLast();
@@ -550,6 +566,10 @@ void Operations::start(const QString &kind, const QStringList &uris, const QStri
                 }
                 if (ok) {
                     ++completed;
+                    if ((kind == "move" || kind == "rename" || kind == "restore") && !actualUri.isEmpty())
+                        followTags(uri, actualUri);
+                    else if (kind == "delete")
+                        followTags(uri, {});
                     if (kind == "trash")
                         remember(nook::trashedUndoItem(localSource, beforeTrash, nullptr));
                     else if (kind != "delete" && kind != "restore" && !replaced && !localSource.isEmpty() &&

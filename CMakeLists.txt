@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(nook VERSION 0.3.1 LANGUAGES CXX)
+project(nook VERSION 0.3.3 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -12,7 +12,7 @@ pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
 find_package(SQLite3 REQUIRED)
 qt_standard_project_setup(REQUIRES 6.8)
 add_library(nook_core STATIC
-    src/files.cpp src/files.h src/storage.cpp src/storage.h
+    src/files.cpp src/files.h src/storage.cpp src/storage.h src/tags.cpp src/tags.h
     src/directorymodel.cpp src/directorymodel.h
     src/operations.cpp src/operations.h src/undorecord.cpp src/undorecord.h
     src/searchindex.cpp src/searchindex.h
@@ -60,11 +60,14 @@ set(NOOK_ICONS
     qml/icons/hidden.svg qml/icons/filter.svg qml/icons/calendar.svg qml/icons/undo.svg
     qml/icons/redo.svg qml/icons/select-all.svg qml/icons/select.svg qml/icons/sun.svg
     qml/icons/moon.svg qml/icons/archive.svg qml/icons/lock.svg qml/icons/info.svg
-    qml/icons/verify.svg qml/icons/extract.svg qml/icons/compress.svg)
+    qml/icons/verify.svg qml/icons/extract.svg qml/icons/compress.svg
+    qml/icons/details.svg qml/icons/tag.svg qml/icons/open.svg qml/icons/newtab.svg
+    qml/icons/nook.svg)
 qt_add_qml_module(nook URI Nook VERSION 1.0
     QML_FILES ${NOOK_SHARED_QML}
         qml/Main.qml qml/FilePane.qml qml/SettingsPanel.qml qml/Sidebar.qml qml/PropertiesDialog.qml
         qml/RecentActivity.qml qml/DatePicker.qml qml/SpringProgress.qml qml/FileChooser.qml
+        qml/DetailsPane.qml qml/ResizeGrip.qml qml/ZoomSlider.qml
     RESOURCES ${NOOK_ICONS}
 )
 # GLSL sources are compiled to portable .qsb (Vulkan/GL/Metal) at build time.
@@ -174,7 +177,7 @@ install(PROGRAMS packaging/nook-volume-helper packaging/nook-volume-setup DESTIN
 install(TARGETS nook-archive-worker RUNTIME DESTINATION lib/nook)
 install(FILES packaging/local.nook.mount.policy packaging/local.nook.volume.policy
         DESTINATION ${CMAKE_INSTALL_DATADIR}/polkit-1/actions)
-install(FILES qml/icons/folder.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps RENAME nook.svg)
+install(FILES qml/icons/nook.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
 install(FILES qml/icons/archive.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps RENAME nook-archive.svg)
 install(FILES LICENSE THIRD_PARTY.md DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/nook)
 install(FILES README.md LICENSE THIRD_PARTY.md packaging/niri.example.kdl DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/nook)

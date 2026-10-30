@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="sky" x1="128" y1="16" x2="128" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d2349"/><stop offset=".55" stop-color="#3a2c58"/><stop offset="1" stop-color="#7d4148"/>
+    </linearGradient>
+    <radialGradient id="dawn" cx="128" cy="246" r="150" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f3a46c" stop-opacity=".7"/><stop offset="1" stop-color="#f3a46c" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="nebula" cx="70" cy="58" r="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8794ff" stop-opacity=".28"/><stop offset="1" stop-color="#8794ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="halo" cx="182" cy="66" r="46" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffe2a0" stop-opacity=".6"/><stop offset="1" stop-color="#ffe2a0" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="star" x1="160" y1="40" x2="204" y2="92" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fffaf0"/><stop offset="1" stop-color="#ffd27a"/>
+    </linearGradient>
+    <linearGradient id="back" x1="52" y1="116" x2="204" y2="206" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f4b85c"/><stop offset="1" stop-color="#c06a32"/>
+    </linearGradient>
+    <linearGradient id="front" x1="128" y1="140" x2="128" y2="210" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffdc8e"/><stop offset="1" stop-color="#eda046"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="128" cy="150" r="88" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffd9a0" stop-opacity=".28"/><stop offset="1" stop-color="#ffe9b8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="16" y="16" width="224" height="224" rx="54" fill="url(#sky)"/>
+  <rect x="16" y="16" width="224" height="224" rx="54" fill="url(#nebula)"/>
+  <rect x="16" y="16" width="224" height="224" rx="54" fill="url(#dawn)"/>
+  <rect x="16.75" y="16.75" width="222.5" height="222.5" rx="53.25" fill="none" stroke="#ffffff" stroke-opacity=".10" stroke-width="1.5"/>
+  <path d="M58 72 L98 52 L134 80 L182 66" fill="none" stroke="#fff2d6" stroke-opacity=".32" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="0.1 0"/>
+  <circle cx="40" cy="112" r="1.8" fill="#fff6e4" fill-opacity="0.75"/>
+  <circle cx="216" cy="122" r="2.1" fill="#fff6e4" fill-opacity="0.8"/>
+  <circle cx="150" cy="38" r="1.5" fill="#fff6e4" fill-opacity="0.7"/>
+  <circle cx="108" cy="106" r="1.3" fill="#fff6e4" fill-opacity="0.55"/>
+  <circle cx="226" cy="44" r="1.6" fill="#fff6e4" fill-opacity="0.7"/>
+  <circle cx="76" cy="38" r="1.3" fill="#fff6e4" fill-opacity="0.6"/>
+  <circle cx="198" cy="104" r="1.2" fill="#fff6e4" fill-opacity="0.5"/>
+  <circle cx="34" cy="64" r="1.1" fill="#fff6e4" fill-opacity="0.5"/>
+  <circle cx="122" cy="30" r="1.0" fill="#fff6e4" fill-opacity="0.45"/>
+  <circle cx="98" cy="52" r="2.6" fill="#fff6e4"/>
+  <path d="M58 62Q60.0 70.0 68 72Q60.0 74.0 58 82Q56.0 74.0 48 72Q56.0 70.0 58 62Z" fill="#fff3da" fill-opacity=".92"/>
+  <path d="M134 72.5Q135.5 78.5 141.5 80Q135.5 81.5 134 87.5Q132.5 81.5 126.5 80Q132.5 78.5 134 72.5Z" fill="#fff3da" fill-opacity=".85"/>
+  <circle cx="182" cy="66" r="46" fill="url(#halo)"/>
+  <path d="M182 38Q186.76 61.24 210 66Q186.76 70.76 182 94Q177.24 70.76 154 66Q177.24 61.24 182 38Z" fill="url(#star)"/>
+  <circle cx="128" cy="150" r="88" fill="url(#glow)"/>
+  <path d="M52 132a14 14 0 0 1 14-14h30.5c3.4 0 6.6 1.4 9 3.8l9 9.2H190a14 14 0 0 1 14 14v52a14 14 0 0 1-14 14H66a14 14 0 0 1-14-14v-65Z" fill="url(#back)"/>
+  <path d="M52 156a12 12 0 0 1 12-12h130.5a12 12 0 0 1 11.9 13.4l-4.6 38.4A14 14 0 0 1 187.9 208H66a14 14 0 0 1-14-14v-38Z" fill="url(#front)" stroke="#ffe7ad" stroke-width="1.6"/>
+  <path d="M64 157.5h128" stroke="#fff6d8" stroke-opacity=".7" stroke-width="3" stroke-linecap="round"/>
+  <path d="M128 170Q130.4 179.6 140 182Q130.4 184.4 128 194Q125.6 184.4 116 182Q125.6 179.6 128 170Z" fill="#fff8e6" fill-opacity=".9"/>
+</svg>

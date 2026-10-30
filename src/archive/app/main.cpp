@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
     app.setApplicationName("nook-archive");
     app.setOrganizationName("nook");
     app.setApplicationDisplayName("nook解压缩");
-    app.setApplicationVersion("0.3.1");
+    app.setApplicationVersion("0.3.3");
     app.setDesktopFileName("local.nook.archive");
 
     QCommandLineParser parser;

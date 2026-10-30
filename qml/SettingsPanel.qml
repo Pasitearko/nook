@@ -462,7 +462,7 @@ Dialog {
                     Group {
                         visible: panel.category === 0; heading: "大小"
                         SettingRow {
-                            title: "界面缩放"; description: "调整全部文字、图标和控件的大小"
+                            title: "界面缩放"; description: "调整文字、图标和控件的大小；文件列表和网格的大小用工具栏的滑轨单独调整"
                             Rectangle {
                                 implicitWidth: 132; implicitHeight: 34; radius: 9
                                 color: panel.theme.field; border.color: panel.line
@@ -720,15 +720,11 @@ Dialog {
                                 id: about
                                 anchors.horizontalCenter: parent.horizontalCenter; y: 24
                                 width: Math.min(parent.width - 40, 420); spacing: 8
-                                Rectangle {
-                                    Layout.alignment: Qt.AlignHCenter; Layout.preferredWidth: 76; Layout.preferredHeight: 76; radius: 22
-                                    color: panel.theme.accentSoft; border.color: Qt.alpha(panel.theme.accent, 0.3)
-                                    Icon { anchors.centerIn: parent; name: "folder"; width: 44; height: 44 }
-                                }
+                                Icon { Layout.alignment: Qt.AlignHCenter; Layout.preferredWidth: 88; Layout.preferredHeight: 88; name: "nook"; width: 88; height: 88 }
                                 Text { Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 6; text: "nook · 星择"; color: panel.ink; font.pixelSize: 22; font.weight: Font.DemiBold }
                                 RowLayout {
                                     Layout.alignment: Qt.AlignHCenter; spacing: 6
-                                    Chip { text: "版本 " + (Qt.application.version || "0.3.1"); tone: panel.theme.accentText }
+                                    Chip { text: "版本 " + (Qt.application.version || "0.3.3"); tone: panel.theme.accentText }
                                     Chip {
                                         visible: panel.controller.upgraded
                                         text: panel.controller.installedVersion !== "" ? "已安装 " + panel.controller.installedVersion : "已安装新版本"

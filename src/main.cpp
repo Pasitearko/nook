@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
     QGuiApplication app(argc, argv);
     app.setApplicationName("nook");
     app.setOrganizationName("nook");
-    app.setApplicationVersion("0.3.1");
+    app.setApplicationVersion("0.3.3");
     app.setDesktopFileName("local.nook");
     nook::executablePath(); // before an upgrade can replace it
     QImageReader::setAllocationLimit(96);

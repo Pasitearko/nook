@@ -19,6 +19,8 @@
 
 namespace nook {
 QString normalizeUri(const QString &input) {
+    if (tagUri(input))
+        return input;
     QByteArray value = input.toUtf8();
     GFile *file = input.startsWith("file:") || input.startsWith("trash:")
                       ? g_file_new_for_uri(value.constData())
@@ -42,6 +44,8 @@ QString localPath(const QString &uri) {
     return result;
 }
 QString parentUri(const QString &uri) {
+    if (tagUri(uri))
+        return uri;
     GFile *file = g_file_new_for_uri(uri.toUtf8().constData());
     GFile *parent = g_file_get_parent(file);
     char *value = parent ? g_file_get_uri(parent) : nullptr;
@@ -208,6 +212,32 @@ QList<Entry> enumerate(const QString &uri, bool hidden, const Cancel &cancel, QS
     }
     g_object_unref(dir);
     return result;
+}
+bool entryAt(const QString &uri, Entry *entry) {
+    GFile *file = g_file_new_for_uri(uri.toUtf8().constData());
+    GFileInfo *info = g_file_query_info(file,
+                                        "standard::name,standard::display-name,standard::type,standard::size,"
+                                        "standard::is-symlink,time::modified",
+                                        G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, nullptr, nullptr);
+    if (info) {
+        Entry &e = *entry;
+        e.uri = uri;
+        e.name = QString::fromUtf8(g_file_info_get_display_name(info));
+        e.symlink = g_file_info_get_is_symlink(info);
+        e.directory = g_file_info_get_file_type(info) == G_FILE_TYPE_DIRECTORY;
+        if (e.symlink)
+            e.directory = g_file_query_file_type(file, G_FILE_QUERY_INFO_NONE, nullptr) == G_FILE_TYPE_DIRECTORY;
+        const char *rawName = g_file_info_get_name(info);
+        e.hidden = rawName && rawName[0] == '.';
+        e.size = g_file_info_get_size(info);
+        e.modified = static_cast<qint64>(g_file_info_get_attribute_uint64(info, "time::modified"));
+        e.icon = iconFor(e.name, e.directory);
+        e.kind = e.directory ? QStringLiteral("文件夹")
+                             : (e.symlink ? QStringLiteral("符号链接") : QFileInfo(e.name).suffix().toUpper());
+        g_object_unref(info);
+    }
+    g_object_unref(file);
+    return info != nullptr;
 }
 bool sidebarDataPartition(const QString &filesystem, const QString &partitionType, const QString &label) {
     const auto fs = filesystem.toLower();
