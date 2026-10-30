@@ -950,6 +950,137 @@ class FollowupUiTest : public QObject {
         controller->setGrid(false);
     }
 
+    // The README's screenshots, of ~/nook-demo (see docs/screenshots). Run it on the real display:
+    // NOOK_README_SHOTS=docs/screenshots QT_QPA_PLATFORM=wayland ./nook-followup-ui-tests readmeScreenshots
+    void readmeScreenshots() {
+        const QString out = qEnvironmentVariable("NOOK_README_SHOTS");
+        if (out.isEmpty())
+            QSKIP("Set NOOK_README_SHOTS to a folder to take the README's screenshots.");
+        const QString demoRoot = QDir::homePath() + "/nook-demo";
+        const QString demo = demoRoot + "/项目资料";
+        if (!QFileInfo::exists(demo + "/02 设计素材/星空.jpg"))
+            QSKIP("The demo folder ~/nook-demo/项目资料 is missing.");
+        auto at = [&](const QString &relative) { return nook::normalizeUri(demo + (relative.isEmpty() ? "" : "/" + relative)); };
+        auto row = [&](const QString &name) -> QQuickItem * {
+            for (auto *candidate : visualItems(left, "fileEntry"))
+                if (candidate->property("fileName").toString() == name && candidate->isVisible())
+                    return candidate;
+            return nullptr;
+        };
+        // A fixed size even where the compositor tiles windows.
+        auto frame = [&](int width, int height) {
+            window->setMinimumSize({width, height});
+            window->setMaximumSize({width, height});
+            window->resize(width, height);
+            QTRY_COMPARE(window->size(), QSize(width, height));
+        };
+        // The pointer rests on a blank spot, so no tooltip covers the picture.
+        auto shot = [&](const QString &name, QPoint rest = {}) {
+            if (rest.isNull())
+                rest = QPoint(window->width() - 400, window->height() - 60);
+            QTest::mouseMove(window, rest);
+            QTest::qWait(1200);
+            QVERIFY(window->grabWindow().save(out + "/" + name + ".png"));
+        };
+        auto go = [&](const QString &relative) {
+            controller->navigate(at(relative));
+            QTRY_VERIFY(!controller->left()->loading());
+            QTest::qWait(200);
+        };
+        // Real thumbnails: the worker is nook, not this test program.
+        engine->removeImageProvider("thumb");
+        engine->addImageProvider("thumb", new ThumbnailProvider(QCoreApplication::applicationDirPath() + "/nook"));
+        settings->set("quickAccess", QStringList{at("")});
+        controller->refreshPlaces();
+        settings->set("roots", QStringList{demoRoot});
+        settings->set("animations", true);
+        search->setRoots({demoRoot});
+        search->start();
+        // The window searches through its own session of the index.
+        controller->search()->setRoots({demoRoot});
+        auto *tags = TagStore::instance();
+        tags->rename("red", "紧急");
+        tags->rename("orange", "进行中");
+        tags->rename("green", "已完成");
+        tags->rename("blue", "参考");
+        tags->rename("purple", "灵感");
+        tags->set({at("项目说明.md"), at("05 导出")}, "red", true);
+        tags->set({at("03 源代码"), at("nook 使用指南.txt")}, "orange", true);
+        tags->set({at("01 文档"), at("04 归档")}, "green", true);
+        tags->set({at("01 文档/nook 安装说明.md"), at("01 文档/nook 快捷键.txt")}, "blue", true);
+        tags->set({at("02 设计素材/星空.jpg"), at("02 设计素材/nook 图标.png"), at("02 设计素材/落日.jpg")}, "purple", true);
+        tags->set({at("02 设计素材/星空.jpg")}, "yellow", true);
+
+        // 1. Overview: the grid of design material, a picture selected, the details pane beside it.
+        frame(1600, 1000);
+        root->setProperty("roomy", true);
+        settings->set("gridZoom", 1.15);
+        controller->setGrid(true);
+        go("02 设计素材");
+        QTRY_VERIFY(row("星空.jpg"));
+        click(row("星空.jpg"));
+        QTRY_VERIFY(item("detailsImage") && item("detailsImage")->property("status").toInt() == 1);
+        shot("overview");
+
+        // 2. Colour tags: the list with its dots, a file's menu with the tag row.
+        root->setProperty("roomy", false);
+        frame(1400, 900);
+        controller->setGrid(false);
+        go("");
+        QTRY_VERIFY(row("项目说明.md"));
+        click(row("项目说明.md"), Qt::RightButton);
+        QTRY_VERIFY(object("fileContextMenu")->property("opened").toBool());
+        shot("tags", QPoint(520, 720)); // off the menu, so no item is lit
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!object("fileContextMenu")->property("visible").toBool());
+
+        // 3. Dual pane, in the light theme.
+        settings->set("theme", "light");
+        controller->setDual(true);
+        controller->right()->navigate(at("01 文档"));
+        QTRY_VERIFY(!controller->right()->loading());
+        click(row("项目说明.md"));
+        shot("dual-pane");
+        controller->setDual(false);
+        settings->set("theme", "dark");
+
+        // 4. The index: every "nook" under the demo folder, with where it is.
+        QTRY_VERIFY_WITH_TIMEOUT(search->indexed() > 10 && !search->scanning(), 20000);
+        auto *field = object("searchField");
+        field->setProperty("text", "nook");
+        QTest::qWait(400);
+        QTRY_VERIFY(!search->model()->loading());
+        // The index may still be settling its last write: ask again, as typing would.
+        QTest::qWait(1000);
+        QMetaObject::invokeMethod(root.get(), "runSearch");
+        QTRY_VERIFY(controller->search()->model()->count() > 3);
+        shot("index-search");
+        field->setProperty("text", "");
+        QTest::qWait(300);
+
+        // 5. Space previews a picture.
+        go("02 设计素材");
+        controller->setGrid(true);
+        QTRY_VERIFY(row("落日.jpg"));
+        click(row("落日.jpg"));
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(item("previewPanel") && item("previewPanel")->isVisible());
+        shot("preview");
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(!item("previewPanel")->isVisible());
+        controller->setGrid(false);
+
+        // 6. Settings, About: the icon, the version and the restart into an upgrade.
+        auto *settingsPanel = object("settingsDialog");
+        settingsPanel->setProperty("category", 3);
+        QMetaObject::invokeMethod(settingsPanel, "open");
+        QTRY_VERIFY(settingsPanel->property("opened").toBool());
+        shot("about", QPoint(60, window->height() - 60));
+        QMetaObject::invokeMethod(settingsPanel, "close");
+        window->setMinimumSize({0, 0});
+        window->setMaximumSize({16777215, 16777215});
+    }
+
     void colourTags() {
         auto *tags = TagStore::instance();
         const QString sample = uri("sample.txt");

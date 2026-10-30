@@ -554,7 +554,7 @@ class ThumbnailResponse : public QQuickImageResponse {
     }
 };
 } // namespace
-ThumbnailProvider::ThumbnailProvider() {
+ThumbnailProvider::ThumbnailProvider(QString workerExecutable) : m_executable(std::move(workerExecutable)) {
     m_pool.setMaxThreadCount(2);
     m_pool.setExpiryTimeout(5000);
 }
@@ -573,7 +573,8 @@ QQuickImageResponse *ThumbnailProvider::requestImageResponse(const QString &id, 
         separator = encodedSeparator;
     const QString uri = QUrl::fromPercentEncoding(id.left(separator < 0 ? id.size() : separator).toUtf8());
     auto cancelled = response->cancelled;
-    (void)QtConcurrent::run(&m_pool, [response, uri, cancelled] {
+    const QString executable = m_executable.isEmpty() ? QCoreApplication::applicationFilePath() : m_executable;
+    (void)QtConcurrent::run(&m_pool, [response, uri, cancelled, executable] {
         QImage image;
         if (!cancelled->load()) {
             QProcess process;
@@ -581,7 +582,7 @@ QQuickImageResponse *ThumbnailProvider::requestImageResponse(const QString &id, 
             QElapsedTimer elapsed;
             elapsed.start();
             process.setProcessEnvironment(nook::workerEnvironment());
-            process.start(QCoreApplication::applicationFilePath(), {"--thumbnail-worker", uri});
+            process.start(executable, {"--thumbnail-worker", uri});
             bool valid = process.waitForStarted(1000);
             while (valid) {
                 process.waitForFinished(40);

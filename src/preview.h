@@ -54,11 +54,13 @@ class Preview : public QObject {
 QVariantMap makePreview(const QString &uri, int page, bool thumbnail = false);
 class ThumbnailProvider : public QQuickAsyncImageProvider {
   public:
-    ThumbnailProvider();
+    // The worker is nook itself unless named (tests run from another program).
+    explicit ThumbnailProvider(QString workerExecutable = {});
     ~ThumbnailProvider() override;
     // id: encodeURIComponent(fileUri) + '|' + bytes + modified (opaque revision suffix).
     QQuickImageResponse *requestImageResponse(const QString &id, const QSize &size) override;
 
   private:
     QThreadPool m_pool;
+    QString m_executable;
 };
