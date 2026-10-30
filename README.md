@@ -120,10 +120,21 @@
 
 ## 下载与安装
 
-在 [Releases](https://github.com/Pasitearko/nook/releases/latest) 下载 `nook-0.3.3-1-x86_64.pkg.tar.zst`，然后运行：
+一条命令安装最新版（直接从 [Releases](https://github.com/Pasitearko/nook/releases/latest) 取最新的安装包，bash、zsh、fish 都能用）：
 
 ```bash
-sudo pacman -U ./nook-0.3.3-1-x86_64.pkg.tar.zst
+sudo pacman -U "$(curl -fsSL https://api.github.com/repos/Pasitearko/nook/releases/latest | grep -o 'https://[^"]*x86_64\.pkg\.tar\.zst')"
+```
+
+也可以在 [Releases](https://github.com/Pasitearko/nook/releases/latest) 页面手动下载 `nook-<版本>-x86_64.pkg.tar.zst`，在它所在的文件夹里运行（文件夹里只留一个 nook 安装包）：
+
+```bash
+sudo pacman -U ./nook-*-x86_64.pkg.tar.zst
+```
+
+装好后在启动器里打开，或在终端运行：
+
+```bash
 nook            # 文件管理器
 nook-archive    # nook解压缩
 ```
