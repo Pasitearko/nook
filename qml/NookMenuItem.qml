@@ -6,7 +6,7 @@ import "palette.js" as Palette
 MenuItem {
     id: control
     property string iconName: ""
-    property string shortcutText: ""
+    property string shortcutText: checkable && checked ? "✓" : ""
     property bool danger: false
     property var host: ApplicationWindow.window
     readonly property var theme: host && host.theme ? host.theme : Palette.fallback()
@@ -44,10 +44,13 @@ MenuItem {
         radius: 7
         color: control.down ? control.theme.pressed : "transparent"
     }
+    // The native style's check indicator otherwise paints underneath our custom label.
+    // Checkmarks are drawn in the trailing shortcut slot, like the rest of nook's menus.
+    indicator: Item { visible: false; implicitWidth: 0; implicitHeight: 0 }
     contentItem: RowLayout {
         spacing: 10
         Icon { name: control.iconName; visible: control.iconName !== ""; tint: control.danger ? control.theme.danger : control.theme.icon; Layout.preferredWidth: 17; Layout.preferredHeight: 17 }
-        Text { text: control.text; color: control.danger ? control.theme.danger : control.theme.ink; font.pixelSize: 14; Layout.fillWidth: true; elide: Text.ElideRight }
+        Text { objectName: "menuItemLabel"; text: control.text; color: control.danger ? control.theme.danger : control.theme.ink; font.pixelSize: 14; Layout.fillWidth: true; elide: Text.ElideRight }
         Text { text: control.shortcutText; color: control.theme.muted; font.pixelSize: 11 }
         Item { visible: control.subMenu !== null; Layout.preferredWidth: 12; Layout.preferredHeight: 16 }
     }

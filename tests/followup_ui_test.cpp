@@ -439,7 +439,7 @@ class FollowupUiTest : public QObject {
         click(findVisual(left, "saveColumnWidthsButton"));
         QCOMPARE(saved.count(), 1);
         const auto widths = settings->values().value("columnWidths").toList();
-        QCOMPARE(widths.size(), 4);
+        QCOMPARE(widths.size(), 5);
         // Clearing only the displayed toast makes an accidental second save observable.
         root->setProperty("toastMessage", "");
         QSignalSpy preferencesChanged(settings.get(), &AppSettings::changed);

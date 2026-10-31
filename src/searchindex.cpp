@@ -1107,9 +1107,18 @@ void SearchIndex::runQuery(bool append) {
                     e.icon = column(stmt, 5);
                     e.hidden = e.name.startsWith('.');
                     e.kind = e.directory ? QStringLiteral("文件夹") : QFileInfo(e.name).suffix().toUpper();
-                    struct stat info{};
-                    if (::lstat(path.constData(), &info) != 0)
-                        e.kind = QStringLiteral("位置不可用");
+                    // Enrich only this returned page, off the GUI thread. Birth time is not
+                    // in the name index; statx replaces the existing availability lstat.
+                    struct statx info{};
+                    if (::statx(AT_FDCWD, path.constData(), AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT,
+                                STATX_TYPE | STATX_BTIME, &info) == 0) {
+                        e.createdKnown = info.stx_mask & STATX_BTIME;
+                        e.created = info.stx_btime.tv_sec;
+                    } else {
+                        struct stat fallback{};
+                        if (::lstat(path.constData(), &fallback) != 0)
+                            e.kind = QStringLiteral("位置不可用");
+                    }
                     rows.append(e);
                 }
                 if (rc != SQLITE_DONE && rc != SQLITE_ROW && !cancel->load())

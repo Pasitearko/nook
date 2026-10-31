@@ -1,14 +1,143 @@
 #include "directorymodel.h"
+#include "storage.h"
 #include "tags.h"
 #include <QCollator>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QLocale>
 #include <QMimeDatabase>
-#include <QRegularExpression>
 #include <QPointer>
+#include <QRegularExpression>
+#include <QSettings>
 #include <QtConcurrent>
+#include <cerrno>
+#include <dirent.h>
+#include <fcntl.h>
+#include <limits>
+#include <set>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <vector>
+
+namespace {
+QString sortSettingsPath() {
+    return nook::storageDirectory(nook::Storage::Config) + "/folder-sorts.ini";
+}
+QString sortSettingsKey(const QString &uri) {
+    return QString::fromLatin1(QCryptographicHash::hash(uri.toUtf8(), QCryptographicHash::Sha256).toHex());
+}
+bool validSort(const QString &key) {
+    return key == "name" || key == "date" || key == "type" || key == "size" || key == "created";
+}
+void sortRows(QList<nook::Entry> &rows, const QString &sort, bool descending,
+              const QHash<QString, qint64> &sizes) {
+    QCollator collator;
+    collator.setNumericMode(true);
+    collator.setCaseSensitivity(Qt::CaseInsensitive);
+    std::stable_sort(rows.begin(), rows.end(), [&](const auto &a, const auto &b) {
+        if (a.directory != b.directory)
+            return a.directory;
+        const qint64 aSize = a.directory ? qMax<qint64>(-1, sizes.value(a.uri, -1)) : a.size;
+        const qint64 bSize = b.directory ? qMax<qint64>(-1, sizes.value(b.uri, -1)) : b.size;
+        // Unknown totals follow known totals in either direction, with names as a stable tie-break.
+        if (sort == "size" && (aSize < 0) != (bSize < 0))
+            return aSize >= 0;
+        if (sort == "created" && a.createdKnown != b.createdKnown)
+            return a.createdKnown;
+        int cmp = sort == "size"   ? (aSize > bSize   ? 1
+                                      : aSize < bSize ? -1
+                                                      : 0)
+                  : sort == "date" ? (a.modified > b.modified   ? 1
+                                      : a.modified < b.modified ? -1
+                                                                : 0)
+                  : sort == "created" && a.createdKnown ? (a.created > b.created ? 1 : a.created < b.created ? -1 : 0)
+                  : sort == "type" ? QString::compare(a.kind, b.kind)
+                                   : 0;
+        if (cmp == 0)
+            cmp = collator.compare(a.name, b.name);
+        return descending ? cmp > 0 : cmp < 0;
+    });
+}
+// Use directory-relative descriptors with O_NOFOLLOW: even a symlink swapped in while scanning
+// cannot escape into its target. Track inode identities too (bind mounts can form cycles).
+qint64 folderBytes(const QString &path, const nook::Cancel &cancel) {
+    struct CloseDirectory {
+        void operator()(DIR *directory) const {
+            closedir(directory);
+        }
+    };
+    using Directory = std::unique_ptr<DIR, CloseDirectory>;
+    std::vector<Directory> stack;
+    std::set<std::pair<dev_t, ino_t>> visited;
+    auto enter = [&](int fd) {
+        if (fd < 0)
+            return false;
+        if (stack.size() >= 128) { close(fd); return false; }
+        struct stat st;
+        if (fstat(fd, &st) != 0) {
+            close(fd);
+            return false;
+        }
+        if (!visited.emplace(st.st_dev, st.st_ino).second) {
+            close(fd);
+            return true;
+        }
+        DIR *dir = fdopendir(fd);
+        if (!dir) {
+            close(fd);
+            return false;
+        }
+        stack.emplace_back(dir);
+        return true;
+    };
+    if (!enter(open(QFile::encodeName(path).constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)))
+        return -1;
+    qint64 total = 0, entries = 0;
+    QElapsedTimer clock;
+    clock.start();
+    while (!stack.empty()) {
+        if (cancel->load() || ++entries > 250000 || clock.elapsed() > 15000)
+            return -1;
+        const int fd = dirfd(stack.back().get());
+        errno = 0;
+        const auto *item = readdir(stack.back().get());
+        if (!item) {
+            if (errno)
+                return -1;
+            stack.pop_back();
+            continue;
+        }
+        const QByteArray name(item->d_name);
+        if (name == "." || name == "..")
+            continue;
+        struct stat st;
+        if (fstatat(fd, name.constData(), &st, AT_SYMLINK_NOFOLLOW) != 0)
+            return -1; // Incomplete scans are unknown, never a misleading partial/zero size.
+        if (S_ISDIR(st.st_mode)) {
+            if (!enter(openat(fd, name.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)))
+                return -1;
+        } else if (S_ISREG(st.st_mode)) {
+            if (st.st_size < 0 || st.st_size > std::numeric_limits<qint64>::max() - total)
+                return -1;
+            total += st.st_size;
+        }
+    }
+    return total;
+}
+} // namespace
 
 DirectoryModel::DirectoryModel(QObject *parent) : QAbstractListModel(parent) {
+    m_dateTimer.setInterval(60000);
+    connect(&m_dateTimer, &QTimer::timeout, this, [this] {
+        if (m_smartDates && !m_entries.isEmpty())
+            Q_EMIT dataChanged(index(0), index(m_entries.size() - 1), {ModifiedRole, CreatedRole});
+    });
+    m_dateTimer.start();
+    m_sortTimer.setSingleShot(true);
+    m_sortTimer.setInterval(80);
+    connect(&m_sortTimer, &QTimer::timeout, this, &DirectoryModel::sortEntries);
     m_refreshTimer.setSingleShot(true);
     m_refreshTimer.setInterval(180);
     connect(&m_refreshTimer, &QTimer::timeout, this, &DirectoryModel::refresh);
@@ -35,6 +164,7 @@ void DirectoryModel::setTagFilter(const QString &color) {
     refresh();
 }
 DirectoryModel::~DirectoryModel() {
+    cancelFolderSizes();
     if (m_cancel)
         *m_cancel = true;
 }
@@ -42,11 +172,13 @@ int DirectoryModel::rowCount(const QModelIndex &parent) const {
     return parent.isValid() ? 0 : m_entries.size();
 }
 QHash<int, QByteArray> DirectoryModel::roleNames() const {
-    return {{NameRole, "fileName"},     {UriRole, "fileUri"},   {FolderRole, "folder"},
-            {LinkRole, "isLink"},       {SizeRole, "sizeText"}, {ModifiedRole, "modifiedText"},
-            {KindRole, "kind"},         {IconRole, "iconName"}, {SelectedRole, "selected"},
-            {FullPathRole, "fullPath"}, {BytesRole, "bytes"},   {OriginalRole, "originalUri"},
-            {HiddenRole, "hiddenItem"}, {TagsRole, "tags"}};
+    return {{NameRole, "fileName"},      {UriRole, "fileUri"},   {FolderRole, "folder"},
+            {LinkRole, "isLink"},        {SizeRole, "sizeText"}, {ModifiedRole, "modifiedText"},
+            {KindRole, "kind"},          {IconRole, "iconName"}, {SelectedRole, "selected"},
+            {FullPathRole, "fullPath"},  {BytesRole, "bytes"},   {OriginalRole, "originalUri"},
+            {HiddenRole, "hiddenItem"},  {TagsRole, "tags"},     {ModifiedEpochRole, "modified"},
+            {SizeKnownRole, "sizeKnown"}, {CreatedRole, "createdText"},
+            {CreatedEpochRole, "created"}, {CreatedKnownRole, "createdKnown"}};
 }
 QVariant DirectoryModel::data(const QModelIndex &idx, int role) const {
     if (!idx.isValid() || idx.row() < 0 || idx.row() >= m_entries.size())
@@ -61,10 +193,24 @@ QVariant DirectoryModel::data(const QModelIndex &idx, int role) const {
         return e.directory;
     case LinkRole:
         return e.symlink;
-    case SizeRole:
-        return e.directory ? QStringLiteral("—") : nook::formatSize(e.size);
+    case SizeRole: {
+        const qint64 size = e.directory ? m_folderSizes.value(e.uri, -1) : e.size;
+        return size == -2 ? QStringLiteral("计算中…")
+               : size < 0 ? QStringLiteral("—")
+                          : nook::formatSize(size);
+    }
+    case SizeKnownRole:
+        return !e.directory || m_folderSizes.value(e.uri, -1) >= 0;
     case ModifiedRole:
-        return QDateTime::fromSecsSinceEpoch(e.modified).toLocalTime().toString("MM-dd HH:mm");
+        return modifiedText(e.modified);
+    case ModifiedEpochRole:
+        return e.modified;
+    case CreatedRole:
+        return e.createdKnown ? modifiedText(e.created) : QStringLiteral("—");
+    case CreatedEpochRole:
+        return e.created;
+    case CreatedKnownRole:
+        return e.createdKnown;
     case KindRole:
         return e.kind;
     case IconRole:
@@ -74,7 +220,7 @@ QVariant DirectoryModel::data(const QModelIndex &idx, int role) const {
     case FullPathRole:
         return nook::localPath(e.uri);
     case BytesRole:
-        return e.size;
+        return e.directory ? qMax<qint64>(-1, m_folderSizes.value(e.uri, -1)) : e.size;
     case OriginalRole:
         return e.originalUri;
     case HiddenRole:
@@ -151,6 +297,7 @@ void DirectoryModel::navigate(const QString &input) {
     m_history.append(u);
     m_historyAt = m_history.size() - 1;
     m_uri = u;
+    restoreSort();
     m_selected.clear();
     m_anchor = -1;
     clearTagFilter();
@@ -172,6 +319,7 @@ void DirectoryModel::back() {
     if (canBack()) {
         clearTagFilter();
         m_uri = m_history[--m_historyAt];
+        restoreSort();
         clearSelection();
         Q_EMIT locationChanged();
         load();
@@ -181,6 +329,7 @@ void DirectoryModel::forward() {
     if (canForward()) {
         clearTagFilter();
         m_uri = m_history[++m_historyAt];
+        restoreSort();
         clearSelection();
         Q_EMIT locationChanged();
         load();
@@ -196,6 +345,9 @@ void DirectoryModel::setBusy(bool value, QString error) {
     Q_EMIT statusChanged();
 }
 void DirectoryModel::load(bool keep) {
+    ++m_orderGeneration;
+    m_sortTimer.stop();
+    cancelFolderSizes();
     if (m_cancel)
         *m_cancel = true;
     m_cancel = std::make_shared<std::atomic_bool>(false);
@@ -277,24 +429,7 @@ void DirectoryModel::load(bool keep) {
         });
         if (cancel->load())
             return;
-        QCollator collator;
-        collator.setNumericMode(true);
-        collator.setCaseSensitivity(Qt::CaseInsensitive);
-        std::stable_sort(all.begin(), all.end(), [&](const auto &a, const auto &b) {
-            if (a.directory != b.directory)
-                return a.directory;
-            int cmp = sort == "size"   ? (a.size > b.size   ? 1
-                                          : a.size < b.size ? -1
-                                                            : 0)
-                      : sort == "date" ? (a.modified > b.modified   ? 1
-                                          : a.modified < b.modified ? -1
-                                                                    : 0)
-                      : sort == "type" ? QString::compare(a.kind, b.kind)
-                                       : 0;
-            if (cmp == 0)
-                cmp = collator.compare(a.name, b.name);
-            return descending ? cmp > 0 : cmp < 0;
-        });
+        sortRows(all, sort, descending, {});
         QList<Change> changes;
         const bool incremental = keep && diff(previous, all, &changes);
         const auto elapsed = timer.elapsed();
@@ -311,6 +446,9 @@ void DirectoryModel::load(bool keep) {
                 if (first)
                     Q_EMIT guard->firstBatch(elapsed);
                 guard->setBusy(false, error);
+                if (!guard->m_entries.isEmpty())
+                    Q_EMIT guard->dataChanged(guard->index(0), guard->index(guard->m_entries.size() - 1),
+                                             {SizeRole, BytesRole, SizeKnownRole});
                 if (!guard->m_pendingSelection.isEmpty()) {
                     guard->selectUri(guard->m_pendingSelection);
                     guard->m_pendingSelection.clear();
@@ -370,6 +508,7 @@ void DirectoryModel::appendEntries(QList<nook::Entry> entries) {
     entries = filtered(std::move(entries));
     if (entries.isEmpty())
         return;
+    ++m_orderGeneration;
     int first = m_entries.size();
     beginInsertRows({}, first, first + entries.size() - 1);
     m_entries.append(entries);
@@ -378,6 +517,8 @@ void DirectoryModel::appendEntries(QList<nook::Entry> entries) {
     Q_EMIT countChanged();
 }
 void DirectoryModel::replaceEntries(QList<nook::Entry> entries) {
+    ++m_orderGeneration;
+    cancelFolderSizes();
     beginResetModel();
     m_entries = filtered(std::move(entries));
     m_anchor = -1;
@@ -412,7 +553,8 @@ bool DirectoryModel::diff(QList<nook::Entry> current, const QList<nook::Entry> &
         present.insert(e.uri);
     auto same = [](const nook::Entry &a, const nook::Entry &b) {
         return a.name == b.name && a.kind == b.kind && a.icon == b.icon && a.size == b.size &&
-               a.modified == b.modified && a.directory == b.directory && a.symlink == b.symlink &&
+               a.modified == b.modified && a.created == b.created && a.createdKnown == b.createdKnown &&
+               a.directory == b.directory && a.symlink == b.symlink &&
                a.hidden == b.hidden && a.originalUri == b.originalUri;
     };
     int moves = 0;
@@ -454,6 +596,7 @@ bool DirectoryModel::diff(QList<nook::Entry> current, const QList<nook::Entry> &
     return current.size() == next.size();
 }
 void DirectoryModel::apply(const QList<Change> &changes) {
+    ++m_orderGeneration;
     if (changes.isEmpty())
         return;
     const int before = m_entries.size();
@@ -493,7 +636,19 @@ void DirectoryModel::apply(const QList<Change> &changes) {
     notifySelection(previous);
 }
 QVariantMap DirectoryModel::entry(int row) const {
-    return row >= 0 && row < m_entries.size() ? nook::entryMap(m_entries[row]) : QVariantMap();
+    if (row < 0 || row >= m_entries.size())
+        return {};
+    auto result = nook::entryMap(m_entries[row]);
+    result.insert("sizeText", data(index(row), SizeRole));
+    result.insert("bytes", data(index(row), BytesRole));
+    result.insert("sizeKnown", data(index(row), SizeKnownRole));
+    result.insert("modifiedText", data(index(row), ModifiedRole));
+    result.insert("createdText", data(index(row), CreatedRole));
+    return result;
+}
+QString DirectoryModel::columnText(int row, int column) const {
+    static const int roles[] = {NameRole, ModifiedRole, KindRole, SizeRole, CreatedRole, FullPathRole};
+    return column >= 0 && column < 6 ? data(index(row), roles[column]).toString() : QString();
 }
 void DirectoryModel::select(int row, int modifiers) {
     if (row < 0 || row >= m_entries.size())
@@ -580,8 +735,176 @@ void DirectoryModel::selectRows(const QList<int> &rows, const QStringList &base,
         notifySelection(previous);
 }
 void DirectoryModel::sortBy(const QString &key, bool descending) {
+    if (!validSort(key))
+        return;
     m_sort = key;
     m_descending = descending;
-    Q_EMIT rearranging();
-    refresh();
+    if (!m_uri.isEmpty()) {
+        QSettings store(sortSettingsPath(), QSettings::IniFormat);
+        store.setValue(sortSettingsKey(m_uri), QVariantMap{{"key", key}, {"descending", descending}});
+    }
+    Q_EMIT sortChanged();
+    if (m_loading)
+        refresh();
+    else
+        sortEntries();
+}
+void DirectoryModel::sortEntries() {
+    if (m_loading || m_entries.isEmpty())
+        return;
+    const auto generation = ++m_orderGeneration;
+    const auto previous = m_entries;
+    const auto sizes = m_folderSizes;
+    const auto sort = m_sort;
+    const bool descending = m_descending;
+    QPointer<DirectoryModel> guard(this);
+    (void)QtConcurrent::run([guard, generation, previous, sizes, sort, descending] {
+        auto sorted = previous;
+        sortRows(sorted, sort, descending, sizes);
+        QList<Change> changes;
+        const bool incremental = diff(previous, sorted, &changes);
+        QMetaObject::invokeMethod(
+            qApp,
+            [guard, generation, sorted = std::move(sorted), changes = std::move(changes), incremental] {
+                if (!guard || guard->m_orderGeneration != generation)
+                    return;
+                if (incremental && changes.isEmpty())
+                    return;
+                Q_EMIT guard->rearranging();
+                if (incremental) {
+                    guard->apply(changes);
+                } else {
+                    guard->beginResetModel();
+                    guard->m_entries = sorted;
+                    guard->m_anchor = -1;
+                    guard->m_selectedDirty = true;
+                    guard->endResetModel();
+                    Q_EMIT guard->selectionChanged();
+                }
+            },
+            Qt::QueuedConnection);
+    });
+}
+void DirectoryModel::restoreSort() {
+    QSettings store(sortSettingsPath(), QSettings::IniFormat);
+    const auto saved = store.value(sortSettingsKey(m_uri)).toMap();
+    const QString key = saved.value("key").toString();
+    m_sort = validSort(key) ? key : QStringLiteral("name");
+    m_descending = validSort(key) && saved.value("descending", false).toBool();
+    Q_EMIT sortChanged();
+}
+QString DirectoryModel::modifiedText(qint64 seconds) const {
+    const auto time = QDateTime::fromSecsSinceEpoch(seconds).toLocalTime();
+    if (!m_smartDates)
+        return time.toString("yyyy-MM-dd HH:mm");
+    const auto today = QDate::currentDate();
+    const auto days = time.date().daysTo(today);
+    if (days == 0)
+        return QStringLiteral("今天 %1").arg(time.toString("HH:mm"));
+    if (days == 1)
+        return QStringLiteral("昨天 %1").arg(time.toString("HH:mm"));
+    if (days > 1 && days < 7)
+        return QLocale().toString(time, "dddd HH:mm");
+    return time.toString(time.date().year() == today.year() ? "MM-dd HH:mm" : "yyyy-MM-dd HH:mm");
+}
+void DirectoryModel::setSmartDates(bool value) {
+    if (m_smartDates == value)
+        return;
+    m_smartDates = value;
+    Q_EMIT smartDatesChanged();
+    if (!m_entries.isEmpty())
+        Q_EMIT dataChanged(index(0), index(m_entries.size() - 1), {ModifiedRole, CreatedRole});
+}
+void DirectoryModel::cancelFolderSizes() {
+    if (m_sizeCancel)
+        *m_sizeCancel = true;
+    ++m_sizeGeneration;
+    m_sizeRunning = false;
+    m_sizeUri.clear();
+    m_sizeUsers.clear();
+    m_sizeQueue.clear();
+    m_folderSizes.clear();
+}
+void DirectoryModel::requestFolderSize(const QString &uri) {
+    if (m_loading)
+        return;
+    if (m_sizeUsers.contains(uri)) {
+        ++m_sizeUsers[uri];
+        return;
+    }
+    for (int row = 0; row < m_entries.size(); ++row) {
+        const auto &e = m_entries[row];
+        if (e.uri != uri)
+            continue;
+        if (!e.directory || e.symlink || nook::localPath(uri).isEmpty())
+            return;
+        m_sizeUsers.insert(uri, 1);
+        if (m_folderSizes.contains(uri))
+            return;
+        m_folderSizes.insert(uri, -2);
+        m_sizeQueue.append(uri);
+        Q_EMIT dataChanged(index(row), index(row), {SizeRole});
+        startNextFolderSize();
+        return;
+    }
+}
+void DirectoryModel::releaseFolderSize(const QString &uri) {
+    auto user = m_sizeUsers.find(uri);
+    if (user == m_sizeUsers.end() || --user.value() > 0)
+        return;
+    m_sizeUsers.erase(user);
+    if (m_folderSizes.value(uri, -1) != -2)
+        return;
+    m_sizeQueue.removeAll(uri);
+    m_folderSizes.remove(uri);
+    if (m_sizeRunning && m_sizeUri == uri) {
+        *m_sizeCancel = true;
+        ++m_sizeGeneration;
+        m_sizeRunning = false;
+        m_sizeUri.clear();
+        startNextFolderSize();
+    }
+    for (int row = 0; row < m_entries.size(); ++row)
+        if (m_entries[row].uri == uri) {
+            Q_EMIT dataChanged(index(row), index(row), {SizeRole});
+            break;
+        }
+}
+void DirectoryModel::startNextFolderSize() {
+    if (m_sizeRunning || m_sizeQueue.isEmpty())
+        return;
+    m_sizeRunning = true;
+    const auto uri = m_sizeQueue.takeFirst();
+    m_sizeUri = uri;
+    const auto path = nook::localPath(uri);
+    const auto generation = m_sizeGeneration;
+    m_sizeCancel = std::make_shared<std::atomic_bool>(false);
+    const auto cancel = m_sizeCancel;
+    QPointer<DirectoryModel> guard(this);
+    (void)QtConcurrent::run([guard, uri, path, generation, cancel] {
+        const qint64 bytes = folderBytes(path, cancel);
+        if (cancel->load())
+            return;
+        QMetaObject::invokeMethod(
+            qApp,
+            [guard, uri, generation, bytes] {
+                if (!guard || guard->m_sizeGeneration != generation)
+                    return;
+                guard->m_sizeRunning = false;
+                guard->m_sizeUri.clear();
+                guard->m_folderSizes.insert(uri, bytes);
+                if (guard->m_sort == "size") {
+                    ++guard->m_orderGeneration;
+                    guard->m_sortTimer.start();
+                }
+                for (int row = 0; row < guard->m_entries.size(); ++row)
+                    if (guard->m_entries[row].uri == uri) {
+                        Q_EMIT guard->dataChanged(guard->index(row), guard->index(row),
+                                                  {SizeRole, BytesRole, SizeKnownRole});
+                        break;
+                    }
+                guard->startNextFolderSize();
+            },
+            Qt::QueuedConnection);
+    });
 }

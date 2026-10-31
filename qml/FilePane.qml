@@ -10,6 +10,29 @@ Rectangle {
     property bool gridMode: false
     property bool focusedPane: false
     property bool searchMode: false
+    // Bound by the window to its search field (including the chooser's independent search).
+    property string searchText: ""
+    Binding {
+        target: pane.directoryModel; property: "smartDates"
+        value: pane.controller.settings.values.smartDates !== false
+    }
+    function escapeText(value) {
+        return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                            .replace(/"/g, "&quot;").replace(/'/g, "&#39;")
+    }
+    function highlightText(value) {
+        const text = String(value), query = searchMode ? searchText.trim() : ""
+        if (!query) return escapeText(text)
+        // Literal matching only: neither filenames nor the query can inject markup/regular expressions.
+        const expression = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi")
+        let result = "", start = 0, match
+        while ((match = expression.exec(text)) !== null) {
+            result += escapeText(text.slice(start, match.index))
+                    + '<b><font color="' + theme.accentText + '">' + escapeText(match[0]) + '</font></b>'
+            start = match.index + match[0].length
+        }
+        return result + escapeText(text.slice(start))
+    }
     // Items from many folders (search results, a tag view): each row says where it is.
     readonly property bool listing: searchMode || directoryModel.tagView === true
     readonly property var tagStore: controller.tags
@@ -104,10 +127,11 @@ Rectangle {
             pane.pendingFrom = pane.snapshot(pane.gridMode ? grid : list)
             pendingExpiry.restart()
         }
-        function onModelReset() { pane.rearranged() }
-        function onRowsMoved() { pane.rearranged() }
-        function onRowsInserted() { pane.rearranged() }
-        function onRowsRemoved() { pane.rearranged() }
+        function onModelReset() { pane.restartFit(); pane.rearranged() }
+        function onRowsMoved() { pane.restartFit(); pane.rearranged() }
+        function onRowsInserted() { pane.restartFit(); pane.rearranged() }
+        function onRowsRemoved() { pane.restartFit(); pane.rearranged() }
+        function onDataChanged() { pane.restartFit() }
     }
     // Rows that change place (Pulse's motion v2). A re-sort, filter or hidden-files change slides
     // every row on screen from where it was to its new slot, and rows that came into view fade in
@@ -136,7 +160,7 @@ Rectangle {
     // (at the view's zoom).
     function iconRect(at, inGrid, height) {
         return inGrid ? Qt.rect(at.x + (grid.cellWidth - 112 * gs) / 2, at.y + 12 * gs, 112 * gs, 112 * gs)
-                      : Qt.rect(at.x + 9 + 7 * ls, at.y + (height - 23 * ls) / 2, 23 * ls, 23 * ls)
+                      : Qt.rect(at.x + 9 + columnX(0) + 7 * ls, at.y + (height - 23 * ls) / 2, 23 * ls, 23 * ls)
     }
     // An icon on its way from its old rect to `to`: offset and scale for its transform.
     function flight(from, to, p) {
@@ -204,7 +228,7 @@ Rectangle {
         else if (top > 0) view.positionViewAtIndex(top, ListView.Beginning)
     }
     property var localWidths: []
-    onDirectoryModelChanged: { localWidths = []; currentRow = -1; sortColumn = -1 }
+    onDirectoryModelChanged: { localWidths = []; currentRow = -1; fitTimer.stop() }
     // Keys belong to the file list itself, never to a control that once had focus in the pane.
     function focusFiles() {
         const w = ApplicationWindow.window
@@ -213,35 +237,225 @@ Rectangle {
             if (item === keyArea) { focused.focus = false; break }
         keyArea.forceActiveFocus()
     }
-    property bool descending: false
-    property int sortColumn: -1
+    readonly property bool descending: directoryModel.sortDescending
+    readonly property int sortColumn: ["name", "date", "type", "size", "created"].indexOf(directoryModel.sortKey)
+    readonly property var visibleColumns: controller.settings.values.visibleColumns || [true, true, true, true, false]
+    function columnVisible(index) { return index === 0 || (index < visibleColumns.length ? visibleColumns[index] !== false : false) }
+    // Order contains logical IDs; widths, sorting and visibility remain attached to the field.
+    readonly property var savedColumnOrder: controller.settings.values.columnOrder || [0, 1, 2, 3, 4]
+    property var localColumnOrder: []
+    readonly property var columnOrder: localColumnOrder.length === 5 ? localColumnOrder : savedColumnOrder
+    property int draggedColumn: -1
+    property int columnFollowId: -1
+    property int pressedColumn: -1
+    property int columnHeldId: -1
+    property real columnHeldX: 0
+    property int liftedColumn: -1
+    property real columnDragPointer: 0
+    property real columnDragContentX: 0
+    property real columnDragOffset: 0
+    property bool columnMotionActive: false
+    // Five shared positions keep header, row cells, hit tests and icon/tag overlays in sync.
+    // Only displaced columns ease; the grabbed column follows the pointer without latency.
+    property real nameColumnX: columnVisualTarget(0)
+    property real dateColumnX: columnVisualTarget(1)
+    property real typeColumnX: columnVisualTarget(2)
+    property real sizeColumnX: columnVisualTarget(3)
+    property real createdColumnX: columnVisualTarget(4)
+    Behavior on nameColumnX { enabled: pane.animated && pane.columnMotionActive && pane.draggedColumn !== 0 && pane.pressedColumn !== 0; NumberAnimation { id: columnAnimation0; duration: 180; easing.type: Easing.OutCubic } }
+    Behavior on dateColumnX { enabled: pane.animated && pane.columnMotionActive && pane.draggedColumn !== 1 && pane.pressedColumn !== 1; NumberAnimation { id: columnAnimation1; duration: 180; easing.type: Easing.OutCubic } }
+    Behavior on typeColumnX { enabled: pane.animated && pane.columnMotionActive && pane.draggedColumn !== 2 && pane.pressedColumn !== 2; NumberAnimation { id: columnAnimation2; duration: 180; easing.type: Easing.OutCubic } }
+    Behavior on sizeColumnX { enabled: pane.animated && pane.columnMotionActive && pane.draggedColumn !== 3 && pane.pressedColumn !== 3; NumberAnimation { id: columnAnimation3; duration: 180; easing.type: Easing.OutCubic } }
+    Behavior on createdColumnX { enabled: pane.animated && pane.columnMotionActive && pane.draggedColumn !== 4 && pane.pressedColumn !== 4; NumberAnimation { id: columnAnimation4; duration: 180; easing.type: Easing.OutCubic } }
+    Timer {
+        id: columnSettleTimer; interval: 220
+        onTriggered: { pane.columnMotionActive = false; pane.liftedColumn = -1 }
+    }
+    component ColumnDragBackground: Rectangle {
+        required property int columnId
+        property bool selected: false
+        anchors.fill: parent; z: -1
+        objectName: "columnDragBackdrop" + columnId
+        visible: pane.liftedColumn === columnId
+        color: selected ? pane.theme.selection : Qt.rgba(pane.theme.pane.r, pane.theme.pane.g, pane.theme.pane.b, 1)
+        Rectangle { anchors.fill: parent; color: pane.theme.accent; opacity: 0.055 }
+    }
+    function columnX(id) { return [nameColumnX, dateColumnX, typeColumnX, sizeColumnX, createdColumnX][id] || 0 }
+    function columnVisualTarget(id) {
+        if (columnFollowId === id)
+            return Math.max(0, Math.min(columnDragContentX - columnDragOffset, columnsWidth - columnWidth(id)))
+        if (columnHeldId === id) return columnHeldX
+        return columnTargetX(id)
+    }
+    function holdColumn(id) {
+        columnSettleTimer.stop()
+        columnHeldX = columnX(id)
+        const animation = [columnAnimation0, columnAnimation1, columnAnimation2, columnAnimation3, columnAnimation4][id]
+        animation.stop()
+        pressedColumn = id
+        columnHeldId = id
+        liftedColumn = id
+    }
+    function releaseColumnHold() {
+        if (columnHeldId < 0) return
+        columnMotionActive = true
+        pressedColumn = -1
+        columnHeldId = -1
+        columnSettleTimer.restart()
+    }
+    function columnTargetX(id) {
+        let x = 0
+        for (const column of columnOrder) {
+            if (column === id) break
+            x += columnWidth(column)
+        }
+        return x
+    }
+    function moveColumnDrag(id, pointerX, grabOffset) {
+        const x = columnTitles.mapFromItem(pane, pointerX, 0).x
+        columnDragPointer = pointerX
+        columnDragContentX = x
+        if (draggedColumn !== id) {
+            columnSettleTimer.stop()
+            columnMotionActive = false
+            const animation = [columnAnimation0, columnAnimation1, columnAnimation2, columnAnimation3, columnAnimation4][id]
+            animation.stop()
+            // Mark the grabbed field before enabling easing: otherwise its first pointer update
+            // could start an animation with the previous (ungrabbed) enabled state.
+            columnDragOffset = typeof grabOffset === "number" ? grabOffset : columnWidth(id) / 2
+            draggedColumn = id
+            columnFollowId = id
+            pressedColumn = -1
+            columnHeldId = -1
+            liftedColumn = id
+            columnMotionActive = true
+        }
+        const order = Array.from(columnOrder), from = order.indexOf(id)
+        let target = -1
+        for (let i = 0; i < order.length; ++i) {
+            const other = order[i]
+            if (other === id || !columnVisible(other)) continue
+            // Hit-test stable destination slots, never the columns still animating toward them.
+            const middle = columnTargetX(other) + columnWidth(other) / 2
+            if (i < from && x < middle) { target = i; break }
+            if (i > from && x > middle) target = i
+        }
+        if (target >= 0) {
+            order.splice(from, 1)
+            order.splice(target, 0, id)
+            localColumnOrder = order
+        }
+    }
+    function finishColumnDrag(commit) {
+        if (commit && localColumnOrder.length === 5)
+            controller.settings.set("columnOrder", localColumnOrder)
+        localColumnOrder = []
+        pressedColumn = -1
+        columnHeldId = -1
+        // Re-enable easing before changing the pointer-follow target to its final slot.
+        draggedColumn = -1
+        columnFollowId = -1
+        columnSettleTimer.restart()
+    }
+    Timer {
+        interval: 30; repeat: true; running: pane.draggedColumn >= 0
+        onTriggered: {
+            const x = columnHeader.mapFromItem(pane, pane.columnDragPointer, 0).x
+            const step = x < 28 ? -12 : x > columnHeader.width - 28 ? 12 : 0
+            if (step) {
+                list.contentX = Math.max(0, Math.min(list.contentX + step, list.contentWidth - list.width))
+                pane.moveColumnDrag(pane.draggedColumn, pane.columnDragPointer)
+            }
+        }
+    }
+    function toggleColumn(index) {
+        const columns = [true, columnVisible(1), columnVisible(2), columnVisible(3), columnVisible(4)]
+        columns[index] = !columns[index]
+        controller.settings.set("visibleColumns", columns)
+    }
     property bool useSavedWidths: true // false: columns fit this pane (the file chooser)
     readonly property var savedWidths: useSavedWidths ? controller.settings.values.columnWidths || [] : []
     readonly property string savedSignature: JSON.stringify(savedWidths)
     onSavedSignatureChanged: localWidths = []
-    readonly property real columnsWidth: columnWidth(0) + columnWidth(1) + columnWidth(2) + columnWidth(3)
+    readonly property real columnsWidth: columnWidth(0) + columnWidth(1) + columnWidth(2) + columnWidth(3) + columnWidth(4)
     // Widths are kept at the list's own size and grow with its zoom, so the columns keep fitting
     // their text; by default the name column takes what the others leave.
     function baseWidth(index) {
-        const minimums = [140, 100, 70, 65]
-        const defaults = [Math.max(200, (pane.width - 35) / ls - 335), 150, 100, 85]
-        const widths = localWidths.length === 4 ? localWidths : savedWidths
-        return widths.length === 4 ? Math.max(minimums[index], Math.min(1600, Number(widths[index]) || defaults[index])) : defaults[index]
+        const minimums = [140, 100, 70, 65, 100]
+        const defaults = [Math.max(200, (pane.width - 35) / ls - 335), 150, 100, 85, 150]
+        const widths = localWidths.length === 4 || localWidths.length === 5 ? localWidths : savedWidths
+        return index < widths.length ? Math.max(minimums[index], Math.min(1600, Number(widths[index]) || defaults[index])) : defaults[index]
     }
-    function columnWidth(index) { return baseWidth(index) * ls }
+    function columnWidth(index) { return columnVisible(index) ? baseWidth(index) * ls : 0 }
+    // Measure in short event-loop slices, so fitting a large search result never freezes input.
+    property var fitJob: null
+    function restartFit() { if (fitTimer.running && fitJob) fitColumns(fitJob.column) }
+    function fitColumns(column) {
+        fitTimer.stop()
+        const widths = [baseWidth(0), baseWidth(1), baseWidth(2), baseWidth(3), baseWidth(4)]
+        const headers = [listing ? "名称 / 位置" : "名称", "修改时间", "类型", "大小", "创建时间"]
+        for (let c = 0; c < 5; ++c) {
+            if ((column < 0 && columnVisible(c)) || c === column) {
+                fitMetrics.font.pixelSize = 13 * ls
+                fitMetrics.text = headers[c] + "  ↓"
+                widths[c] = fitMetrics.advanceWidth / ls + 30
+            }
+        }
+        fitJob = {row: 0, column: column, count: directoryModel.count, uri: directoryModel.uri, widths: widths}
+        fitTimer.start()
+    }
+    TextMetrics { id: fitMetrics }
+    Timer {
+        id: fitTimer; interval: 1; repeat: true
+        onTriggered: {
+            const job = pane.fitJob
+            if (!job || job.count !== directoryModel.count || job.uri !== directoryModel.uri) { stop(); return }
+            const end = Math.min(job.count, job.row + 64)
+            for (; job.row < end; ++job.row) {
+                for (let c = 0; c < 5; ++c) {
+                    if (job.column >= 0 ? c !== job.column : !pane.columnVisible(c)) continue
+                    fitMetrics.font.pixelSize = (c === 0 ? 15 : c === 2 ? 12 : 13) * pane.ls
+                    fitMetrics.text = directoryModel.columnText(job.row, c)
+                    // Name's icon, link marker, tag dots and padding; other columns' cell padding.
+                    let measured = fitMetrics.advanceWidth / pane.ls + (c === 0 ? 100 : 24)
+                    if (c === 0 && pane.listing) {
+                        fitMetrics.font.pixelSize = 12 * pane.ls
+                        fitMetrics.text = directoryModel.columnText(job.row, 5)
+                        measured = Math.max(measured, fitMetrics.advanceWidth / pane.ls + 56)
+                    }
+                    job.widths[c] = Math.min(1600, Math.max(job.widths[c], measured))
+                }
+            }
+            if (job.row === job.count) {
+                pane.localWidths = job.widths.map((value, index) => Math.max([140, 100, 70, 65, 100][index], value))
+                stop(); pane.fitJob = null
+            }
+        }
+    }
+    NookMenu {
+        id: columnMenu
+        objectName: "columnMenu"
+        NookMenuItem { text: "名称（始终显示）"; enabled: false; shortcutText: "✓" }
+        NookMenuItem { text: "修改时间"; checkable: true; checked: pane.columnVisible(1); shortcutText: checked ? "✓" : ""; onTriggered: pane.toggleColumn(1) }
+        NookMenuItem { text: "类型"; checkable: true; checked: pane.columnVisible(2); shortcutText: checked ? "✓" : ""; onTriggered: pane.toggleColumn(2) }
+        NookMenuItem { text: "大小"; checkable: true; checked: pane.columnVisible(3); shortcutText: checked ? "✓" : ""; onTriggered: pane.toggleColumn(3) }
+        NookMenuItem { objectName: "createdColumnMenuItem"; text: "创建时间"; checkable: true; checked: pane.columnVisible(4); onTriggered: pane.toggleColumn(4) }
+        MenuSeparator {}
+        NookMenuItem { text: "按内容调整列宽"; onTriggered: pane.fitColumns(-1) }
+    }
     function resizeColumn(index, value) {
-        let widths = [baseWidth(0), baseWidth(1), baseWidth(2), baseWidth(3)]
-        widths[index] = Math.max([140, 100, 70, 65][index], Math.min(1600, value / ls))
+        let widths = [baseWidth(0), baseWidth(1), baseWidth(2), baseWidth(3), baseWidth(4)]
+        widths[index] = Math.max([140, 100, 70, 65, 100][index], Math.min(1600, value / ls))
         localWidths = widths
     }
     function saveColumns() {
-        controller.settings.set("columnWidths", [baseWidth(0), baseWidth(1), baseWidth(2), baseWidth(3)])
+        controller.settings.set("columnWidths", [baseWidth(0), baseWidth(1), baseWidth(2), baseWidth(3), baseWidth(4)])
         localWidths = []
         columnsSaved()
     }
     Connections {
         target: pane.directoryModel
-        function onLocationChanged() { pane.localWidths = []; pane.currentRow = -1 }
+        function onLocationChanged() { pane.localWidths = []; pane.currentRow = -1; fitTimer.stop() }
     }
     Connections {
         target: pane.controller.settings
@@ -386,28 +600,68 @@ Rectangle {
                 }
             }
             Rectangle {
+                id: columnHeader
+                objectName: "columnHeader"
                 visible: !pane.gridMode
                 Layout.fillWidth: true; Layout.preferredHeight: Math.round(34 * Math.max(0.9, pane.ls))
                 color: pane.theme.sunken
                 Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: pane.theme.line }
                 clip: true
-                Row {
-                    x: 14 - list.contentX; height: parent.height
+                MouseArea {
+                    anchors.fill: parent; acceptedButtons: Qt.RightButton
+                    onClicked: event => { const p = mapToItem(pane, event.x, event.y); columnMenu.popup(p.x, p.y) }
+                }
+                Item {
+                    id: columnTitles
+                    x: 14 - list.contentX; width: pane.columnsWidth; height: parent.height
                     Repeater {
-                        model: [pane.listing ? "名称 / 位置" : "名称", "修改时间", "类型", "大小"]
+                        model: [pane.listing ? "名称 / 位置" : "名称", "修改时间", "类型", "大小", "创建时间"]
                         Item {
                             id: column
                             required property int index
                             required property string modelData
-                            width: pane.columnWidth(index); height: parent.height
+                            objectName: "columnHeader" + index
+                            visible: pane.columnVisible(index)
+                            x: pane.columnX(index); width: pane.columnWidth(index); height: parent.height
+                            z: pane.liftedColumn === index ? 2 : 0
+                            Rectangle { anchors.fill: parent; color: pane.theme.sunken; visible: pane.liftedColumn === column.index }
+                            Rectangle {
+                                anchors.fill: parent; color: pane.theme.accent
+                                opacity: pane.liftedColumn === column.index ? 0.14 : 0
+                                Behavior on opacity { enabled: pane.animated; NumberAnimation { duration: 130 } }
+                            }
+                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 2; color: pane.theme.accent; visible: pane.liftedColumn === column.index }
                             Text { x: 7 * pane.ls; width: parent.width - 20; anchors.verticalCenter: parent.verticalCenter; text: column.modelData + (pane.sortColumn === column.index ? (pane.descending ? "  ↓" : "  ↑") : ""); color: pane.muted; font.pixelSize: 13 * pane.ls; elide: Text.ElideRight }
                             MouseArea {
-                                anchors.fill: parent; anchors.rightMargin: 7
-                                enabled: !pane.searchMode
-                                onClicked: {
-                                    pane.descending = pane.sortColumn === column.index ? !pane.descending : false
-                                    pane.sortColumn = column.index
-                                    directoryModel.sortBy(["name", "date", "type", "size"][column.index], pane.descending)
+                                objectName: "columnDragArea" + column.index
+                                anchors.fill: parent; anchors.rightMargin: 10
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                hoverEnabled: true; preventStealing: true
+                                cursorShape: dragging && pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+                                property real pressX: 0
+                                property real grabOffset: 0
+                                property bool dragging: false
+                                onPressed: event => {
+                                    pressX = mapToItem(pane, event.x, event.y).x; grabOffset = event.x; dragging = false
+                                    if (event.button === Qt.LeftButton) pane.holdColumn(column.index)
+                                }
+                                onPositionChanged: event => {
+                                    if (!(pressedButtons & Qt.LeftButton)) return
+                                    const x = mapToItem(pane, event.x, event.y).x
+                                    if (!dragging && Math.abs(x - pressX) >= Qt.styleHints.startDragDistance) dragging = true
+                                    if (dragging) pane.moveColumnDrag(column.index, x, grabOffset)
+                                }
+                                onReleased: { if (dragging) pane.finishColumnDrag(true); else pane.releaseColumnHold() }
+                                onCanceled: { if (dragging) pane.finishColumnDrag(false); else pane.releaseColumnHold(); dragging = false }
+                                onClicked: event => {
+                                    if (dragging) return
+                                    if (event.button === Qt.RightButton) {
+                                        const p = mapToItem(pane, event.x, event.y)
+                                        columnMenu.popup(p.x, p.y)
+                                    } else if (!pane.searchMode) {
+                                        directoryModel.sortBy(["name", "date", "type", "size", "created"][column.index],
+                                                              pane.sortColumn === column.index ? !pane.descending : false)
+                                    }
                                 }
                             }
                             Rectangle { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; width: 1; height: 16; color: handle.containsMouse || handle.pressed ? pane.theme.accent : pane.theme.lineStrong }
@@ -421,7 +675,7 @@ Rectangle {
                                 preventStealing: true
                                 onPressed: event => { startX = mapToItem(pane, event.x, event.y).x; startWidth = pane.columnWidth(column.index) }
                                 onPositionChanged: event => { if (pressed) pane.resizeColumn(column.index, startWidth + mapToItem(pane, event.x, event.y).x - startX) }
-                                onDoubleClicked: pane.localWidths = []
+                                onDoubleClicked: pane.fitColumns(column.index)
                             }
                         }
                     }
@@ -594,7 +848,8 @@ Rectangle {
                         if (onScrollbar(x, y)) return false
                         if (pane.pickMode || emptyAt(x, y)) return true
                         if (pane.gridMode) return false
-                        return mapToItem(view, x, y).x + view.contentX > 9 + pane.columnWidth(0)
+                        const columnX = mapToItem(view, x, y).x + view.contentX - 9
+                        return columnX < pane.columnX(0) || columnX >= pane.columnX(0) + pane.columnWidth(0)
                     }
                     function refreshBand() {
                         const c = contentPoint(pointer.x, pointer.y)
@@ -856,6 +1111,8 @@ Rectangle {
             required property bool isLink
             required property string sizeText
             required property string modifiedText
+            required property string createdText
+            required property double modified
             required property string kind
             required property string iconName
             required property string fullPath
@@ -872,9 +1129,30 @@ Rectangle {
             function clearHover() {
                 if (pane.hoverOwner === item) { pane.hoverOwner = null; pane.hovered(({})) }
             }
+            readonly property bool needsFolderSize: live && visible && !inGrid && !pane.gridMode && pane.columnVisible(3) && folder && !isLink && !directoryModel.loading
+                                                    && y + height >= ownView.contentY && y <= ownView.contentY + ownView.height
+            property string sizeRequestUri: ""
+            property var sizeRequestModel: null
+            readonly property var sizeModel: pane.directoryModel
+            onSizeModelChanged: { releaseSize(); sizeRequestTimer.restart() }
+            Timer { id: sizeRequestTimer; interval: 0; onTriggered: item.requestSize() }
+            function releaseSize() {
+                if (sizeRequestModel && sizeRequestUri) sizeRequestModel.releaseFolderSize(sizeRequestUri)
+                sizeRequestUri = ""; sizeRequestModel = null
+            }
+            function requestSize() {
+                if (sizeRequestUri && (!needsFolderSize || sizeRequestUri !== fileUri || sizeRequestModel !== pane.directoryModel)) releaseSize()
+                if (needsFolderSize && !sizeRequestUri) {
+                    sizeRequestUri = fileUri; sizeRequestModel = pane.directoryModel
+                    sizeRequestModel.requestFolderSize(sizeRequestUri)
+                }
+            }
+            onNeedsFolderSizeChanged: { if (!needsFolderSize) releaseSize(); else sizeRequestTimer.restart() }
+            onFileUriChanged: sizeRequestTimer.restart()
+            Component.onCompleted: sizeRequestTimer.restart()
             onLiveChanged: if (!live) clearHover()
             onHoveredChanged: if (!hovered) clearHover()
-            Component.onDestruction: clearHover()
+            Component.onDestruction: { clearHover(); releaseSize() }
             readonly property bool current: live && pane.currentRow === index
             readonly property bool dropTarget: live && pane.dropRow === index
             // Hidden entries read as "ghosted", like Windows: dimmed icon and text, same layout.
@@ -967,12 +1245,21 @@ Rectangle {
                 tint: pane.theme.selectionGlow
                 opacity: active ? (pane.dark ? 0.55 : 0.3) : 0
             }
-            Row {
+            Item {
                 visible: !item.inGrid
-                x: 9; height: parent.height
+                x: 9; width: pane.columnsWidth; height: parent.height
                 opacity: item.hiddenItem ? 0.85 : 1
+                Rectangle {
+                    visible: pane.draggedColumn >= 0
+                    x: pane.draggedColumn >= 0 ? pane.columnX(pane.draggedColumn) : 0
+                    width: pane.draggedColumn >= 0 ? pane.columnWidth(pane.draggedColumn) : 0
+                    height: parent.height; color: pane.theme.accent; opacity: 0.055
+                }
                 Item {
-                    width: pane.columnWidth(0); height: parent.height
+                    objectName: "nameColumnCell"
+                    z: pane.liftedColumn === 0 ? 1 : 0
+                    ColumnDragBackground { columnId: 0; selected: item.selected }
+                    x: pane.columnX(0); width: pane.columnWidth(0); height: parent.height
                     Icon {
                         x: 7 * pane.ls; anchors.verticalCenter: parent.verticalCenter; name: item.iconName; width: 23 * pane.ls; height: 23 * pane.ls; opacity: item.ghost * item.iconOpacity
                         transform: [Scale { xScale: item.flight.scale; yScale: item.flight.scale }, Translate { x: item.flight.dx; y: item.flight.dy }]
@@ -982,13 +1269,14 @@ Rectangle {
                         opacity: item.contentOpacity
                         x: 39 * pane.ls; width: parent.width - 51 * pane.ls; anchors.verticalCenter: parent.verticalCenter; spacing: 3 * pane.ls
                         // Room is left after the name for its tag dots (drawn above the row's pointer area).
-                        Text { id: nameText; width: Math.min(implicitWidth, parent.width - item.dotsWidth); text: item.fileName + (item.isLink ? " ↗" : ""); color: pane.ink; opacity: item.hiddenItem ? 0.62 : 1; font.pixelSize: 15 * pane.ls; elide: Text.ElideMiddle }
-                        Text { visible: pane.listing; width: parent.width; text: item.fullPath; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 12 * pane.ls; elide: Text.ElideMiddle }
+                        Text { id: nameText; width: Math.min(implicitWidth, parent.width - item.dotsWidth); text: pane.highlightText(item.fileName) + (item.isLink ? " ↗" : ""); textFormat: Text.StyledText; color: pane.ink; opacity: item.hiddenItem ? 0.62 : 1; font.pixelSize: 15 * pane.ls; elide: Text.ElideMiddle }
+                        Text { visible: pane.listing; width: parent.width; text: pane.highlightText(item.fullPath); textFormat: Text.StyledText; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 12 * pane.ls; elide: Text.ElideMiddle }
                     }
                 }
-                Text { width: pane.columnWidth(1); height: parent.height; leftPadding: 7 * pane.ls; rightPadding: 10 * pane.ls; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.modifiedText; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 13 * pane.ls }
-                Text { width: pane.columnWidth(2); height: parent.height; leftPadding: 7 * pane.ls; rightPadding: 10 * pane.ls; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.kind; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 12 * pane.ls }
-                Text { width: pane.columnWidth(3); height: parent.height; leftPadding: 7 * pane.ls; rightPadding: 10 * pane.ls; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.sizeText; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 13 * pane.ls; horizontalAlignment: Text.AlignRight }
+                Text { objectName: "modifiedTimeCell"; z: pane.liftedColumn === 1 ? 1 : 0; visible: pane.columnVisible(1); x: pane.columnX(1); width: pane.columnWidth(1); height: parent.height; leftPadding: 7 * pane.ls; rightPadding: 10 * pane.ls; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.modifiedText; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 13 * pane.ls ; ColumnDragBackground { columnId: 1; selected: item.selected } }
+                Text { objectName: "typeColumnCell"; z: pane.liftedColumn === 2 ? 1 : 0; visible: pane.columnVisible(2); x: pane.columnX(2); width: pane.columnWidth(2); height: parent.height; leftPadding: 7 * pane.ls; rightPadding: 10 * pane.ls; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.kind; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 12 * pane.ls ; ColumnDragBackground { columnId: 2; selected: item.selected } }
+                Text { objectName: "sizeColumnCell"; z: pane.liftedColumn === 3 ? 1 : 0; visible: pane.columnVisible(3); x: pane.columnX(3); width: pane.columnWidth(3); height: parent.height; leftPadding: 7 * pane.ls; rightPadding: 10 * pane.ls; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.sizeText; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 13 * pane.ls; horizontalAlignment: Text.AlignRight ; ColumnDragBackground { columnId: 3; selected: item.selected } }
+                Text { objectName: "createdTimeCell"; z: pane.liftedColumn === 4 ? 1 : 0; visible: pane.columnVisible(4); x: pane.columnX(4); width: pane.columnWidth(4); height: parent.height; leftPadding: 7 * pane.ls; rightPadding: 10 * pane.ls; verticalAlignment: Text.AlignVCenter; opacity: item.contentOpacity; text: item.createdText; elide: Text.ElideRight; color: item.selected ? pane.theme.selectionText : pane.muted; font.pixelSize: 13 * pane.ls ; ColumnDragBackground { columnId: 4; selected: item.selected } }
             }
             Column {
                 visible: item.inGrid
@@ -1003,13 +1291,13 @@ Rectangle {
                         id: thumbnail
                         anchors.fill: parent
                         objectName: "gridThumbnail"
-                        source: item.inGrid && pane.thumbnails && (item.iconName === "image" || item.iconName === "video" || /\.pdf$/i.test(item.fileName)) ? "image://thumb/" + encodeURIComponent(item.fileUri) + "|" + item.bytes + item.modifiedText : ""
+                        source: item.inGrid && pane.thumbnails && (item.iconName === "image" || item.iconName === "video" || /\.pdf$/i.test(item.fileName)) ? "image://thumb/" + encodeURIComponent(item.fileUri) + "|" + item.bytes + ":" + item.modified : ""
                         asynchronous: true; fillMode: Image.PreserveAspectFit
                         sourceSize: Qt.size(256, 256)
                         opacity: item.ghost
                     }
                 }
-                Text { width: parent.width; height: pane.gridFont * 3.08; text: item.fileName; color: pane.ink; opacity: (item.hiddenItem ? 0.62 : 1) * item.contentOpacity; font.pixelSize: pane.gridFont; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter }
+                Text { width: parent.width; height: pane.gridFont * 3.08; text: pane.highlightText(item.fileName); textFormat: Text.StyledText; color: pane.ink; opacity: (item.hiddenItem ? 0.62 : 1) * item.contentOpacity; font.pixelSize: pane.gridFont; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter }
             }
             // Selection mode marker: a check circle on the icon.
             Rectangle {
@@ -1017,7 +1305,7 @@ Rectangle {
                 visible: pane.pickMode
                 opacity: item.contentOpacity
                 width: item.inGrid ? 22 * pane.gs : 14 * pane.ls; height: width; radius: width / 2
-                x: item.inGrid ? 14 * pane.gs : 9 + (7 + 23 + 4) * pane.ls - width
+                x: item.inGrid ? 14 * pane.gs : 9 + pane.columnX(0) + (7 + 23 + 4) * pane.ls - width
                 y: item.inGrid ? 14 * pane.gs : item.height / 2 + (11.5 + 4) * pane.ls - width
                 color: item.selected ? pane.theme.accent : pane.theme.pane
                 border.width: 1.5; border.color: item.selected ? pane.theme.accent : pane.theme.lineStrong
@@ -1049,7 +1337,7 @@ Rectangle {
                 opacity: item.contentOpacity
                 readonly property real zoom: item.inGrid ? pane.gs : pane.ls
                 spacing: 3 * zoom
-                x: item.inGrid ? item.width - 18 * zoom - width : 9 + (39 + 6) * zoom + nameText.width
+                x: item.inGrid ? item.width - 18 * zoom - width : 9 + pane.columnX(0) + (39 + 6) * zoom + nameText.width
                 y: item.inGrid ? 18 * zoom : nameColumn.y + (nameText.height - height) / 2
                 Repeater {
                     model: item.tags

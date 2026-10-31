@@ -11,7 +11,7 @@ Item {
     readonly property bool monochrome: ["add", "back", "calendar", "close", "copy", "cut", "document", "download", "drive", "file",
         "filter", "forward", "grid", "hidden", "home", "list", "moon", "paste", "redo", "refresh", "rename", "search", "select-all",
         "lock", "info", "verify", "extract", "compress", "details", "tag", "open", "newtab",
-        "settings", "split", "sun", "terminal", "trash", "undo", "up"].indexOf(name) >= 0
+        "settings", "split", "split-single", "split-vertical", "split-triple", "split-quad", "sun", "terminal", "trash", "undo", "up"].indexOf(name) >= 0
     property bool shaderFailed: false
     readonly property bool tinted: monochrome && !shaderFailed && GraphicsInfo.api !== GraphicsInfo.Software
     // The layout never depends on SVG raster size. Fractional DPI must not

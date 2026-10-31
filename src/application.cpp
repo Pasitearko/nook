@@ -2,6 +2,7 @@
 #include "archivenames.h"
 #include "storage.h"
 #include <QClipboard>
+#include <QCryptographicHash>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileInfo>
@@ -29,6 +30,22 @@
 extern char **environ;
 #include <QtConcurrent>
 
+namespace {
+QVariantList validatedColumnOrder(const QVariant &value) {
+    const auto stored = value.toList();
+    if (stored.size() != 5) return {};
+    QVariantList order;
+    for (const auto &entry : stored) {
+        bool ok = false;
+        const double id = entry.toDouble(&ok);
+        if (!ok || !std::isfinite(id) || id < 0 || id > 4 || std::floor(id) != id || order.contains(int(id)))
+            return {};
+        order.append(int(id));
+    }
+    return order;
+}
+}
+
 AppSettings::AppSettings(QObject *parent)
     : QObject(parent),
       m_store(nook::customProfile()
@@ -51,7 +68,19 @@ QVariantMap AppSettings::values() const {
             {"animations", flag("animations", true)},
             {"dense", flag("dense", false)},
             {"hoverPreview", flag("hoverPreview", false)},
+            {"smartDates", flag("smartDates", true)},
+            {"visibleColumns", [this] {
+                const auto stored = m_store->value("visibleColumns").toList();
+                QVariantList visible{true, true, true, true, false};
+                if (stored.size() == 4 || stored.size() == 5)
+                    for (int i = 1; i < stored.size(); ++i) visible[i] = stored[i].toBool();
+                return visible;
+            }()},
             {"columnWidths", widths},
+            {"columnOrder", [this] {
+                const auto order = validatedColumnOrder(m_store->value("columnOrder"));
+                return order.isEmpty() ? QVariantList{0, 1, 2, 3, 4} : order;
+            }()},
             {"scrollSpeed", m_store->value("scrollSpeed", 3).toInt()},
             {"quickAccess", list("quickAccess")},
             {"quickAccessOrder", list("quickAccessOrder")},
@@ -104,12 +133,25 @@ void AppSettings::set(const QString &key, const QVariant &value) {
             return;
         safeValue = order;
     }
+    if (key == "visibleColumns") {
+        const auto columns = value.toList();
+        if (columns.size() != 4 && columns.size() != 5) return;
+        QVariantList visible{true};
+        for (int i = 1; i < columns.size(); ++i) visible.append(columns[i].toBool());
+        if (visible.size() == 4) visible.append(false);
+        safeValue = visible;
+    }
+    if (key == "columnOrder") {
+        const auto order = validatedColumnOrder(value);
+        if (order.isEmpty()) return;
+        safeValue = order;
+    }
     if (key == "columnWidths") {
         const auto widths = value.toList();
-        if (!widths.isEmpty() && widths.size() != 4)
+        if (!widths.isEmpty() && widths.size() != 4 && widths.size() != 5)
             return;
         QVariantList bounded;
-        const int minimums[] = {140, 100, 70, 65};
+        const int minimums[] = {140, 100, 70, 65, 100};
         for (int i = 0; i < widths.size(); ++i)
             bounded.append(qBound(minimums[i], widths[i].toInt(), 1600));
         safeValue = bounded;
@@ -140,8 +182,9 @@ Application::Application(SearchIndex *search, Operations *ops, AppSettings *sett
     connect(m_ops, &Operations::finished, this, [this] {
         for (const auto &tab : m_tabs) {
             tab.left->refresh();
-            if (tab.dual)
-                tab.right->refresh();
+            if (tab.dual) tab.right->refresh();
+            if (tab.layout == "triple" || tab.layout == "quad") tab.third->refresh();
+            if (tab.layout == "quad") tab.fourth->refresh();
         }
     });
     m_installedVersion = QCoreApplication::applicationVersion();
@@ -152,21 +195,42 @@ Application::Application(SearchIndex *search, Operations *ops, AppSettings *sett
         auto object = value.toObject();
         addTab(object["left"].toString());
         m_tabs.last().right->navigate(object["right"].toString(home()));
-        m_tabs.last().dual = object["dual"].toBool();
         m_tabs.last().grid = object["grid"].toBool();
+        // Old sessions had one view flag for both panes. Seed only absent folder preferences;
+        // a user's newer per-folder choice must always win over the legacy session flag.
+        if (!object.contains("layout") && object.contains("grid")) {
+            for (auto *pane : {left(), right()}) {
+                const auto hash = QCryptographicHash::hash(pane->uri().toUtf8(), QCryptographicHash::Sha256).toHex();
+                const auto key = "folderViews/" + QString::fromLatin1(hash);
+                if (!pane->uri().isEmpty() && !settings->store().contains(key))
+                    settings->store().setValue(key, object["grid"].toBool());
+            }
+        }
+        setSplitLayout(object["layout"].toString(object["dual"].toBool() ? "horizontal" : "single"));
+        if (object.contains("third")) third()->navigate(object["third"].toString());
+        if (object.contains("fourth")) fourth()->navigate(object["fourth"].toString());
     }
     if (m_tabs.isEmpty())
         addTab(settings->values()["startFolder"].toString());
     m_active = qBound(0, state["active"].toInt(), int(m_tabs.size()) - 1);
     connect(&m_diskMounts, &DiskMounts::mountedChanged, this, &Application::refreshPlaces);
     connect(&m_properties, &FileProperties::error, this, &Application::notice);
+    connect(&m_updates, &UpdateChecker::notice, this, &Application::notice);
     connect(&m_properties, &FileProperties::hiddenApplied, this, [this](bool hidden) {
         Q_EMIT notice(hidden ? QStringLiteral("已设为隐藏") : QStringLiteral("已取消隐藏"));
-        for (const auto &tab : m_tabs) { tab.left->refresh(); if (tab.dual) tab.right->refresh(); }
+        for (const auto &tab : m_tabs) {
+            tab.left->refresh(); if (tab.dual) tab.right->refresh();
+            if (tab.layout == "triple" || tab.layout == "quad") tab.third->refresh();
+            if (tab.layout == "quad") tab.fourth->refresh();
+        }
     });
     connect(&m_properties, &FileProperties::permissionsApplied, this, [this] {
         Q_EMIT notice(QStringLiteral("权限已更新"));
-        for (const auto &tab : m_tabs) { tab.left->refresh(); if (tab.dual) tab.right->refresh(); }
+        for (const auto &tab : m_tabs) {
+            tab.left->refresh(); if (tab.dual) tab.right->refresh();
+            if (tab.layout == "triple" || tab.layout == "quad") tab.third->refresh();
+            if (tab.layout == "quad") tab.fourth->refresh();
+        }
     });
     auto applyScrollSpeed = [this] {
         QGuiApplication::styleHints()->setWheelScrollLines(
@@ -268,14 +332,30 @@ DirectoryModel *Application::left() const {
 DirectoryModel *Application::right() const {
     return m_tabs.isEmpty() ? nullptr : m_tabs[m_active].right;
 }
+DirectoryModel *Application::third() const {
+    return m_tabs.isEmpty() ? nullptr : m_tabs[m_active].third;
+}
+DirectoryModel *Application::fourth() const {
+    return m_tabs.isEmpty() ? nullptr : m_tabs[m_active].fourth;
+}
+QString Application::splitLayout() const {
+    return m_tabs.isEmpty() ? QStringLiteral("single") : m_tabs[m_active].layout;
+}
 DirectoryModel *Application::activePane() const {
+    if (m_side == 3 && splitLayout() == "quad") return fourth();
+    if (m_side == 2 && (splitLayout() == "triple" || splitLayout() == "quad")) return third();
     return m_side == 1 && dual() ? right() : left();
 }
 bool Application::dual() const {
     return !m_tabs.isEmpty() && m_tabs[m_active].dual;
 }
+bool Application::gridFor(DirectoryModel *pane) const {
+    if (!pane || pane->uri().isEmpty()) return false;
+    const auto key = QCryptographicHash::hash(pane->uri().toUtf8(), QCryptographicHash::Sha256).toHex();
+    return m_settings->store().value("folderViews/" + QString::fromLatin1(key), false).toBool();
+}
 bool Application::grid() const {
-    return !m_tabs.isEmpty() && m_tabs[m_active].grid;
+    return gridFor(activePane());
 }
 void Application::connectPane(DirectoryModel *pane) {
     connect(pane, &DirectoryModel::locationChanged, this, [this] {
@@ -285,11 +365,13 @@ void Application::connectPane(DirectoryModel *pane) {
     });
 }
 void Application::addTab(const QString &uri) {
-    Tab tab{new DirectoryModel(this), new DirectoryModel(this)};
+    Tab tab{new DirectoryModel(this), new DirectoryModel(this), new DirectoryModel(this), new DirectoryModel(this), false, false, "single"};
     m_tabs.append(tab);
     m_active = m_tabs.size() - 1;
     connectPane(tab.left);
     connectPane(tab.right);
+    connectPane(tab.third);
+    connectPane(tab.fourth);
     tab.left->navigate(uri.isEmpty() ? m_settings->values()["startFolder"].toString() : uri);
     m_side = 0;
     Q_EMIT tabsChanged();
@@ -306,6 +388,8 @@ void Application::closeTab(int index) {
     auto tab = m_tabs.takeAt(index);
     tab.left->deleteLater();
     tab.right->deleteLater();
+    tab.third->deleteLater();
+    tab.fourth->deleteLater();
     if (index < m_active)
         --m_active;
     m_active = qBound(0, m_active, int(m_tabs.size() - 1));
@@ -336,17 +420,24 @@ void Application::setActiveTab(int index) {
     Q_EMIT activePaneChanged();
 }
 void Application::setActiveSide(int side) {
-    m_side = side == 1 && dual() ? 1 : 0;
+    const int count = splitLayout() == "quad" ? 4 : splitLayout() == "triple" ? 3 : dual() ? 2 : 1;
+    m_side = qBound(0, side, count - 1);
+    Q_EMIT tabsChanged();
     Q_EMIT activePaneChanged();
 }
 void Application::setDual(bool enabled) {
-    if (m_tabs.isEmpty())
-        return;
-    m_tabs[m_active].dual = enabled;
-    if (enabled && right()->uri().isEmpty())
-        right()->navigate(left()->uri());
-    if (!enabled)
-        m_side = 0;
+    setSplitLayout(enabled ? QStringLiteral("horizontal") : QStringLiteral("single"));
+}
+void Application::setSplitLayout(const QString &layout) {
+    if (m_tabs.isEmpty() || !QStringList{"single", "horizontal", "vertical", "triple", "quad"}.contains(layout)) return;
+    auto &tab = m_tabs[m_active];
+    tab.layout = layout;
+    tab.dual = layout != "single";
+    if (tab.dual && tab.right->uri().isEmpty()) tab.right->navigate(tab.left->uri());
+    if ((layout == "triple" || layout == "quad") && tab.third->uri().isEmpty()) tab.third->navigate(tab.left->uri());
+    if (layout == "quad" && tab.fourth->uri().isEmpty()) tab.fourth->navigate(tab.left->uri());
+    const int count = layout == "quad" ? 4 : layout == "triple" ? 3 : tab.dual ? 2 : 1;
+    if (m_side >= count) m_side = 0;
     Q_EMIT tabsChanged();
     Q_EMIT activePaneChanged();
     m_saveTimer.start();
@@ -355,6 +446,11 @@ void Application::setGrid(bool enabled) {
     if (m_tabs.isEmpty())
         return;
     m_tabs[m_active].grid = enabled;
+    if (auto *pane = activePane()) {
+        const auto key = QCryptographicHash::hash(pane->uri().toUtf8(), QCryptographicHash::Sha256).toHex();
+        m_settings->store().setValue("folderViews/" + QString::fromLatin1(key), enabled);
+        m_settings->store().sync();
+    }
     Q_EMIT tabsChanged();
     m_saveTimer.start();
 }
@@ -893,7 +989,8 @@ QJsonObject Application::state() const {
     QJsonArray array;
     for (const auto &tab : m_tabs)
         array.append(QJsonObject{
-            {"left", tab.left->uri()}, {"right", tab.right->uri()}, {"dual", tab.dual}, {"grid", tab.grid}});
+            {"left", tab.left->uri()}, {"right", tab.right->uri()}, {"dual", tab.dual}, {"grid", tab.grid},
+            {"layout", tab.layout}, {"third", tab.third->uri()}, {"fourth", tab.fourth->uri()}});
     return {{"tabs", array}, {"active", m_active}};
 }
 void Application::saveSession() {

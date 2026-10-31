@@ -1,5 +1,6 @@
 #pragma once
 #include <QObject>
+#include <QStringList>
 #include <QVariantMap>
 #include <memory>
 
@@ -15,6 +16,9 @@ class FileProperties : public QObject {
     QVariantMap details() const;
     bool busy() const;
     Q_INVOKABLE void inspect(const QString &uri);
+    // One unique selection retains single-file editing; merged selections are read-only.
+    Q_INVOKABLE void inspectMany(const QStringList &uris);
+    Q_INVOKABLE void cancelInspection();
     Q_INVOKABLE void applyPermissions(int mode);
     // Dot names are renamed without the dot to un-hide; others use the parent's .hidden list.
     Q_INVOKABLE void setHidden(bool hidden);
@@ -25,6 +29,8 @@ class FileProperties : public QObject {
     void hiddenApplied(bool hidden);
 
   private:
+    friend class PropertiesManyTest;
+    qsizetype m_entryLimit = 250000;
     struct Private;
     std::unique_ptr<Private> d;
 };

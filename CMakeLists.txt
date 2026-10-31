@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(nook VERSION 0.3.3 LANGUAGES CXX)
+project(nook VERSION 0.3.4 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -17,11 +17,13 @@ add_library(nook_core STATIC
     src/operations.cpp src/operations.h src/undorecord.cpp src/undorecord.h
     src/searchindex.cpp src/searchindex.h
     src/preview.cpp src/preview.h src/application.cpp src/application.h
+    src/updatechecker.cpp src/updatechecker.h
+    src/previewdocuments.cpp src/previewdocuments.h
     src/fileproperties.cpp src/fileproperties.h
     src/diskmounts.cpp src/diskmounts.h src/ntfs.cpp src/ntfs.h
     src/filemanager1.cpp src/filemanager1.h src/filechooser.cpp src/filechooser.h src/appearance.cpp src/appearance.h)
 target_link_libraries(nook_core PUBLIC Qt6::Core Qt6::Gui Qt6::Quick Qt6::Concurrent Qt6::Network Qt6::DBus
-    PkgConfig::GIO PkgConfig::ICU SQLite3::SQLite3 nook_archive)
+    PkgConfig::GIO PkgConfig::ICU PkgConfig::LIBARCHIVE SQLite3::SQLite3 nook_archive)
 target_include_directories(nook_core PUBLIC src)
 target_compile_definitions(nook_core PUBLIC QT_NO_KEYWORDS)
 target_compile_options(nook_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -57,6 +59,7 @@ set(NOOK_ICONS
     qml/icons/back.svg qml/icons/forward.svg qml/icons/up.svg qml/icons/refresh.svg
     qml/icons/cut.svg qml/icons/copy.svg qml/icons/paste.svg qml/icons/rename.svg
     qml/icons/list.svg qml/icons/grid.svg qml/icons/split.svg qml/icons/terminal.svg
+    qml/icons/split-single.svg qml/icons/split-vertical.svg qml/icons/split-triple.svg qml/icons/split-quad.svg
     qml/icons/hidden.svg qml/icons/filter.svg qml/icons/calendar.svg qml/icons/undo.svg
     qml/icons/redo.svg qml/icons/select-all.svg qml/icons/select.svg qml/icons/sun.svg
     qml/icons/moon.svg qml/icons/archive.svg qml/icons/lock.svg qml/icons/info.svg
@@ -109,6 +112,27 @@ if(BUILD_TESTING)
     add_test(NAME mount-helper COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/mount_helper_test.py)
     add_test(NAME volume-helper COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/volume_helper_test.py)
     add_test(NAME archive-compare-checks COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/tests/archive_compare_test.py)
+    qt_add_executable(nook-directory-features-tests tests/directorymodel_features_test.cpp)
+    target_link_libraries(nook-directory-features-tests PRIVATE nook_core Qt6::Test Qt6::QuickControls2)
+    target_compile_definitions(nook-directory-features-tests PRIVATE NOOK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME directory-features COMMAND nook-directory-features-tests)
+    set_tests_properties(directory-features PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+    qt_add_executable(nook-preview-documents-tests tests/preview_documents_test.cpp)
+    target_link_libraries(nook-preview-documents-tests PRIVATE nook_core Qt6::Test)
+    add_test(NAME preview-documents COMMAND nook-preview-documents-tests)
+    set_tests_properties(preview-documents PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    qt_add_executable(nook-feature-ui-tests tests/feature_ui_test.cpp)
+    target_link_libraries(nook-feature-ui-tests PRIVATE nook_core Qt6::Test Qt6::QuickControls2)
+    target_compile_definitions(nook-feature-ui-tests PRIVATE NOOK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME feature-ui COMMAND nook-feature-ui-tests)
+    set_tests_properties(feature-ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+    qt_add_executable(nook-viewstate-tests tests/viewstate_test.cpp)
+    target_link_libraries(nook-viewstate-tests PRIVATE nook_core Qt6::Test)
+    add_test(NAME viewstate COMMAND nook-viewstate-tests)
+    set_tests_properties(viewstate PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    qt_add_executable(nook-updatechecker-tests tests/updatechecker_test.cpp)
+    target_link_libraries(nook-updatechecker-tests PRIVATE nook_core Qt6::Test)
+    add_test(NAME updatechecker COMMAND nook-updatechecker-tests)
     qt_add_executable(nook-tests tests/core_test.cpp)
     target_link_libraries(nook-tests PRIVATE nook_core Qt6::Test)
     add_test(NAME core COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/run-core.sh $<TARGET_FILE:nook-tests>)
@@ -122,6 +146,10 @@ if(BUILD_TESTING)
     qt_add_executable(nook-ntfs-tests tests/ntfs_test.cpp tests/ntfs_image.h)
     target_link_libraries(nook-ntfs-tests PRIVATE nook_core Qt6::Test)
     add_test(NAME ntfs COMMAND nook-ntfs-tests)
+    qt_add_executable(nook-properties-many-tests tests/properties_many_test.cpp)
+    target_link_libraries(nook-properties-many-tests PRIVATE nook_core Qt6::Test)
+    add_test(NAME properties-many COMMAND nook-properties-many-tests)
+    set_tests_properties(properties-many PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     qt_add_executable(nook-properties-tests tests/properties_test.cpp)
     target_link_libraries(nook-properties-tests PRIVATE nook_core Qt6::Test)
     add_test(NAME properties COMMAND nook-properties-tests)

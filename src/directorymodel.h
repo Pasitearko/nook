@@ -37,6 +37,9 @@ class DirectoryModel : public QAbstractListModel {
     // Shows only the items carrying this colour tag ("" shows all); cleared on leaving the folder.
     Q_PROPERTY(QString tagFilter READ tagFilter WRITE setTagFilter NOTIFY tagFilterChanged)
     Q_PROPERTY(bool tagView READ tagView NOTIFY locationChanged)
+    Q_PROPERTY(bool smartDates READ smartDates WRITE setSmartDates NOTIFY smartDatesChanged)
+    Q_PROPERTY(QString sortKey READ sortKey NOTIFY sortChanged)
+    Q_PROPERTY(bool sortDescending READ sortDescending NOTIFY sortChanged)
   public:
     enum Role {
         NameRole = Qt::UserRole + 1,
@@ -52,7 +55,12 @@ class DirectoryModel : public QAbstractListModel {
         BytesRole,
         OriginalRole,
         HiddenRole,
-        TagsRole
+        TagsRole,
+        ModifiedEpochRole,
+        SizeKnownRole,
+        CreatedRole,
+        CreatedEpochRole,
+        CreatedKnownRole
     };
     explicit DirectoryModel(QObject *parent = nullptr);
     ~DirectoryModel() override;
@@ -96,13 +104,27 @@ class DirectoryModel : public QAbstractListModel {
     bool canForward() const {
         return m_historyAt + 1 < m_history.size();
     }
+    bool smartDates() const {
+        return m_smartDates;
+    }
+    void setSmartDates(bool value);
+    QString sortKey() const {
+        return m_sort;
+    }
+    bool sortDescending() const {
+        return m_descending;
+    }
     void setShowHidden(bool value);
+    // Requested only by visible list delegates; queued serially, never traversed on the GUI thread.
+    Q_INVOKABLE void requestFolderSize(const QString &uri);
+    Q_INVOKABLE void releaseFolderSize(const QString &uri);
     Q_INVOKABLE void navigate(const QString &input);
     Q_INVOKABLE void refresh();
     Q_INVOKABLE void back();
     Q_INVOKABLE void forward();
     Q_INVOKABLE void up();
     Q_INVOKABLE QVariantMap entry(int row) const;
+    Q_INVOKABLE QString columnText(int row, int column) const;
     // First selected entry in view order; one map instead of building every row in QML.
     Q_INVOKABLE QVariantMap firstSelected() const;
     // Every selected entry, in list order.
@@ -141,10 +163,17 @@ class DirectoryModel : public QAbstractListModel {
     void tagFilterChanged();
     void selectionChanged();
     void firstBatch(qint64 milliseconds);
+    void smartDatesChanged();
+    void sortChanged();
 
   private:
     // keep: refresh in place (diffed, scroll and selection kept) instead of clearing first.
     void load(bool keep = false);
+    void restoreSort();
+    void sortEntries();
+    void cancelFolderSizes();
+    void startNextFolderSize();
+    QString modifiedText(qint64 seconds) const;
     void clearTagFilter();
     void apply(const QList<Change> &changes);
     void notifySelection(const QSet<QString> &previous);
@@ -162,5 +191,15 @@ class DirectoryModel : public QAbstractListModel {
     std::shared_ptr<const nook::EntryFilter> m_filter;
     QList<nook::Entry> filtered(QList<nook::Entry> entries) const;
     QFileSystemWatcher m_watcher;
-    QTimer m_refreshTimer;
+    QTimer m_refreshTimer, m_dateTimer, m_sortTimer;
+    bool m_smartDates = true;
+    // -2 = queued/running, -1 = unavailable; absence = not requested. Zero is a known empty folder.
+    QHash<QString, qint64> m_folderSizes;
+    QStringList m_sizeQueue;
+    QHash<QString, int> m_sizeUsers;
+    QString m_sizeUri;
+    quint64 m_orderGeneration = 0;
+    nook::Cancel m_sizeCancel;
+    quint64 m_sizeGeneration = 0;
+    bool m_sizeRunning = false;
 };

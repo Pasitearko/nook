@@ -481,6 +481,7 @@ Dialog {
                     Group {
                         visible: panel.category === 1; heading: "文件列表"
                         ToggleRow { title: "紧凑列表"; description: "减小行高，一屏显示更多文件"; checked: panel.prefs.dense; onToggled: value => panel.controller.settings.set("dense", value) }
+                        ToggleRow { objectName: "smartDatesToggle"; title: "智能日期"; description: "近期日期显示为今天、昨天和星期；关闭后显示完整日期时间"; checked: panel.prefs.smartDates; onToggled: value => panel.controller.settings.set("smartDates", value) }
                         ToggleRow { title: "悬停预览静态文件"; description: "指针在图片、文档上停留片刻后打开预览"; checked: panel.prefs.hoverPreview; onToggled: value => panel.controller.settings.set("hoverPreview", value) }
                         SettingRow {
                             title: "列宽"; description: "名称、修改时间、类型和大小四列的宽度"
@@ -741,6 +742,26 @@ Dialog {
                     }
                     Group {
                         visible: panel.category === 3; heading: "更新"
+                        SettingRow {
+                            title: "检查新版本"
+                            description: panel.controller.updates.status || "检查 GitHub Releases 上的最新正式版本。不会自动下载或安装。"
+                            RowButton {
+                                objectName: "checkUpdatesButton"
+                                text: panel.controller.updates.busy ? "检查中…" : "检查新版本"; iconName: "refresh"
+                                enabled: !panel.controller.updates.busy
+                                onClicked: panel.controller.updates.check()
+                            }
+                        }
+                        SettingRow {
+                            visible: panel.controller.updates.available
+                            title: "新版本 " + panel.controller.updates.latestVersion
+                            description: "在终端中下载安装包并运行 sudo pacman；只需输入 sudo 密码。安装后可在下方重启。"
+                            RowButton {
+                                objectName: "installUpdateButton"; text: "更新"; iconName: "terminal"
+                                enabled: !panel.controller.updates.busy && !panel.controller.operations.busy
+                                onClicked: panel.controller.updates.install()
+                            }
+                        }
                         SettingRow {
                             title: panel.controller.upgraded
                                    ? (panel.controller.installedVersion !== "" ? "新版本 " + panel.controller.installedVersion + " 已安装" : "新版本已安装")

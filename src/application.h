@@ -8,6 +8,7 @@
 #include "searchindex.h"
 #include "tags.h"
 #include "appearance.h"
+#include "updatechecker.h"
 #include <QJsonObject>
 #include <QSettings>
 #include <QVariantList>
@@ -54,6 +55,10 @@ class Application : public QObject {
     Q_PROPERTY(DirectoryModel *activePane READ activePane NOTIFY activePaneChanged)
     Q_PROPERTY(bool dual READ dual WRITE setDual NOTIFY tabsChanged)
     Q_PROPERTY(bool grid READ grid WRITE setGrid NOTIFY tabsChanged)
+    Q_PROPERTY(QString splitLayout READ splitLayout WRITE setSplitLayout NOTIFY tabsChanged)
+    Q_PROPERTY(DirectoryModel *third READ third NOTIFY tabsChanged)
+    Q_PROPERTY(DirectoryModel *fourth READ fourth NOTIFY tabsChanged)
+    Q_PROPERTY(UpdateChecker *updates READ updates CONSTANT)
     Q_PROPERTY(int activeSide READ activeSide WRITE setActiveSide NOTIFY activePaneChanged)
     Q_PROPERTY(QVariantList places READ places NOTIFY placesChanged)
     Q_PROPERTY(Operations *operations READ operations CONSTANT)
@@ -86,6 +91,12 @@ class Application : public QObject {
     DirectoryModel *activePane() const;
     bool dual() const;
     bool grid() const;
+    QString splitLayout() const;
+    DirectoryModel *third() const;
+    DirectoryModel *fourth() const;
+    UpdateChecker *updates() { return &m_updates; }
+    Q_INVOKABLE bool gridFor(DirectoryModel *pane) const;
+    void setSplitLayout(const QString &layout);
     int activeSide() const {
         return m_side;
     }
@@ -204,8 +215,9 @@ class Application : public QObject {
 
   private:
     struct Tab {
-        DirectoryModel *left, *right;
+        DirectoryModel *left, *right, *third, *fourth;
         bool dual = false, grid = false;
+        QString layout = "single";
     };
     void connectPane(DirectoryModel *pane);
     QStringList dropSources(const QStringList &uris, const QString &destination) const;
@@ -221,6 +233,7 @@ class Application : public QObject {
     std::shared_ptr<std::atomic_bool> m_describing;
     FileProperties m_properties;
     DiskMounts m_diskMounts;
+    UpdateChecker m_updates;
     QList<QFutureWatcher<QString> *> m_openWatchers;
     QTimer m_saveTimer;
     QProcess *m_diskProbe = nullptr;

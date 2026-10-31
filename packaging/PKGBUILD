@@ -1,13 +1,13 @@
 pkgname=nook
-pkgver=0.3.3
+pkgver=0.3.4
 pkgrel=1
 pkgdesc='A native Wayland file manager with filename search, a matching file chooser and an archive manager'
 arch=('x86_64')
 url='https://github.com/Pasitearko/nook'
 license=('Apache-2.0')
-depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-imageformats' 'glib2' 'sqlite' 'icu' 'libarchive' '7zip' 'libsecret' 'polkit' 'python' 'util-linux' 'systemd')
+depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-imageformats' 'glib2' 'sqlite' 'icu' 'libarchive' '7zip' 'libsecret' 'polkit' 'python' 'util-linux' 'systemd' 'curl' 'sudo')
 makedepends=('cmake' 'ninja' 'pkgconf' 'qt6-shadertools')
-optdepends=('poppler: PDF preview' 'ffmpeg: audio/video metadata and video cover' 'kitty: open a terminal' 'gvfs: desktop trash integration' 'udisks2: mount local data partitions on click')
+optdepends=('antiword: legacy Word DOC text preview' 'catdoc: legacy Excel XLS text preview' 'poppler: PDF preview' 'ffmpeg: audio/video metadata and video cover' 'kitty: open a terminal' 'gvfs: desktop trash integration' 'udisks2: mount local data partitions on click')
 source=("nook-${pkgver}.tar.gz")
 sha256sums=('REPLACED_BY_PACKAGE_SCRIPT')
 build() {

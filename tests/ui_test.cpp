@@ -313,7 +313,7 @@ class UiTest : public QObject {
         drag(handle, {-120, 0});
         clickItem(left->findChild<QQuickItem *>("saveColumnWidthsButton"));
         const auto saved = settings.values()["columnWidths"].toList();
-        QCOMPARE(saved.size(), 4);
+        QCOMPARE(saved.size(), 5);
         AppSettings reloaded;
         QCOMPARE(reloaded.values()["columnWidths"].toList(), saved);
         const auto savedX = handle->mapToItem(left, {0, 0}).x();

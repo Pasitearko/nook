@@ -13,7 +13,9 @@ using Cancel = std::shared_ptr<std::atomic_bool>;
 struct Entry {
     QString uri, name, kind, icon, originalUri;
     qint64 size = 0, modified = 0;
-    bool directory = false, symlink = false, hidden = false;
+    // Actual filesystem birth time, never Unix ctime; availability is distinct from epoch zero.
+    qint64 created = 0;
+    bool directory = false, symlink = false, hidden = false, createdKnown = false;
 };
 QString normalizeUri(const QString &input);
 QString localPath(const QString &uri);

@@ -38,8 +38,8 @@ ApplicationWindow {
     property real liveGridZoom: -1
     readonly property real listZoom: liveListZoom > 0 ? liveListZoom : Number(prefs.listZoom) || 1
     readonly property real gridZoom: liveGridZoom > 0 ? liveGridZoom : Number(prefs.gridZoom) || 1
-    function zoomView(value) {
-        app.settings.set(app.grid ? "gridZoom" : "listZoom", value)
+    function zoomView(value, gridMode) {
+        app.settings.set((gridMode === undefined ? app.grid : gridMode) ? "gridZoom" : "listZoom", value)
         liveListZoom = -1; liveGridZoom = -1
     }
     // The details pane needs the room of a maximized window, and a wide one. Tiling compositors
@@ -65,6 +65,10 @@ ApplicationWindow {
     readonly property real layoutHeight: height / uiScale
     readonly property bool editingText: activeFocusItem instanceof TextInput || activeFocusItem instanceof TextEdit
     readonly property bool dialogsOpen: settingsDialog.visible || propertiesDialog.visible || nameDialog.visible || deleteDialog.visible || conflictDialog.visible || closeDialog.visible || errorsDialog.visible || tagNameDialog.visible
+    readonly property var splitLayouts: ["single", "horizontal", "vertical", "triple", "quad"]
+    readonly property var splitLayoutNames: ["单栏", "左右双栏", "上下双栏", "三窗格", "四宫格"]
+    readonly property var splitLayoutIcons: ["split-single", "split", "split-vertical", "split-triple", "split-quad"]
+    readonly property int splitLayoutIndex: Math.max(0, splitLayouts.indexOf(app.splitLayout))
     readonly property bool menusOpen: contextMenu.visible || blankMenu.visible || quickAccessMenu.visible || tagMenu.visible || sortBox.popup.visible || scopeBox.popup.visible || typeBox.popup.visible || afterDate.pickerOpen || beforeDate.pickerOpen
     property bool closingAfterTask: false
     property var hoveredEntry: ({})
@@ -168,7 +172,9 @@ ApplicationWindow {
         app.activeSide = origin.side
         if (app.activePane.uri !== origin.uri) app.navigate(origin.uri)
     }
-    function focusActivePane() { if (app.activeSide === 1 && rightPane.visible) rightPane.focusFiles(); else leftPane.focusFiles() }
+    function activeFilePane() { return searching ? leftPane : ([leftPane, rightPane, thirdPane, fourthPane][app.activeSide] || leftPane) }
+    function focusActivePane() { activeFilePane().focusFiles() }
+    readonly property bool filesKeyboardActive: leftPane.keyboardActive || rightPane.keyboardActive || thirdPane.keyboardActive || fourthPane.keyboardActive
     function openInput(kind) {
         inputKind = kind
         inputDestination = contextModel && blankMenu.visible ? contextModel.uri : app.activePane.uri
@@ -227,6 +233,7 @@ ApplicationWindow {
         blankMenu.reopen()
     }
     function inspectProperties(uri) { app.properties.inspect(uri); propertiesDialog.open() }
+    function inspectSelection(model) { app.properties.inspectMany(model.selectedUris); propertiesDialog.open() }
     function runSearch() {
         if (!searching) { app.search.query(""); return }
         let min = Number(minSize.text || "0") * 1024 * 1024
@@ -362,6 +369,8 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+H"; onActivated: app.activePane.showHidden = !app.activePane.showHidden }
     Shortcut { sequence: "Ctrl+1"; onActivated: app.dual = false }
     Shortcut { sequence: "Ctrl+2"; onActivated: app.dual = true }
+    Shortcut { sequence: "Ctrl+3"; onActivated: app.splitLayout = "triple" }
+    Shortcut { sequence: "Ctrl+4"; onActivated: app.splitLayout = "quad" }
     Shortcut { sequence: "Escape"; onActivated: { if (app.preview.visible) app.preview.close(); else if (address.activeFocus) { address.text = app.activePane.displayPath; window.focusActivePane() } else if (selectionMode) selectionMode = false; else if (searching) searchBox.clear(); else currentModel().clearSelection() } }
 
     // Keep geometry, text, icons and popup hit targets in the same logical coordinate system.
@@ -764,7 +773,7 @@ ApplicationWindow {
                 ActionButton { plate: toolPlate; iconName: "rename"; hint: "重命名 · F2"; foreground: ink; enabled: currentModel().selectedCount === 1 && !app.activePane.uri.startsWith("trash:"); onClicked: window.openInput("rename") }
                 ActionButton { plate: toolPlate; iconName: "trash"; hint: "移入回收站 · Delete"; enabled: currentModel().selectedCount > 0; onClicked: window.removeSelection(false) }
                 Rectangle { width: 1; height: 19; color: line; Layout.leftMargin: 9; Layout.rightMargin: 9 }
-                NookComboBox { id: sortBox; Layout.preferredWidth: 108; Layout.preferredHeight: 36; font.pixelSize: 13; model: ["名称排序", "大小排序", "日期排序", "类型排序"]; enabled: !searching; onActivated: app.activePane.sortBy(["name", "size", "date", "type"][currentIndex], currentIndex === 2) }
+                NookComboBox { id: sortBox; Layout.preferredWidth: 108; Layout.preferredHeight: 36; font.pixelSize: 13; model: ["名称排序", "大小排序", "修改时间排序", "类型排序", "创建时间排序"]; currentIndex: ["name", "size", "date", "type", "created"].indexOf(app.activePane.sortKey); enabled: !searching; onActivated: app.activePane.sortBy(["name", "size", "date", "type", "created"][currentIndex], currentIndex === 2 || currentIndex === 4) }
                 ActionButton { plate: toolPlate; text: window.layoutWidth < 1100 ? "" : "隐藏文件"; iconName: "hidden"; hint: "显示/隐藏点文件 · Ctrl+H"; foreground: ink; active: app.activePane.showHidden; onClicked: app.activePane.showHidden = !app.activePane.showHidden }
                 ActionButton { plate: toolPlate; text: window.layoutWidth < 1050 ? "" : "筛选"; iconName: "filter"; hint: "搜索筛选"; foreground: ink; active: filtersVisible; onClicked: filtersVisible = !filtersVisible }
                 ActionButton {
@@ -787,7 +796,13 @@ ApplicationWindow {
                 ActionButton { plate: toolPlate; iconName: "list"; hint: "列表视图"; active: !app.grid; foreground: ink; onClicked: app.grid = false }
                 ActionButton { plate: toolPlate; iconName: "grid"; hint: "网格视图"; active: app.grid; foreground: ink; onClicked: app.grid = true }
                 Rectangle { width: 1; height: 19; color: line; Layout.leftMargin: 4; Layout.rightMargin: 4 }
-                ActionButton { plate: toolPlate; objectName: "dualPaneButton"; iconName: "split"; hint: "左右双栏 · Ctrl+2"; active: app.dual; foreground: ink; onClicked: app.dual = !app.dual }
+                ActionButton {
+                    plate: toolPlate; objectName: "dualPaneButton"
+                    iconName: window.splitLayoutIcons[window.splitLayoutIndex]
+                    hint: "分屏：" + window.splitLayoutNames[window.splitLayoutIndex] + " · 点击切换为" + window.splitLayoutNames[(window.splitLayoutIndex + 1) % window.splitLayouts.length]
+                    active: app.dual; foreground: ink
+                    onClicked: app.splitLayout = window.splitLayouts[(window.splitLayoutIndex + 1) % window.splitLayouts.length]
+                }
                 ActionButton { plate: toolPlate; objectName: "toolbarTerminalButton"; iconName: "terminal"; hint: "在此处打开 kitty"; foreground: ink; onClicked: app.terminal() }
                 ActionButton { plate: toolPlate; objectName: "detailsPaneButton"; visible: window.roomy; iconName: "details"; hint: "详细信息窗格"; active: prefs.detailsPane === true; foreground: ink; onClicked: app.settings.set("detailsPane", prefs.detailsPane !== true) }
             }
@@ -890,17 +905,27 @@ ApplicationWindow {
                         }
                     }
                     SplitView {
-                        id: splitView
+                        id: workspaceSplit
                         Layout.fillWidth: true; Layout.fillHeight: true
-                        orientation: Qt.Horizontal
-                        handle: Rectangle { implicitWidth: 9; color: "transparent"; Rectangle { anchors.centerIn: parent; width: 2; height: 28; radius: 1; color: SplitHandle.hovered ? accent : line } }
+                        orientation: Qt.Vertical
+                        handle: Rectangle { implicitHeight: 9; color: "transparent"; Rectangle { anchors.centerIn: parent; height: 2; width: 28; radius: 1; color: SplitHandle.hovered ? accent : line } }
+                    SplitView {
+                        id: splitView
+                        SplitView.fillWidth: true; SplitView.fillHeight: true; SplitView.minimumHeight: 150
+                        orientation: app.splitLayout === "vertical" ? Qt.Vertical : Qt.Horizontal
+                        handle: Rectangle {
+                            objectName: "paneSplitHandle"
+                            implicitWidth: 9; implicitHeight: 9; color: "transparent"
+                            Rectangle { anchors.centerIn: parent; width: splitView.orientation === Qt.Vertical ? 28 : 2; height: splitView.orientation === Qt.Vertical ? 2 : 28; radius: 1; color: SplitHandle.hovered ? accent : line }
+                        }
                         FilePane {
                             id: leftPane; objectName: "leftPane"
-                            SplitView.fillWidth: true; SplitView.minimumWidth: 240
+                            SplitView.fillWidth: true; SplitView.fillHeight: true; SplitView.minimumWidth: 180; SplitView.minimumHeight: 140
                             directoryModel: window.searching ? app.search.model : app.left
-                            controller: app; gridMode: app.grid; focusedPane: app.activeSide === 0; searchMode: window.searching; dark: window.dark; dense: prefs.dense
+                            controller: app; gridMode: { app.grid; return window.searching ? app.grid : app.gridFor(directoryModel) }
+                            focusedPane: app.activeSide === 0; searchMode: window.searching; searchText: searchBox.text; dark: window.dark; dense: prefs.dense
                             listZoom: window.listZoom; gridZoom: window.gridZoom; interfaceScale: window.uiScale
-                            onZoomStep: delta => window.zoomView(Math.round(((app.grid ? window.gridZoom : window.listZoom) + delta) * 100) / 100)
+                            onZoomStep: delta => window.zoomView(Math.round(((leftPane.gridMode ? window.gridZoom : window.listZoom) + delta) * 100) / 100, leftPane.gridMode)
                             onFocused: app.activeSide = 0
                             onActivated: entry => window.activate(entry)
                             onPreviewRequested: entry => window.preview(entry)
@@ -913,10 +938,11 @@ ApplicationWindow {
                         FilePane {
                             id: rightPane; objectName: "rightPane"
                             visible: app.dual && !window.searching
-                            SplitView.fillWidth: false; SplitView.preferredWidth: splitView.width / 2; SplitView.minimumWidth: visible ? 240 : 0
-                            directoryModel: app.right; controller: app; gridMode: app.grid; focusedPane: app.activeSide === 1; dark: window.dark; dense: prefs.dense
+                            SplitView.fillWidth: false; SplitView.fillHeight: false; SplitView.preferredWidth: splitView.width / 2; SplitView.preferredHeight: splitView.height / 2; SplitView.minimumWidth: visible ? 180 : 0; SplitView.minimumHeight: visible ? 140 : 0
+                            directoryModel: app.right; controller: app; gridMode: { app.grid; return app.gridFor(directoryModel) }
+                            focusedPane: app.activeSide === 1; dark: window.dark; dense: prefs.dense
                             listZoom: window.listZoom; gridZoom: window.gridZoom; interfaceScale: window.uiScale
-                            onZoomStep: delta => window.zoomView(Math.round(((app.grid ? window.gridZoom : window.listZoom) + delta) * 100) / 100)
+                            onZoomStep: delta => window.zoomView(Math.round(((rightPane.gridMode ? window.gridZoom : window.listZoom) + delta) * 100) / 100, rightPane.gridMode)
                             onFocused: app.activeSide = 1
                             onActivated: entry => window.activate(entry)
                             onPreviewRequested: entry => window.preview(entry)
@@ -925,6 +951,48 @@ ApplicationWindow {
                             onBlankContextRequested: (model, x, y) => window.showBlankContext(model, rightPane, x, y)
                             onHovered: entry => window.hoverEntry(entry)
                             onSpringRequested: uri => window.springLoad(() => { app.activeSide = 1; app.navigate(uri) })
+                        }
+                    }
+                        SplitView {
+                            id: lowerSplit
+                            visible: !window.searching && (app.splitLayout === "triple" || app.splitLayout === "quad")
+                            SplitView.fillWidth: true; SplitView.preferredHeight: workspaceSplit.height / 2; SplitView.minimumHeight: visible ? 150 : 0
+                            orientation: Qt.Horizontal
+                            handle: Rectangle { implicitWidth: 9; color: "transparent"; Rectangle { anchors.centerIn: parent; width: 2; height: 28; radius: 1; color: SplitHandle.hovered ? accent : line } }
+                        FilePane {
+                            id: thirdPane; objectName: "thirdPane"
+                            visible: true
+                            SplitView.fillWidth: true; SplitView.fillHeight: false; SplitView.preferredWidth: lowerSplit.width / 2; SplitView.preferredHeight: lowerSplit.height / 2; SplitView.minimumWidth: visible ? 180 : 0; SplitView.minimumHeight: visible ? 140 : 0
+                            directoryModel: app.third; controller: app; gridMode: { app.grid; return app.gridFor(directoryModel) }
+                            focusedPane: app.activeSide === 2; dark: window.dark; dense: prefs.dense
+                            listZoom: window.listZoom; gridZoom: window.gridZoom; interfaceScale: window.uiScale
+                            onZoomStep: delta => window.zoomView(Math.round(((thirdPane.gridMode ? window.gridZoom : window.listZoom) + delta) * 100) / 100, thirdPane.gridMode)
+                            onFocused: app.activeSide = 2
+                            onActivated: entry => window.activate(entry)
+                            onPreviewRequested: entry => window.preview(entry)
+                            onColumnsSaved: window.toast("当前列宽已保存")
+                            onContextRequested: (model, x, y) => window.showContext(model, thirdPane, x, y)
+                            onBlankContextRequested: (model, x, y) => window.showBlankContext(model, thirdPane, x, y)
+                            onHovered: entry => window.hoverEntry(entry)
+                            onSpringRequested: uri => window.springLoad(() => { app.activeSide = 2; app.navigate(uri) })
+                        }
+                        FilePane {
+                            id: fourthPane; objectName: "fourthPane"
+                            visible: app.splitLayout === "quad"
+                            SplitView.fillWidth: false; SplitView.fillHeight: false; SplitView.preferredWidth: lowerSplit.width / 2; SplitView.preferredHeight: lowerSplit.height / 2; SplitView.minimumWidth: visible ? 180 : 0; SplitView.minimumHeight: visible ? 140 : 0
+                            directoryModel: app.fourth; controller: app; gridMode: { app.grid; return app.gridFor(directoryModel) }
+                            focusedPane: app.activeSide === 3; dark: window.dark; dense: prefs.dense
+                            listZoom: window.listZoom; gridZoom: window.gridZoom; interfaceScale: window.uiScale
+                            onZoomStep: delta => window.zoomView(Math.round(((fourthPane.gridMode ? window.gridZoom : window.listZoom) + delta) * 100) / 100, fourthPane.gridMode)
+                            onFocused: app.activeSide = 3
+                            onActivated: entry => window.activate(entry)
+                            onPreviewRequested: entry => window.preview(entry)
+                            onColumnsSaved: window.toast("当前列宽已保存")
+                            onContextRequested: (model, x, y) => window.showContext(model, fourthPane, x, y)
+                            onBlankContextRequested: (model, x, y) => window.showBlankContext(model, fourthPane, x, y)
+                            onHovered: entry => window.hoverEntry(entry)
+                            onSpringRequested: uri => window.springLoad(() => { app.activeSide = 3; app.navigate(uri) })
+                        }
                         }
                     }
                     ActionButton { visible: searching && app.search.hasMore; text: "加载更多结果"; foreground: ink; Layout.alignment: Qt.AlignHCenter; onClicked: app.search.nextPage() }
@@ -970,26 +1038,26 @@ ApplicationWindow {
             }
         }
     }
-    Shortcut { sequence: "Ctrl+A"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: currentModel().selectAll() }
-    Shortcut { sequence: "Ctrl+C"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: app.copy(false, currentModel()) }
-    Shortcut { sequence: "Ctrl+X"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: app.copy(true, currentModel()) }
+    Shortcut { sequence: "Ctrl+A"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && window.filesKeyboardActive; onActivated: currentModel().selectAll() }
+    Shortcut { sequence: "Ctrl+C"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && window.filesKeyboardActive; onActivated: app.copy(false, currentModel()) }
+    Shortcut { sequence: "Ctrl+X"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && window.filesKeyboardActive; onActivated: app.copy(true, currentModel()) }
     Shortcut { sequence: "Ctrl+Z"; enabled: app.operations.canUndo && !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText; autoRepeat: false; onActivated: app.operations.undo() }
-    Shortcut { sequence: "Ctrl+V"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: app.paste() }
-    Shortcut { sequence: "Ctrl+Shift+C"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive) && currentModel().selectedCount > 0; onActivated: app.copyPaths(currentModel().selectedUris) }
-    Shortcut { sequence: "F2"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive) && currentModel().selectedCount === 1; onActivated: window.openInput("rename") }
+    Shortcut { sequence: "Ctrl+V"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && window.filesKeyboardActive; onActivated: app.paste() }
+    Shortcut { sequence: "Ctrl+Shift+C"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && window.filesKeyboardActive && currentModel().selectedCount > 0; onActivated: app.copyPaths(currentModel().selectedUris) }
+    Shortcut { sequence: "F2"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && window.filesKeyboardActive && currentModel().selectedCount === 1; onActivated: window.openInput("rename") }
     // Backspace goes up one level, as in Windows Explorer; never while typing in a field.
-    Shortcut { sequence: "Backspace"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && !window.searching && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: app.activePane.up() }
-    Shortcut { sequence: "Delete"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: window.removeSelection(false) }
+    Shortcut { sequence: "Backspace"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && !window.searching && window.filesKeyboardActive; onActivated: app.activePane.up() }
+    Shortcut { sequence: "Delete"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && window.filesKeyboardActive; onActivated: window.removeSelection(false) }
     Instantiator {
         model: 8
         delegate: Shortcut {
             required property int index
             sequence: "Alt+" + index
-            enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive || detailsPane.activeFocus)
+            enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (window.filesKeyboardActive || detailsPane.activeFocus)
             onActivated: window.toggleTag(index)
         }
     }
-    Shortcut { sequence: "Shift+Delete"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && (leftPane.keyboardActive || rightPane.keyboardActive); onActivated: window.removeSelection(true) }
+    Shortcut { sequence: "Shift+Delete"; enabled: !app.preview.visible && !window.dialogsOpen && !window.menusOpen && !window.editingText && window.filesKeyboardActive; onActivated: window.removeSelection(true) }
 
     NookMenu {
         id: contextMenu
@@ -1077,7 +1145,7 @@ ApplicationWindow {
         NookMenuItem { text: "移入回收站"; iconName: "trash"; shortcutText: "Del"; visible: !app.activePane.uri.startsWith("trash:"); onTriggered: window.removeSelection(false) }
         NookMenuItem { objectName: "permanentDeleteMenuItem"; text: "彻底删除…"; iconName: "trash"; shortcutText: "Shift Del"; danger: true; onTriggered: window.removeSelection(true) }
         MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
-        NookMenuItem { objectName: "filePropertiesMenuItem"; text: "属性"; iconName: "settings"; enabled: contextModel && contextModel.selectedCount === 1; onTriggered: window.inspectProperties(contextEntry.fileUri) }
+        NookMenuItem { objectName: "filePropertiesMenuItem"; text: "属性"; iconName: "settings"; enabled: contextModel && contextModel.selectedCount > 0; onTriggered: window.inspectSelection(contextModel) }
     }
     NookMenu {
         id: blankMenu
@@ -1379,7 +1447,7 @@ ApplicationWindow {
         function aimAtIcon() {
             const uri = app.preview.uri
             let icon = null
-            for (const pane of [app.activeSide === 1 ? rightPane : leftPane, leftPane, rightPane])
+            for (const pane of [window.activeFilePane(), leftPane, rightPane, thirdPane, fourthPane])
                 if (!icon && pane && pane.visible) icon = pane.iconRectOf(uri, previewOverlay)
             if (!icon) { zoomFrom = 0.965; zoomShift = Qt.point(0, 0); return }
             zoomFrom = Math.max(0.04, Math.max(icon.width / previewPanel.width, icon.height / previewPanel.height))
@@ -1410,8 +1478,7 @@ ApplicationWindow {
                 if (prefs.animations) { aimAtIcon(); previewEnter.restart() }
             } else {
                 suppressedHoverUri = app.preview.uri
-                if (app.activeSide === 1 && rightPane.visible) rightPane.focusFiles()
-                else leftPane.focusFiles()
+                window.focusActivePane()
                 if (prefs.animations) { aimAtIcon(); previewLeave.restart() }
             }
         }

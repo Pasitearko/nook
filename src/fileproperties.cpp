@@ -5,13 +5,17 @@
 #include "files.h"
 #include <QDateTime>
 #include <QFile>
+#include <QElapsedTimer>
+#include <limits>
 #include <QFutureWatcher>
 #include <QLocale>
 #include <QPointer>
+#include <QSet>
 #include <QtConcurrentRun>
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
 #include <functional>
 #include <gio/gio.h>
@@ -162,21 +166,18 @@ void timestamp(QVariantMap &details, GFileInfo *info, const char *attribute, con
     details[key] = seconds;
     details[key + "Text"] = QDateTime::fromSecsSinceEpoch(seconds).toLocalTime().toString("yyyy-MM-dd HH:mm");
 }
-Result inspectFile(const QString &input, GCancellable *cancel) {
-    Result result;
-    auto &details = result.details;
-    details = {{"uri", input}, {"permissionsSupported", false}, {"editable", false}};
+GPtr<GFile> selectionFile(const QString &input, Failure &failure) {
     if (input.isEmpty() || input.contains(QChar::Null)) {
-        result.failure = {QStringLiteral("invalidUri"), QStringLiteral("Select a file or directory first")};
-        return result;
+        failure = {QStringLiteral("invalidUri"), QStringLiteral("Select a file or directory first")};
+        return {};
     }
     GPtr<GFile> file;
     if (input.startsWith('/')) {
         const auto bytes = QFile::encodeName(input);
         if (QFile::decodeName(bytes) != input) {
-            result.failure = {QStringLiteral("invalidUri"),
-                              QStringLiteral("The path cannot be encoded losslessly; use its original URI")};
-            return result;
+            failure = {QStringLiteral("invalidUri"),
+                       QStringLiteral("The path cannot be encoded losslessly; use its original URI")};
+            return {};
         }
         file.reset(g_file_new_for_path(bytes.constData()));
     } else {
@@ -184,13 +185,21 @@ Result inspectFile(const QString &input, GCancellable *cancel) {
         const auto bytes = input.toUtf8();
         char *scheme = g_uri_parse_scheme(bytes.constData());
         if (!scheme) {
-            result.failure = {QStringLiteral("invalidUri"),
-                              QStringLiteral("An absolute path or URI is required")};
-            return result;
+            failure = {QStringLiteral("invalidUri"), QStringLiteral("An absolute path or URI is required")};
+            return {};
         }
         g_free(scheme);
         file.reset(g_file_new_for_uri(bytes.constData()));
     }
+    return file;
+}
+Result inspectFile(const QString &input, GCancellable *cancel, bool metadataOnly = false) {
+    Result result;
+    auto &details = result.details;
+    details = {{"uri", input}, {"permissionsSupported", false}, {"editable", false}};
+    auto file = selectionFile(input, result.failure);
+    if (!file)
+        return result;
     char *uri = g_file_get_uri(file.get());
     details["uri"] = QString::fromUtf8(uri);
     g_free(uri);
@@ -200,11 +209,14 @@ Result inspectFile(const QString &input, GCancellable *cancel) {
     details["path"] = QFile::decodeName(path);
 
     GError *error = nullptr;
-    GPtr<GFileInfo> info(g_file_query_info(
-        file.get(),
+    QByteArray attributes =
         "standard::display-name,standard::name,standard::type,standard::is-symlink,standard::size,"
         "time::modified,time::created,owner::user,owner::group,unix::mode,unix::uid,unix::gid,"
-        "unix::device,unix::inode",
+        "unix::device,unix::inode";
+    // GIO's local is-hidden implementation reads .hidden itself without our no-follow,
+    // regular-file/size guards; use hiddenFile() below instead.
+    if (path.isEmpty()) attributes += ",standard::is-hidden";
+    GPtr<GFileInfo> info(g_file_query_info(file.get(), attributes.constData(),
         G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, cancel, &error));
     if (!info) {
         result.failure = gioFailure(error);
@@ -219,7 +231,10 @@ Result inspectFile(const QString &input, GCancellable *cancel) {
     const auto size = static_cast<qint64>(g_file_info_get_size(info.get()));
     details["name"] = QString::fromUtf8(g_file_info_get_display_name(info.get()));
     const QByteArray baseName = path.mid(path.lastIndexOf('/') + 1);
-    details["hidden"] = !path.isEmpty() && nook::hiddenFile(path);
+    if (!path.isEmpty())
+        details["hidden"] = nook::hiddenFile(path);
+    else if (g_file_info_has_attribute(info.get(), G_FILE_ATTRIBUTE_STANDARD_IS_HIDDEN))
+        details["hidden"] = bool(g_file_info_get_is_hidden(info.get()));
     details["hiddenByName"] = baseName.startsWith('.');
     details["canHide"] = !path.isEmpty() && path != "/";
     details["type"] = symlink                         ? "symlink"
@@ -228,7 +243,8 @@ Result inspectFile(const QString &input, GCancellable *cancel) {
                                                       : "other";
     details["size"] = size;
     details["sizeText"] = nook::formatSize(size);
-    details["permissions"] = int(mode & 0777);
+    if (hasMode)
+        details["permissions"] = int(mode & 0777);
     details["owner"] = textAttribute(info.get(), G_FILE_ATTRIBUTE_OWNER_USER);
     details["group"] = textAttribute(info.get(), G_FILE_ATTRIBUTE_OWNER_GROUP);
     if (details["owner"].toString().isEmpty() &&
@@ -241,6 +257,8 @@ Result inspectFile(const QString &input, GCancellable *cancel) {
             QString::number(g_file_info_get_attribute_uint32(info.get(), G_FILE_ATTRIBUTE_UNIX_GID));
     timestamp(details, info.get(), G_FILE_ATTRIBUTE_TIME_MODIFIED, "modified");
     timestamp(details, info.get(), G_FILE_ATTRIBUTE_TIME_CREATED, "created");
+    if (metadataOnly)
+        return result;
     details["permissionsSupported"] = hasMode && supportedType && !path.isEmpty();
     if (!details["permissionsSupported"].toBool()) {
         permissionFailure(
@@ -309,6 +327,259 @@ Result inspectFile(const QString &input, GCancellable *cancel) {
     result.target = std::move(target);
     return result;
 }
+QString fileUri(GFile *file) {
+    char *uri = g_file_get_uri(file);
+    const auto text = QString::fromUtf8(uri);
+    g_free(uri);
+    return text;
+}
+
+// Totals describe the union of the selected trees, not a sum of independently sized roots.
+// Directory sizes (filesystem bookkeeping) are excluded; symlinks count only their own bytes.
+struct TreeTotals {
+    qint64 files = 0, directories = 0, symlinks = 0, other = 0, bytes = 0;
+    QSet<QByteArray> identities;
+    Failure failure;
+    QElapsedTimer clock;
+    qsizetype entries = 0, entryLimit;
+    bool exhausted = false;
+    explicit TreeTotals(qsizetype limit) : entryLimit(limit) { clock.start(); }
+    bool withinBudget() {
+        if (!exhausted && (++entries > entryLimit || clock.elapsed() > 15000)) {
+            exhausted = true;
+            fail({"limitExceeded", "属性统计已达到安全限制（250000 项或 15 秒），结果不完整。"});
+        }
+        return !exhausted;
+    }
+    void addBytes(qint64 count) {
+        count = std::max<qint64>(0, count);
+        if (count > std::numeric_limits<qint64>::max() - bytes) {
+            exhausted = true;
+            fail({"limitExceeded", "总大小超出可表示范围，结果不完整。"});
+        } else {
+            bytes += count;
+        }
+    }
+
+    void fail(const Failure &value) {
+        if (failure.message.isEmpty() && value.code != "cancelled")
+            failure = value;
+    }
+    bool remember(quint64 device, quint64 inode) {
+        const auto key = QByteArray::number(device) + ':' + QByteArray::number(inode);
+        if (identities.contains(key))
+            return false;
+        identities.insert(key);
+        return true;
+    }
+    void visitLocal(int parent, const QByteArray &name, GCancellable *cancel, int depth = 0) {
+        if (g_cancellable_is_cancelled(cancel) || !withinBudget())
+            return;
+        struct stat st{};
+        if (::fstatat(parent, name.constData(), &st, AT_SYMLINK_NOFOLLOW) != 0) {
+            fail(systemFailure(errno));
+            return;
+        }
+        if (!remember(st.st_dev, st.st_ino))
+            return;
+        if (!S_ISDIR(st.st_mode)) {
+            if (S_ISREG(st.st_mode))
+                ++files;
+            else if (S_ISLNK(st.st_mode))
+                ++symlinks;
+            else
+                ++other;
+            if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode))
+                addBytes(st.st_size);
+            return;
+        }
+        ++directories;
+        // Bound both native stack use and the number of retained ancestor descriptors.
+        if (depth >= 128) {
+            fail({"notSupported", "Folder nesting exceeds the safe inspection limit (128 levels)"});
+            return;
+        }
+        // Resolve each child relative to its open parent, never through a mutable pathname
+        // prefix. O_NOFOLLOW also closes the query/enumeration symlink replacement race.
+        Fd fd(::openat(parent, name.constData(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+        if (fd.value < 0) {
+            fail(systemFailure(errno));
+            return;
+        }
+        struct stat opened{};
+        if (::fstat(fd.value, &opened) != 0) {
+            fail(systemFailure(errno));
+            return;
+        }
+        if (!sameFile(st, opened)) {
+            fail(replaced());
+            return;
+        }
+        const auto closeDirectory = [](DIR *dir) { ::closedir(dir); };
+        std::unique_ptr<DIR, decltype(closeDirectory)> directory(::fdopendir(fd.value), closeDirectory);
+        if (!directory) {
+            fail(systemFailure(errno));
+            return;
+        }
+        fd.value = -1; // fdopendir owns it now.
+        while (!g_cancellable_is_cancelled(cancel) && !exhausted) {
+            errno = 0;
+            const auto *entry = ::readdir(directory.get());
+            if (!entry) {
+                if (errno)
+                    fail(systemFailure(errno));
+                break;
+            }
+            const QByteArray child(entry->d_name);
+            if (child != "." && child != "..")
+                visitLocal(::dirfd(directory.get()), child, cancel, depth + 1);
+        }
+    }
+    void visitRemote(GFile *file, GCancellable *cancel) {
+        if (g_cancellable_is_cancelled(cancel) || !withinBudget())
+            return;
+        GError *error = nullptr;
+        GPtr<GFileInfo> info(g_file_query_info(
+            file, "standard::type,standard::is-symlink,standard::size,id::filesystem,id::file",
+            G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, cancel, &error));
+        if (!info) {
+            fail(gioFailure(error));
+            g_clear_error(&error);
+            return;
+        }
+        const auto fs = textAttribute(info.get(), G_FILE_ATTRIBUTE_ID_FILESYSTEM);
+        const auto id = textAttribute(info.get(), G_FILE_ATTRIBUTE_ID_FILE);
+        if (!fs.isEmpty() && !id.isEmpty()) {
+            const auto key = QByteArray("remote:") + fs.toUtf8() + '\0' + id.toUtf8();
+            if (identities.contains(key))
+                return;
+            identities.insert(key);
+        }
+        const auto type = g_file_info_get_file_type(info.get());
+        if (g_file_info_get_is_symlink(info.get()) || type == G_FILE_TYPE_SYMBOLIC_LINK) {
+            ++symlinks;
+            addBytes(g_file_info_get_size(info.get()));
+        } else if (type == G_FILE_TYPE_DIRECTORY) {
+            ++directories;
+            // GIO's NOFOLLOW flag governs returned metadata, not opening the directory.
+            // Without directory-relative handles it cannot prevent ancestor replacement
+            // from redirecting traversal through a symlink. Report an explicitly partial
+            // result rather than silently traversing a remote link target.
+            fail({"notSupported", "Safe recursive totals are unavailable for non-local folders"});
+        } else if (type == G_FILE_TYPE_REGULAR) {
+            ++files;
+            addBytes(g_file_info_get_size(info.get()));
+        } else {
+            ++other;
+        }
+    }
+    void visit(GFile *file, GCancellable *cancel) {
+        char *path = g_file_get_path(file);
+        if (path)
+            visitLocal(AT_FDCWD, QByteArray(path), cancel);
+        else
+            visitRemote(file, cancel);
+        g_free(path);
+    }
+};
+
+Result inspectFiles(const QStringList &inputs, GCancellable *cancel, qsizetype entryLimit) {
+    Result result;
+    std::vector<GPtr<GFile>> selected;
+    QSet<QString> seen;
+    for (const auto &input : inputs) {
+        if (qsizetype(selected.size()) >= entryLimit) {
+            result.failure = {"limitExceeded", "所选项目超出安全统计限制，结果不完整。"};
+            break;
+        }
+        if (g_cancellable_is_cancelled(cancel))
+            return result;
+        Failure failure;
+        auto file = selectionFile(input, failure);
+        if (!file) {
+            if (result.failure.message.isEmpty())
+                result.failure = failure;
+            continue;
+        }
+        const auto uri = fileUri(file.get());
+        if (!seen.contains(uri)) {
+            seen.insert(uri);
+            selected.push_back(std::move(file));
+        }
+    }
+    // Do not turn an invalid multi-selection into an editable, apparently single target.
+    if (selected.size() == 1 && result.failure.message.isEmpty())
+        return inspectFile(fileUri(selected.front().get()), cancel);
+    if (selected.empty() && result.failure.message.isEmpty())
+        return inspectFile({}, cancel);
+
+    auto &details = result.details;
+    details = {{"multiple", true}, {"selectionCount", int(selected.size())}, {"editable", false},
+               {"permissionsSupported", false}, {"canHide", false},
+               {"permissionsErrorCode", "notSupported"},
+               {"permissionsError", "Merged properties are read-only"}};
+    const QStringList commonKeys = {"type", "owner", "group", "permissions", "hidden", "modified", "created"};
+    QVariantMap first;
+    QStringList mixed;
+    GPtr<GFile> location;
+    bool firstItem = true;
+    TreeTotals totals(entryLimit);
+    for (const auto &file : selected) {
+        if (totals.exhausted) {
+            for (const auto &key : commonKeys) if (!mixed.contains(key)) mixed.append(key);
+            location.reset();
+            break;
+        }
+        if (g_cancellable_is_cancelled(cancel))
+            return result;
+        const auto item = inspectFile(fileUri(file.get()), cancel, true);
+        if (!item.failure.message.isEmpty())
+            totals.fail(item.failure);
+        GPtr<GFile> parent(g_file_get_parent(file.get()));
+        if (firstItem) {
+            first = item.details;
+            location = std::move(parent);
+        } else {
+            for (const auto &key : commonKeys) {
+                if (item.details.value(key) != first.value(key) && !mixed.contains(key))
+                    mixed.append(key);
+            }
+            while (location && (!parent || (!g_file_equal(location.get(), parent.get()) &&
+                                            !g_file_has_prefix(parent.get(), location.get()))))
+                location.reset(g_file_get_parent(location.get()));
+        }
+        firstItem = false;
+        totals.visit(file.get(), cancel);
+    }
+    for (const auto &key : commonKeys) {
+        details[key + "Mixed"] = mixed.contains(key);
+        if (!mixed.contains(key) && first.contains(key)) {
+            details[key] = first.value(key);
+            if (first.contains(key + "Text"))
+                details[key + "Text"] = first.value(key + "Text");
+        }
+    }
+    details["mixedFields"] = mixed;
+    if (location) {
+        char *name = g_file_get_parse_name(location.get());
+        details["commonLocation"] = QString::fromUtf8(name);
+        details["commonLocationUri"] = fileUri(location.get());
+        g_free(name);
+    }
+    details["fileCount"] = totals.files;
+    details["directoryCount"] = totals.directories;
+    details["symlinkCount"] = totals.symlinks;
+    details["otherCount"] = totals.other;
+    details["itemCount"] = totals.files + totals.directories + totals.symlinks + totals.other;
+    details["size"] = totals.bytes;
+    details["totalSize"] = totals.bytes;
+    details["sizeText"] = nook::formatSize(totals.bytes);
+    if (result.failure.message.isEmpty())
+        result.failure = totals.failure;
+    details["partial"] = !result.failure.message.isEmpty();
+    return result;
+}
+
 Result changePermissions(const std::shared_ptr<Target> &target, QVariantMap details, int mode,
                          GCancellable *cancel) {
     Result result;
@@ -455,6 +726,23 @@ void FileProperties::inspect(const QString &uri) {
     d->details.clear();
     d->start(this, [uri](GCancellable *cancel) { return inspectFile(uri, cancel); });
 }
+void FileProperties::inspectMany(const QStringList &uris) {
+    d->cancelJobs();
+    d->target.reset();
+    d->details.clear();
+    // Mark merged requests read-only immediately, including while their result is pending.
+    d->details["multiple"] = uris.size() > 1;
+    d->start(this, [uris, limit = m_entryLimit](GCancellable *cancel) { return inspectFiles(uris, cancel, limit); });
+}
+void FileProperties::cancelInspection() {
+    if (!d->busy || !d->details.value("multiple").toBool()) return;
+    d->cancelJobs();
+    ++d->generation;
+    d->busy = false;
+    d->target.reset();
+    d->details.clear();
+    Q_EMIT changed();
+}
 void FileProperties::applyPermissions(int mode) {
     Failure failure;
     if (mode < 0 || (mode & ~0777) != 0)
@@ -485,7 +773,8 @@ void FileProperties::applyPermissions(int mode) {
 }
 void FileProperties::setHidden(bool hidden) {
     const auto uri = d->details.value("uri").toString();
-    if (d->busy || uri.isEmpty() || !d->details.value("canHide").toBool())
+    if (d->busy || d->details.value("multiple").toBool() || uri.isEmpty() ||
+        !d->details.value("canHide").toBool())
         return;
     d->cancelJobs();
     d->target.reset();

@@ -9,6 +9,7 @@
 #include <QStorageInfo>
 #include <QUrl>
 #include <gio/gio.h>
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -131,6 +132,10 @@ QVariantMap entryMap(const Entry &e) {
             {"bytes", e.size},
             {"sizeText", e.directory ? QStringLiteral("—") : formatSize(e.size)},
             {"modified", e.modified},
+            {"created", e.created},
+            {"createdKnown", e.createdKnown},
+            {"createdText", e.createdKnown ? QDateTime::fromSecsSinceEpoch(e.created).toLocalTime().toString("yyyy-MM-dd HH:mm")
+                                       : QStringLiteral("—")},
             {"modifiedText",
              QDateTime::fromSecsSinceEpoch(e.modified).toLocalTime().toString("yyyy-MM-dd HH:mm")},
             {"kind", e.kind},
@@ -149,11 +154,11 @@ QList<Entry> enumerate(const QString &uri, bool hidden, const Cancel &cancel, QS
     const bool local = dirPath != nullptr;
     const auto listed = local ? hiddenNames(QByteArray(dirPath)) : QSet<QByteArray>();
     g_free(dirPath);
-    auto *iter =
-        g_file_enumerate_children(dir,
-                                  "standard::name,standard::display-name,standard::type,standard::size,"
-                                  "standard::is-hidden,standard::is-symlink,time::modified,trash::orig-path",
-                                  G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, nullptr, &failure);
+    QByteArray attributes = "standard::name,standard::display-name,standard::type,standard::size,"
+                            "standard::is-symlink,time::modified,time::created,trash::orig-path";
+    if (!local) attributes += ",standard::is-hidden";
+    auto *iter = g_file_enumerate_children(dir, attributes.constData(),
+                                         G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, nullptr, &failure);
     if (iter) {
         while (!cancel->load()) {
             GFileInfo *info = g_file_enumerator_next_file(iter, nullptr, &failure);
@@ -176,6 +181,8 @@ QList<Entry> enumerate(const QString &uri, bool hidden, const Cancel &cancel, QS
                 e.hidden = isHidden;
                 e.size = g_file_info_get_size(info);
                 e.modified = static_cast<qint64>(g_file_info_get_attribute_uint64(info, "time::modified"));
+                e.createdKnown = g_file_info_has_attribute(info, "time::created");
+                e.created = static_cast<qint64>(g_file_info_get_attribute_uint64(info, "time::created"));
                 e.icon = iconFor(e.name, e.directory);
                 e.kind = e.directory ? QStringLiteral("文件夹")
                                      : (e.symlink ? QStringLiteral("符号链接")
@@ -217,7 +224,7 @@ bool entryAt(const QString &uri, Entry *entry) {
     GFile *file = g_file_new_for_uri(uri.toUtf8().constData());
     GFileInfo *info = g_file_query_info(file,
                                         "standard::name,standard::display-name,standard::type,standard::size,"
-                                        "standard::is-symlink,time::modified",
+                                        "standard::is-symlink,time::modified,time::created",
                                         G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, nullptr, nullptr);
     if (info) {
         Entry &e = *entry;
@@ -231,6 +238,8 @@ bool entryAt(const QString &uri, Entry *entry) {
         e.hidden = rawName && rawName[0] == '.';
         e.size = g_file_info_get_size(info);
         e.modified = static_cast<qint64>(g_file_info_get_attribute_uint64(info, "time::modified"));
+        e.createdKnown = g_file_info_has_attribute(info, "time::created");
+        e.created = static_cast<qint64>(g_file_info_get_attribute_uint64(info, "time::created"));
         e.icon = iconFor(e.name, e.directory);
         e.kind = e.directory ? QStringLiteral("文件夹")
                              : (e.symlink ? QStringLiteral("符号链接") : QFileInfo(e.name).suffix().toUpper());
@@ -355,10 +364,31 @@ bool validName(const QString &name) {
 }
 QSet<QByteArray> hiddenNames(const QByteArray &directory) {
     QSet<QByteArray> names;
-    QFile file(QFile::decodeName(directory + "/.hidden"));
-    if (file.size() > 1024 * 1024 || !file.open(QIODevice::ReadOnly))
+    // Never follow a user-supplied .hidden link or block opening a FIFO/device. Validate
+    // the opened descriptor, and bound actual reads even if the file grows after fstat.
+    constexpr qint64 limit = 1024 * 1024;
+    const int parent = ::open(directory.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (parent < 0) return names;
+    const int fd = ::openat(parent, ".hidden", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    ::close(parent);
+    if (fd < 0) return names;
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > limit) {
+        ::close(fd);
         return names;
-    for (auto line : file.readAll().split('\n')) {
+    }
+    QByteArray contents;
+    char buffer[16384];
+    while (contents.size() <= limit) {
+        const auto count = ::read(fd, buffer, std::min<qint64>(sizeof(buffer), limit + 1 - contents.size()));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { contents.clear(); break; }
+        if (!count) break;
+        contents.append(buffer, count);
+    }
+    ::close(fd);
+    if (contents.size() > limit) return names;
+    for (auto line : contents.split('\n')) {
         if (line.endsWith('\r'))
             line.chop(1);
         if (!line.isEmpty())

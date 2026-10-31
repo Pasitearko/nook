@@ -323,7 +323,7 @@ ApplicationWindow {
                         objectName: "chooserPane"
                         Layout.fillWidth: true; Layout.fillHeight: true
                         directoryModel: window.listModel
-                        controller: app; gridMode: window.gridView; focusedPane: true; searchMode: window.searching
+                        controller: app; gridMode: window.gridView; focusedPane: true; searchMode: window.searching; searchText: searchBox.text
                         dark: window.dark; dense: true; showHeader: false; useSavedWidths: false
                         emptyText: window.rulesOf(window.filterIndex).length || window.pickFolders ? "这里没有符合“" + (window.pickFolders ? "文件夹" : request.filters[window.filterIndex].name) + "”的项目" : "这个文件夹是空的"
                         onActivated: entry => window.activate(entry)

@@ -1,4 +1,5 @@
 #include "preview.h"
+#include "previewdocuments.h"
 #include "storage.h"
 #include "files.h"
 #include <QCoreApplication>
@@ -216,6 +217,8 @@ QVariantMap makePreview(const QString &uri, int page, bool thumbnail) {
         return result;
     }
     const QString kind = nook::iconFor(info.fileName(), false), ext = info.suffix().toLower();
+    if (!thumbnail && nook::documentPreview(path, page, &result))
+        return result;
     QString cache = cacheDirectory();
     QByteArray key = (uri + '|' + QString::number(info.size()) + '|' +
                       QString::number(info.lastModified().toMSecsSinceEpoch()) + '|' + QString::number(page) +
@@ -533,6 +536,12 @@ void Preview::open(const QString &uri, int page) {
                 process->deleteLater();
             });
     process->setProcessEnvironment(nook::workerEnvironment());
+    process->setChildProcessModifier([] {
+        // Bound libarchive metadata and decoder dictionaries before any untrusted parser runs.
+        const struct rlimit memory{1536ull * 1024 * 1024, 1536ull * 1024 * 1024};
+        if (::setrlimit(RLIMIT_AS, &memory) != 0)
+            ::_exit(1);
+    });
     process->start(m_executable.isEmpty() ? QCoreApplication::applicationFilePath() : m_executable,
                    {"--preview-worker", uri, QString::number(page)});
     timer->start();
