@@ -749,6 +749,9 @@ void DirectoryModel::sortBy(const QString &key, bool descending) {
     else
         sortEntries();
 }
+void DirectoryModel::resortEntries() {
+    sortEntries();
+}
 void DirectoryModel::sortEntries() {
     if (m_loading || m_entries.isEmpty())
         return;

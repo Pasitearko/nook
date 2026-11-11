@@ -773,7 +773,22 @@ ApplicationWindow {
                 ActionButton { plate: toolPlate; iconName: "rename"; hint: "重命名 · F2"; foreground: ink; enabled: currentModel().selectedCount === 1 && !app.activePane.uri.startsWith("trash:"); onClicked: window.openInput("rename") }
                 ActionButton { plate: toolPlate; iconName: "trash"; hint: "移入回收站 · Delete"; enabled: currentModel().selectedCount > 0; onClicked: window.removeSelection(false) }
                 Rectangle { width: 1; height: 19; color: line; Layout.leftMargin: 9; Layout.rightMargin: 9 }
-                NookComboBox { id: sortBox; Layout.preferredWidth: 108; Layout.preferredHeight: 36; font.pixelSize: 13; model: ["名称排序", "大小排序", "修改时间排序", "类型排序", "创建时间排序"]; currentIndex: ["name", "size", "date", "type", "created"].indexOf(app.activePane.sortKey); enabled: !searching; onActivated: app.activePane.sortBy(["name", "size", "date", "type", "created"][currentIndex], currentIndex === 2 || currentIndex === 4) }
+                NookComboBox {
+                    id: sortBox; objectName: "sortBox"
+                    Layout.preferredWidth: 108; Layout.preferredHeight: 36; font.pixelSize: 13
+                    model: ["名称排序", "大小排序", "修改时间排序", "类型排序", "创建时间排序"]
+                    currentIndex: Math.max(0, ["name", "size", "date", "type", "created"].indexOf(currentModel().sortKey))
+                    enabled: !!currentModel()
+                    onActivated: {
+                        const model = window.currentModel()
+                        if (!model) return
+                        const keys = ["name", "size", "date", "type", "created"]
+                        const key = keys[currentIndex]
+                        // Picking the current field again keeps its direction; a new field starts with its usual one.
+                        const same = model.sortKey === key
+                        model.sortBy(key, same ? model.sortDescending : (key === "date" || key === "created"))
+                    }
+                }
                 ActionButton { plate: toolPlate; text: window.layoutWidth < 1100 ? "" : "隐藏文件"; iconName: "hidden"; hint: "显示/隐藏点文件 · Ctrl+H"; foreground: ink; active: app.activePane.showHidden; onClicked: app.activePane.showHidden = !app.activePane.showHidden }
                 ActionButton { plate: toolPlate; text: window.layoutWidth < 1050 ? "" : "筛选"; iconName: "filter"; hint: "搜索筛选"; foreground: ink; active: filtersVisible; onClicked: filtersVisible = !filtersVisible }
                 ActionButton {

@@ -86,8 +86,31 @@ class UiTest : public QObject {
         QVERIFY(input);
         input->setProperty("text", "missing");
         QTest::qWait(350);
-        QTRY_VERIFY(!search.model()->loading());
-        QCOMPARE(search.model()->count(), 0);
+        auto *searchModel = controller.search()->model();
+        QTRY_VERIFY(!searchModel->loading());
+        QCOMPARE(searchModel->count(), 0);
+        // Sorting stays available over search results: the toolbar box and the column headers.
+        auto *sortBox = root->findChild<QQuickItem *>("sortBox");
+        QVERIFY(sortBox);
+        QVERIFY2(sortBox->isEnabled(), "The sort box must remain enabled while searching");
+        sortBox->setProperty("currentIndex", 1);
+        QVERIFY(QMetaObject::invokeMethod(sortBox, "activated", Q_ARG(int, 1)));
+        QTRY_COMPARE(searchModel->sortKey(), QStringLiteral("size"));
+        // Column headers live in a Repeater, whose delegates are visual children only.
+        std::function<QQuickItem *(QQuickItem *, const QString &)> visual = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+            if (item->objectName() == name)
+                return item;
+            for (auto *child : item->childItems())
+                if (auto *hit = visual(child, name))
+                    return hit;
+            return nullptr;
+        };
+        auto *nameHeader = visual(left, "columnDragArea0");
+        QVERIFY(nameHeader);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          nameHeader->mapToScene({nameHeader->width() / 2, nameHeader->height() / 2}).toPoint());
+        QTRY_COMPARE(searchModel->sortKey(), QStringLiteral("name"));
+        QVERIFY(!searchModel->sortDescending());
         input->setProperty("text", "");
         QTest::qWait(250);
         QVERIFY(window->grabWindow().save(QString(NOOK_BINARY_DIR) + "/ui-main.png"));

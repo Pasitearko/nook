@@ -658,7 +658,7 @@ Rectangle {
                                     if (event.button === Qt.RightButton) {
                                         const p = mapToItem(pane, event.x, event.y)
                                         columnMenu.popup(p.x, p.y)
-                                    } else if (!pane.searchMode) {
+                                    } else {
                                         directoryModel.sortBy(["name", "date", "type", "size", "created"][column.index],
                                                               pane.sortColumn === column.index ? !pane.descending : false)
                                     }

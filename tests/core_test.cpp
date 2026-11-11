@@ -805,6 +805,40 @@ class CoreTest : public QObject {
         QTRY_VERIFY(!index.model()->loading());
         QCOMPARE(index.model()->count(), 0);
     }
+    void searchResultsKeepChosenSort() {
+        QTemporaryDir dir(QDir::currentPath() + "/fixture-XXXXXX");
+        QDir().mkdir(dir.path() + "/data");
+        put(dir.path() + "/data/alpha-3.txt", QByteArray(30, 'a'));
+        put(dir.path() + "/data/beta-1.txt", QByteArray(10, 'b'));
+        put(dir.path() + "/data/gamma-2.txt", QByteArray(20, 'c'));
+        SearchIndex index(dir.path() + "/db/index.sqlite");
+        index.setRoots({dir.path() + "/data"});
+        index.start();
+        QTRY_VERIFY_WITH_TIMEOUT(!index.scanning(), 10000);
+        index.query("txt");
+        QTRY_VERIFY(!index.model()->loading());
+        QCOMPARE(index.model()->count(), 3);
+        QVERIFY(index.model()->uri().isEmpty()); // a transient results feed, not a folder listing
+        index.model()->sortBy("size", true);
+        QCOMPARE(index.model()->sortKey(), QStringLiteral("size"));
+        QVERIFY(index.model()->sortDescending());
+        auto names = [&] {
+            QStringList result;
+            for (int i = 0; i < index.model()->count(); ++i)
+                result.append(index.model()->entry(i)["fileName"].toString());
+            return result;
+        };
+        QTRY_COMPARE(names(), (QStringList{"alpha-3.txt", "gamma-2.txt", "beta-1.txt"}));
+        // A new query arrives in database order, but the sort picked in the toolbar still applies.
+        index.query("txt");
+        QTRY_VERIFY(!index.model()->loading());
+        QTRY_COMPARE(names(), (QStringList{"alpha-3.txt", "gamma-2.txt", "beta-1.txt"}));
+        // Changing the sort while the query is still running is honoured when its rows arrive.
+        index.query("txt");
+        index.model()->sortBy("size", false);
+        QTRY_VERIFY(!index.model()->loading());
+        QTRY_COMPARE(names(), (QStringList{"beta-1.txt", "gamma-2.txt", "alpha-3.txt"}));
+    }
     void boundedPreviews() {
         QTemporaryDir dir(QDir::currentPath() + "/fixture-XXXXXX");
         put(dir.path() + "/sample.json", "{\"hello\":\"world\"}");

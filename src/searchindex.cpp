@@ -1141,6 +1141,9 @@ void SearchIndex::runQuery(bool append) {
                 else
                     guard->m_results.replaceEntries(rows);
                 guard->m_results.setBusy(false, error);
+                // Results arrive in database order; keep the sort the user picked in the toolbar
+                // or the column header, including across new queries and "load more" pages.
+                guard->m_results.resortEntries();
                 Q_EMIT guard->resultsChanged();
             },
             Qt::QueuedConnection);

@@ -138,6 +138,8 @@ class DirectoryModel : public QAbstractListModel {
     // (a band in selection mode flips what it covers).
     Q_INVOKABLE void selectRows(const QList<int> &rows, const QStringList &base = {}, bool toggle = false);
     Q_INVOKABLE void sortBy(const QString &key, bool descending = false);
+    // Re-apply the current sort to rows delivered by an external feed (the search index).
+    void resortEntries();
     // rules: [{type: 0 glob | 1 MIME type, pattern}]; none = every file.
     Q_INVOKABLE void setFilter(const QVariantList &rules, bool foldersOnly = false);
     void replaceEntries(QList<nook::Entry> entries);
