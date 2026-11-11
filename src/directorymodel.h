@@ -1,5 +1,6 @@
 #pragma once
 #include "files.h"
+#include "filegroups.h"
 #include <QAbstractListModel>
 #include <QFileSystemWatcher>
 #include <QRegularExpression>
@@ -22,6 +23,7 @@ struct EntryFilter {
 
 class DirectoryModel : public QAbstractListModel {
     Q_OBJECT
+    Q_PROPERTY(FileGroups *groups READ groups CONSTANT)
     Q_PROPERTY(QString uri READ uri NOTIFY locationChanged)
     Q_PROPERTY(QString displayPath READ displayPath NOTIFY locationChanged)
     Q_PROPERTY(QString title READ title NOTIFY locationChanged)
@@ -67,6 +69,7 @@ class DirectoryModel : public QAbstractListModel {
     int rowCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &index, int role) const override;
     QHash<int, QByteArray> roleNames() const override;
+    FileGroups *groups() const { return m_groups; }
     QString uri() const {
         return m_uri;
     }
@@ -180,6 +183,7 @@ class DirectoryModel : public QAbstractListModel {
     void apply(const QList<Change> &changes);
     void notifySelection(const QSet<QString> &previous);
     void notifySelection();
+    FileGroups *m_groups;
     QString m_uri, m_error, m_sort = "name", m_pendingSelection, m_tagFilter;
     QStringList m_history;
     int m_historyAt = -1, m_anchor = -1;

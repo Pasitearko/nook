@@ -240,6 +240,205 @@ class FollowupUiTest : public QObject {
         fixture.reset();
     }
 
+    void collapsibleGroupingToolbarAndList() {
+        auto *button = item("groupingButton");
+        auto *hidden = item("hiddenFilesButton");
+        QVERIFY(button && hidden);
+        QCOMPARE(hidden->property("text").toString(), QString());
+        auto *groups = controller->left()->groups();
+        QCOMPARE(groups->mode(), QString("none"));
+        click(button);
+        auto *menu = object("groupingMenu");
+        QVERIFY(menu); QTRY_VERIFY(menu->property("opened").toBool());
+        QTRY_VERIFY(item("groupType"));
+        click(item("groupType"));
+        QCOMPARE(groups->mode(), QString("type"));
+        QTRY_VERIFY(left->property("grouped").toBool());
+        QTRY_VERIFY(entry(uri("sample.txt")));
+        auto header = [&](const QString &key) -> QQuickItem * {
+            for (auto *heading : visualItems(left, "fileGroupHeader"))
+                if (heading->isVisible() && heading->property("groupKey").toString() == key) return heading;
+            return nullptr;
+        };
+        QTRY_VERIFY(header("04-documents"));
+        auto *documents = header("04-documents");
+        auto *select = findVisual(documents, "selectFileGroupButton");
+        click(select); QCOMPARE(controller->left()->selectedUris(), QStringList{uri("sample.txt")});
+        QTRY_COMPARE(documents->property("picked").toInt(), 1);
+        const auto at = documents->mapToScene({60, documents->height()/2}).toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, at);
+        QTRY_VERIFY(!entry(uri("sample.txt")));
+        QCOMPARE(controller->left()->selectedCount(), 1);
+        QTRY_VERIFY(header("04-documents")->property("collapsed").toBool());
+        QVERIFY(!object("nameDialog")->property("visible").toBool());
+        click(header("04-documents"));
+        QTRY_VERIFY(entry(uri("sample.txt")));
+        // Header hit-testing must never translate its layout index into a real file row.
+        auto *area = item("emptyAreaPointer");
+        auto *view = item("groupedFileList");
+        QVERIFY(area && view);
+        documents = header("04-documents");
+        QVERIFY(documents);
+        const auto inView = documents->mapToItem(view, {50, documents->height()/2});
+        QVariant hit;
+        QVERIFY(QMetaObject::invokeMethod(left, "sourceAt", Q_RETURN_ARG(QVariant, hit),
+                Q_ARG(QVariant, QVariant::fromValue(view)), Q_ARG(QVariant, inView.x()),
+                Q_ARG(QVariant, inView.y() + view->property("contentY").toReal())));
+        QCOMPARE(hit.toInt(), -1);
+        QVariant blankRows;
+        const double bottom = view->property("contentY").toReal() + view->height();
+        QVERIFY(QMetaObject::invokeMethod(left, "rowsIn", Q_RETURN_ARG(QVariant, blankRows),
+            Q_ARG(QVariant, 20), Q_ARG(QVariant, bottom-30), Q_ARG(QVariant, 300), Q_ARG(QVariant, bottom-10)));
+        const auto blank = blankRows.canConvert<QJSValue>() ? blankRows.value<QJSValue>().toVariant().toList() : blankRows.toList();
+        QVERIFY(blank.isEmpty()); // a band entirely below the last row must not select that row
+        auto *probe = dragProbe({uri("sample.txt")});
+        QVERIFY(probe);
+        hoverAt(probe, header("00-folders")); QTest::qWait(100);
+        QCOMPARE(left->property("dropRow").toInt(), -1);
+        hoverAt(probe, entry(uri("folder"))); QTest::qWait(100);
+        QVERIFY(left->property("dropRow").toInt() >= 0);
+        groups->collapseAll(); QTest::qWait(100);
+        QCOMPARE(left->property("dropRow").toInt(), -1);
+        QMetaObject::invokeMethod(probe, "abandon"); probe->deleteLater();
+        groups->expandAll(); QTRY_VERIFY(entry(uri("sample.txt")));
+        window->resize(920, 640); QTest::qWait(100);
+        QVERIFY(button->mapRectToScene(button->boundingRect()).right() <= 920);
+        QVERIFY(item("toolbarTerminalButton")->mapRectToScene(item("toolbarTerminalButton")->boundingRect()).right() <= 920);
+        window->resize(1280, 820); QTest::qWait(100);
+        QVERIFY(window->grabWindow().save("/tmp/nook-grouping-list.png"));
+        left->setProperty("searchMode", true); QTRY_VERIFY(!left->property("grouped").toBool());
+        left->setProperty("searchMode", false); QTRY_VERIFY(left->property("grouped").toBool());
+    }
+
+    void groupingGridResizeSelectionAndKeyboard() {
+        left->setProperty("thumbnails", false);
+        for (const auto &name : {"a.png", "b.txt", "c.txt", "d.mp3"}) {
+            QFile file(fixture->path() + "/" + name);
+            QVERIFY(file.open(QIODevice::WriteOnly)); file.write("fixture");
+        }
+        controller->left()->refresh();
+        QTRY_VERIFY(!controller->left()->loading()); QTRY_COMPARE(controller->left()->count(), 6);
+        auto *groups = controller->left()->groups(); groups->setMode("type");
+        controller->setGrid(true);
+        QTRY_VERIFY(left->property("grouped").toBool());
+        QTRY_VERIFY(entry(uri("a.png"))); QTRY_VERIFY(entry(uri("d.mp3")));
+        auto *view = item("groupedFileList"); QVERIFY(view);
+        QVERIFY(groups->columns() > 1);
+        const auto imageRect = entry(uri("a.png"))->mapRectToScene(entry(uri("a.png"))->boundingRect());
+        const auto audioRect = entry(uri("d.mp3"))->mapRectToScene(entry(uri("d.mp3"))->boundingRect());
+        QVERIFY(audioRect.top() > imageRect.bottom()); // every heading spans the complete grid row
+        click(entry(uri("a.png")));
+        QTest::keyClick(window, Qt::Key_Down);
+        QTRY_COMPARE(controller->left()->selectedUris(), QStringList{uri("d.mp3")});
+        QTest::keyClick(window, Qt::Key_Down, Qt::ShiftModifier);
+        QTRY_COMPARE(controller->left()->selectedCount(), 2);
+        QTest::keyClick(window, Qt::Key_End);
+        QTRY_COMPARE(controller->left()->selectedUris(), QStringList{uri("sample.txt")});
+        auto *last = entry(uri("sample.txt")); QTRY_VERIFY(last);
+        const auto local = last->mapToItem(view, {last->width()/2, last->height()/2});
+        QVariant rows;
+        QVERIFY(QMetaObject::invokeMethod(left, "rowsIn", Q_RETURN_ARG(QVariant, rows),
+                Q_ARG(QVariant, local.x()-1), Q_ARG(QVariant, local.y()+view->property("contentY").toReal()-1),
+                Q_ARG(QVariant, local.x()+1), Q_ARG(QVariant, local.y()+view->property("contentY").toReal()+1)));
+        const auto pickedRows = rows.canConvert<QJSValue>() ? rows.value<QJSValue>().toVariant().toList() : rows.toList();
+        QCOMPARE(pickedRows.size(), 1);
+        QCOMPARE(controller->left()->entry(pickedRows.first().toInt())["fileUri"].toString(), uri("sample.txt"));
+        const int oldColumns = groups->columns();
+        window->resize(920, 640); QTest::qWait(120);
+        QVERIFY(groups->columns() <= oldColumns);
+        groups->collapseAll(); QTest::qWait(80);
+        QCOMPARE(controller->left()->selectedCount(), 1);
+        QVERIFY(!entry(uri("sample.txt")));
+        groups->expandAll();
+        QMetaObject::invokeMethod(view, "forceLayout");
+        QMetaObject::invokeMethod(left, "revealRow", Q_ARG(QVariant, groups->sourceForUri(uri("sample.txt"))));
+        QTRY_VERIFY(entry(uri("sample.txt")));
+        window->resize(1280, 820); QTest::qWait(100);
+        QVERIFY(window->grabWindow().save("/tmp/nook-grouping-grid.png"));
+        controller->setGrid(false); QTRY_VERIFY(entry(uri("sample.txt")));
+        QCOMPARE(controller->left()->selectedUris(), QStringList{uri("sample.txt")});
+    }
+
+    void groupingLongScrollHitsAndRefreshAnchor() {
+        left->setProperty("thumbnails", false);
+        QList<nook::Entry> files;
+        for (int i = 0; i < 900; ++i) {
+            nook::Entry file;
+            file.name = QString("%1.%2").arg(i, 4, 10, QLatin1Char('0')).arg(i < 300 ? "png" : "txt");
+            file.uri = uri(file.name); file.size = i; file.icon = nook::iconFor(file.name, false);
+            files.append(file);
+        }
+        auto *model = controller->left();
+        model->replaceEntries(files);
+        auto *groups = model->groups(); groups->setMode("type");
+        auto *view = item("groupedFileList"); QVERIFY(view);
+        for (bool grid : {false, true}) {
+            controller->setGrid(grid); QTest::qWait(80);
+            for (int at : {50, 290, 650}) {
+                QMetaObject::invokeMethod(left, "revealRow", Q_ARG(QVariant, at));
+                QTest::qWait(100);
+                int checked = 0;
+                for (auto *file : visualItems(left, "fileEntry")) {
+                    if (!file->isVisible()) continue;
+                    const auto point = file->mapToItem(view, {file->width()/2, file->height()/2});
+                    if (point.y() < 5 || point.y() > view->height()-5) continue;
+                    const double x = point.x() + view->property("contentX").toReal();
+                    const double y = point.y() + view->property("contentY").toReal();
+                    QVariant rows;
+                    QVERIFY(QMetaObject::invokeMethod(left, "rowsIn", Q_RETURN_ARG(QVariant, rows),
+                        Q_ARG(QVariant, x-1), Q_ARG(QVariant, y-1), Q_ARG(QVariant, x+1), Q_ARG(QVariant, y+1)));
+                    const auto picked = rows.canConvert<QJSValue>() ? rows.value<QJSValue>().toVariant().toList() : rows.toList();
+                    QCOMPARE(picked.size(), 1);
+                    QCOMPARE(model->entry(picked.first().toInt())["fileUri"].toString(), file->property("fileUri").toString());
+                    ++checked;
+                }
+                QVERIFY(checked > 0);
+            }
+        }
+        controller->setGrid(false); QTest::qWait(80);
+        QMetaObject::invokeMethod(left, "revealRow", Q_ARG(QVariant, 650)); QTest::qWait(100);
+        QVariant captured;
+        QVERIFY(QMetaObject::invokeMethod(left, "captureGroupViewport", Q_RETURN_ARG(QVariant, captured)));
+        const auto anchor = captured.canConvert<QJSValue>() ? captured.value<QJSValue>().toVariant().toMap() : captured.toMap();
+        const QString anchorUri = anchor.value("uri").toString();
+        QVERIFY(!anchorUri.isEmpty());
+        const double offset = anchor.value("offset").toDouble();
+        const double bandX = view->width()-90;
+        const double scrollY = view->property("contentY").toReal();
+        QVariant expectedRows;
+        QVERIFY(QMetaObject::invokeMethod(left, "rowsIn", Q_RETURN_ARG(QVariant, expectedRows),
+            Q_ARG(QVariant, bandX), Q_ARG(QVariant, scrollY+60), Q_ARG(QVariant, bandX+20), Q_ARG(QVariant, scrollY+165)));
+        const auto bandRows = expectedRows.canConvert<QJSValue>() ? expectedRows.value<QJSValue>().toVariant().toList() : expectedRows.toList();
+        QStringList expectedUris;
+        for (const auto &row : bandRows) expectedUris.append(model->entry(row.toInt())["fileUri"].toString());
+        QVERIFY(!expectedUris.isEmpty());
+        const auto from = view->mapToScene({bandX, 60}).toPoint();
+        const auto to = view->mapToScene({bandX+20, 165}).toPoint();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, from);
+        for (int step = 1; step <= 8; ++step) QTest::mouseMove(window, from+(to-from)*step/8);
+        QTRY_VERIFY(item("selectionBand")->isVisible());
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, to);
+        QTRY_COMPARE(model->selectedUris(), expectedUris);
+        std::reverse(files.begin(), files.end());
+        model->replaceEntries(files);
+        QTRY_VERIFY(groups->ready()); QTest::qWait(150);
+        QTRY_VERIFY(entry(anchorUri));
+        QVERIFY2(qAbs(entry(anchorUri)->mapToItem(view, {0, 0}).y() - offset) < 2,
+                 "Refresh/reorder must preserve the top file and its pixel offset");
+        const auto now = groups->sourceForUri(anchorUri);
+        groups->selectSource(now, 0);
+        left->setProperty("currentRow", now);
+        model->clearSelection();
+        QVariant active;
+        QVERIFY(QMetaObject::invokeMethod(left, "currentEntry", Q_RETURN_ARG(QVariant, active)));
+        const auto current = active.canConvert<QJSValue>() ? active.value<QJSValue>().toVariant().toMap() : active.toMap();
+        QVERIFY(current.value("fileUri").toString().isEmpty());
+        groups->selectGroup("01-images");
+        QVERIFY(QMetaObject::invokeMethod(left, "currentEntry", Q_RETURN_ARG(QVariant, active)));
+        const auto selected = active.canConvert<QJSValue>() ? active.value<QJSValue>().toVariant().toMap() : active.toMap();
+        QVERIFY(model->selectedUris().contains(selected.value("fileUri").toString()));
+    }
+
     void undoHistoryAndTaskCard() {
         auto *card = item("recentActivity");
         QVERIFY(card && !card->isVisible());
@@ -1367,8 +1566,12 @@ class FollowupUiTest : public QObject {
         QTRY_VERIFY(!operations->busy());
         QVERIFY2(operations->errors().isEmpty(), qPrintable(operations->errors().join("\n")));
 
+        // The watcher may still be reloading after the trash task finished. selectUri
+        // defers while loading, so a count of one could still be the deleted file.
+        QTRY_VERIFY(!controller->left()->loading());
+        QTRY_COMPARE(controller->left()->count(), 1);
         controller->left()->selectUri(uri("folder"));
-        QTRY_COMPARE(controller->left()->selectedCount(), 1);
+        QTRY_COMPARE(controller->left()->selectedUris(), QStringList{uri("folder")});
         QTest::keyClick(window, Qt::Key_Delete, Qt::ShiftModifier);
         QTRY_VERIFY(dialog->property("opened").toBool());
         QVERIFY(dialog->property("danger").toBool());

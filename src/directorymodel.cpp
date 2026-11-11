@@ -128,7 +128,7 @@ qint64 folderBytes(const QString &path, const nook::Cancel &cancel) {
 }
 } // namespace
 
-DirectoryModel::DirectoryModel(QObject *parent) : QAbstractListModel(parent) {
+DirectoryModel::DirectoryModel(QObject *parent) : QAbstractListModel(parent), m_groups(new FileGroups(this)) {
     m_dateTimer.setInterval(60000);
     connect(&m_dateTimer, &QTimer::timeout, this, [this] {
         if (m_smartDates && !m_entries.isEmpty())

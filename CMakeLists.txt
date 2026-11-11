@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(nook VERSION 0.3.5 LANGUAGES CXX)
+project(nook VERSION 3.0.6 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -13,7 +13,7 @@ find_package(SQLite3 REQUIRED)
 qt_standard_project_setup(REQUIRES 6.8)
 add_library(nook_core STATIC
     src/files.cpp src/files.h src/storage.cpp src/storage.h src/tags.cpp src/tags.h
-    src/directorymodel.cpp src/directorymodel.h
+    src/directorymodel.cpp src/directorymodel.h src/filegroups.cpp src/filegroups.h
     src/operations.cpp src/operations.h src/undorecord.cpp src/undorecord.h
     src/searchindex.cpp src/searchindex.h
     src/preview.cpp src/preview.h src/application.cpp src/application.h
@@ -60,7 +60,7 @@ set(NOOK_ICONS
     qml/icons/cut.svg qml/icons/copy.svg qml/icons/paste.svg qml/icons/rename.svg
     qml/icons/list.svg qml/icons/grid.svg qml/icons/split.svg qml/icons/terminal.svg
     qml/icons/split-single.svg qml/icons/split-vertical.svg qml/icons/split-triple.svg qml/icons/split-quad.svg
-    qml/icons/hidden.svg qml/icons/filter.svg qml/icons/calendar.svg qml/icons/undo.svg
+    qml/icons/group.svg qml/icons/hidden.svg qml/icons/filter.svg qml/icons/calendar.svg qml/icons/undo.svg
     qml/icons/redo.svg qml/icons/select-all.svg qml/icons/select.svg qml/icons/sun.svg
     qml/icons/moon.svg qml/icons/archive.svg qml/icons/lock.svg qml/icons/info.svg
     qml/icons/verify.svg qml/icons/extract.svg qml/icons/compress.svg
@@ -126,6 +126,10 @@ if(BUILD_TESTING)
     target_compile_definitions(nook-feature-ui-tests PRIVATE NOOK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME feature-ui COMMAND nook-feature-ui-tests)
     set_tests_properties(feature-ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+    qt_add_executable(nook-filegroups-tests tests/filegroups_test.cpp)
+    target_link_libraries(nook-filegroups-tests PRIVATE nook_core Qt6::Test)
+    add_test(NAME filegroups COMMAND nook-filegroups-tests)
+    set_tests_properties(filegroups PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     qt_add_executable(nook-viewstate-tests tests/viewstate_test.cpp)
     target_link_libraries(nook-viewstate-tests PRIVATE nook_core Qt6::Test)
     add_test(NAME viewstate COMMAND nook-viewstate-tests)

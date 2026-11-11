@@ -8,6 +8,77 @@ Rectangle {
     required property var directoryModel
     required property var controller
     property bool gridMode: false
+    property bool allowGrouping: true
+    readonly property bool grouped: allowGrouping && !listing && directoryModel.groups.active
+    readonly property var fileView: grouped ? groupedList : gridMode ? grid : list
+    readonly property real groupHeadingHeight: Math.round(38 * Math.max(0.9, ls))
+    Binding {
+        target: pane.directoryModel.groups; property: "columns"
+        value: pane.grouped && pane.gridMode ? Math.max(1, Math.floor(groupedList.width / (176 * pane.gs))) : 1
+        when: pane.allowGrouping
+    }
+    function sourceAt(view, x, y) {
+        const visual = view.indexAt(x, y)
+        if (!grouped || view !== groupedList) return visual
+        if (!directoryModel.groups.ready) return -1
+        const row = groupedList.itemAtIndex(visual)
+        if (!row || row.groupHeader) return -1
+        const column = gridMode ? Math.floor(x / grid.cellWidth) : 0
+        return column >= 0 && column < row.sourceRows.length ? row.sourceRows[column] : -1
+    }
+    function revealRow(row) {
+        if (grouped) {
+            const visual = directoryModel.groups.layoutRow(row)
+            if (visual >= 0) groupedList.positionViewAtIndex(visual, ListView.Contain)
+        } else fileView.positionViewAtIndex(row, ListView.Contain)
+    }
+    // ListView estimates variable-height rows. Use realized geometry for hits, never a
+    // theoretical sum of header heights, and keep the starting layout row during autoscroll.
+    function groupLayoutAtY(y) {
+        const low = groupedList.contentY, high = low + groupedList.height - 1
+        const at = groupedList.indexAt(1, Math.max(low, Math.min(high, y)))
+        if (at >= 0) return at
+        return y < low ? -1 : groupedList.count
+    }
+    function groupRowsBetween(first, last, x1, x2) {
+        const low = Math.max(0, Math.min(first, last))
+        const high = Math.min(groupedList.count - 1, Math.max(first, last))
+        if (low > high) return []
+        return directoryModel.groups.sourcesBetweenRows(low, high, x1, x2,
+            gridMode ? grid.cellWidth : groupedList.contentWidth, gridMode)
+    }
+    property var groupViewportAnchor: null
+    property var groupAnchorOverride: null
+    function captureGroupViewport() {
+        if (!grouped || groupedList.count === 0) return null
+        const at = groupedList.indexAt(1, groupedList.contentY + 1)
+        const line = groupedList.itemAtIndex(at)
+        if (!line) return null
+        return {folder: shownUri || directoryModel.uri, key: line.groupKey,
+            uri: line.sourceRows.length ? directoryModel.entry(line.sourceRows[0]).fileUri : "",
+            offset: line.y - groupedList.contentY, x: groupedList.contentX}
+    }
+    function restoreGroupViewport() {
+        const anchor = groupViewportAnchor
+        groupViewportAnchor = null
+        if (!anchor || !grouped || anchor.folder !== directoryModel.uri || !directoryModel.groups.ready) return
+        let row = anchor.uri ? directoryModel.groups.layoutRow(directoryModel.groups.sourceForUri(anchor.uri)) : -1
+        if (row < 0) row = directoryModel.groups.layoutForGroup(anchor.key)
+        if (row < 0) return
+        groupedList.forceLayout()
+        groupedList.positionViewAtIndex(row, ListView.Beginning)
+        groupedList.forceLayout()
+        const line = groupedList.itemAtIndex(row)
+        if (line) groupedList.contentY = Math.max(groupedList.originY,
+            Math.min(line.y - anchor.offset, groupedList.originY + Math.max(0, groupedList.contentHeight - groupedList.height)))
+        groupedList.contentX = Math.max(0, Math.min(anchor.x, groupedList.contentWidth - groupedList.width))
+    }
+    function toggleGroup(key, heading) {
+        groupAnchorOverride = {folder: directoryModel.uri, key: key, uri: "",
+            offset: heading.mapToItem(groupedList, 0, 0).y, x: groupedList.contentX}
+        directoryModel.groups.toggle(key)
+    }
+    onGroupedChanged: { endMotion(); hoverOwner = null; currentRow = -1; groupViewportAnchor = null }
     property bool focusedPane: false
     property bool searchMode: false
     // Bound by the window to its search field (including the chooser's independent search).
@@ -72,7 +143,33 @@ Rectangle {
     property color muted: theme.muted
     readonly property bool keyboardActive: keyArea.activeFocus && ApplicationWindow.window && ApplicationWindow.window.activeFocusItem === keyArea
     property int currentRow: -1
-    onCurrentRowChanged: { list.currentIndex = currentRow; grid.currentIndex = currentRow }
+    property string currentUri: ""
+    onCurrentRowChanged: {
+        currentUri = currentRow >= 0 ? directoryModel.entry(currentRow).fileUri || "" : ""
+        if (!grouped) { list.currentIndex = currentRow; grid.currentIndex = currentRow }
+    }
+    Connections {
+        target: pane.directoryModel.groups
+        function onModelAboutToBeReset() {
+            if (!pane.groupViewportAnchor) pane.groupViewportAnchor = pane.groupAnchorOverride || pane.captureGroupViewport()
+            pane.groupAnchorOverride = null
+            band.selecting = false
+        }
+        function onModelReset() { Qt.callLater(pane.restoreGroupViewport) }
+        function onReadyChanged() {
+            if (pane.directoryModel.groups.ready) return
+            if (!pane.groupViewportAnchor) pane.groupViewportAnchor = pane.captureGroupViewport()
+            band.selecting = false
+            springTimer.stop(); dropZone.springUri = ""; pane.springRow = -1; pane.dropRow = -1; dropZone.targetUri = ""
+        }
+        function onRevisionChanged() {
+            if (pane.grouped && pane.currentUri) pane.currentRow = pane.directoryModel.groups.sourceForUri(pane.currentUri)
+            if (dropZone.containsDrag) {
+                springTimer.stop(); dropZone.springUri = ""; pane.springRow = -1; pane.dropRow = -1; dropZone.targetUri = ""
+                Qt.callLater(() => { if (dropZone.containsDrag) { groupedList.forceLayout(); dropZone.locate(dropZone.pointerX, dropZone.pointerY) } })
+            }
+        }
+    }
     readonly property bool animated: controller.settings.values.animations
     property int dropRow: -1
     property int springRow: -1 // the folder that will open if the drag keeps hovering over it
@@ -123,7 +220,7 @@ Rectangle {
             pane.streaming = false
         }
         function onRearranging() {
-            if (!pane.animated || pane.populating || pane.motionKind === "morph") return
+            if (pane.grouped || !pane.animated || pane.populating || pane.motionKind === "morph") return
             pane.pendingFrom = pane.snapshot(pane.gridMode ? grid : list)
             pendingExpiry.restart()
         }
@@ -183,6 +280,20 @@ Rectangle {
     // Where a file's icon is on screen, in target's coordinates; null when it is not shown.
     function iconRectOf(uri, target) {
         const view = gridMode ? grid : list
+        if (grouped) {
+            for (const line of groupedList.contentItem.children) {
+                for (const holder of line.children) {
+                    for (const row of holder.children) {
+                        if (row.objectName !== "fileEntry" || !row.live || row.fileUri !== uri) continue
+                        const at = row.mapToItem(pane, 0, 0)
+                        if (at.y + row.height < 0 || at.y > height) return null
+                        const r = iconRect(at, gridMode, row.height), p = mapToItem(target, r.x, r.y)
+                        return Qt.rect(p.x, p.y, r.width, r.height)
+                    }
+                }
+            }
+            return null
+        }
         for (const row of view.contentItem.children) {
             if (row.objectName !== "fileEntry" || !row.live || row.fileUri !== uri) continue
             const at = placeOf(view, row.x, row.y, 0, 0)
@@ -217,6 +328,7 @@ Rectangle {
     }
     Component.onCompleted: { listLive = !gridMode; gridLive = gridMode }
     onGridModeChanged: {
+        if (grouped) { endMotion(); Qt.callLater(() => revealRow(currentRow)); return }
         const leaving = gridMode ? list : grid, view = gridMode ? grid : list
         // The first row on screen stays on screen in the other view.
         const top = leaving.indexAt(leaving.contentX + 12, leaving.contentY + 12)
@@ -363,7 +475,8 @@ Rectangle {
             const x = columnHeader.mapFromItem(pane, pane.columnDragPointer, 0).x
             const step = x < 28 ? -12 : x > columnHeader.width - 28 ? 12 : 0
             if (step) {
-                list.contentX = Math.max(0, Math.min(list.contentX + step, list.contentWidth - list.width))
+                const view = pane.fileView
+                view.contentX = Math.max(0, Math.min(view.contentX + step, view.contentWidth - view.width))
                 pane.moveColumnDrag(pane.draggedColumn, pane.columnDragPointer)
             }
         }
@@ -487,21 +600,29 @@ Rectangle {
     function selectRow(index, modifiers) {
         currentRow = index
         pane.focused()
-        directoryModel.select(index, ((modifiers & Qt.ControlModifier) ? 1 : 0) | ((modifiers & Qt.ShiftModifier) ? 2 : 0))
+        const flags = ((modifiers & Qt.ControlModifier) ? 1 : 0) | ((modifiers & Qt.ShiftModifier) ? 2 : 0)
+        if (grouped) directoryModel.groups.selectSource(index, flags)
+        else directoryModel.select(index, flags)
         pane.focusFiles()
     }
     function toggleRow(index, modifiers) {
         currentRow = index
         pane.focused()
-        directoryModel.select(index, 1 | ((modifiers & Qt.ShiftModifier) ? 2 : 0))
+        const flags = 1 | ((modifiers & Qt.ShiftModifier) ? 2 : 0)
+        if (grouped) directoryModel.groups.selectSource(index, flags)
+        else directoryModel.select(index, flags)
         pane.focusFiles()
     }
-    function currentEntry() { return directoryModel.firstSelected() }
+    function currentEntry() {
+        const entry = grouped && currentRow >= 0 ? directoryModel.entry(currentRow) : ({})
+        return entry.fileUri && directoryModel.selectedUris.indexOf(entry.fileUri) >= 0 ? entry : directoryModel.firstSelected()
+    }
     readonly property real rowHeight: Math.round((listing ? 62 : (dense ? 36 : 43)) * ls)
     // Rows whose visual box intersects the band (content coordinates), for list or grid.
     function rowsIn(x1, y1, x2, y2) {
         let rows = []
         const count = directoryModel.count
+        if (grouped) return groupRowsBetween(groupLayoutAtY(y1), groupLayoutAtY(y2), x1, x2)
         if (!gridMode) {
             // A row reaches across the whole list, past its last column.
             if (x2 < 9) return rows
@@ -526,7 +647,19 @@ Rectangle {
         anchors.fill: parent
         focus: pane.focusedPane
         Keys.onPressed: event => {
-            if (event.key === Qt.Key_Down || event.key === Qt.Key_Up) {
+            if (pane.grouped && [Qt.Key_Down, Qt.Key_Up, Qt.Key_Left, Qt.Key_Right, Qt.Key_Home, Qt.Key_End].indexOf(event.key) >= 0) {
+                let step = pane.gridMode ? directoryModel.groups.columns : 1
+                if (event.key === Qt.Key_Up) step = -step
+                if (event.key === Qt.Key_Left) step = -1
+                if (event.key === Qt.Key_Right) step = 1
+                if (event.key === Qt.Key_Home) step = -2147483647
+                if (event.key === Qt.Key_End) step = 2147483647
+                const row = event.key === Qt.Key_Down || event.key === Qt.Key_Up
+                        ? directoryModel.groups.moveVertical(pane.currentRow, event.key === Qt.Key_Up ? -1 : 1)
+                        : directoryModel.groups.moveSource(pane.currentRow, step)
+                if (row >= 0) { pane.selectRow(row, event.modifiers); pane.revealRow(row) }
+                event.accepted = true
+            } else if (event.key === Qt.Key_Down || event.key === Qt.Key_Up) {
                 let step = pane.gridMode ? Math.max(1, Math.floor(grid.width / grid.cellWidth)) : 1
                 let row = Math.max(0, Math.min(directoryModel.count - 1, pane.currentRow + (event.key === Qt.Key_Down ? step : -step)))
                 pane.selectRow(row, event.modifiers)
@@ -613,7 +746,7 @@ Rectangle {
                 }
                 Item {
                     id: columnTitles
-                    x: 14 - list.contentX; width: pane.columnsWidth; height: parent.height
+                    x: (pane.grouped ? 17 : 14) - pane.fileView.contentX; width: pane.columnsWidth; height: parent.height
                     Repeater {
                         model: [pane.listing ? "名称 / 位置" : "名称", "修改时间", "类型", "大小", "创建时间"]
                         Item {
@@ -700,8 +833,8 @@ Rectangle {
                     flickableDirection: Flickable.AutoFlickIfNeeded
                     ScrollBar.horizontal: NookScrollBar {}
                     // Alive, fading and inert while a morph leaves it.
-                    visible: pane.listLive
-                    model: pane.listLive ? directoryModel : null
+                    visible: !pane.grouped && pane.listLive
+                    model: !pane.grouped && pane.listLive ? directoryModel : null
                     enabled: !pane.gridMode
                     opacity: pane.morphFrom === "list" ? pane.leavingOpacity : 1
                     reuseItems: true
@@ -738,8 +871,8 @@ Rectangle {
                         NumberAnimation { property: "opacity"; to: 1; duration: 120 }
                         NumberAnimation { property: "scale"; to: 1; duration: 120 }
                     }
-                    delegate: fileDelegate
-                    onCurrentIndexChanged: if (!pane.gridMode && currentIndex !== pane.currentRow) pane.currentRow = currentIndex
+                    delegate: FileEntry {}
+                    onCurrentIndexChanged: if (!pane.grouped && !pane.gridMode && currentIndex !== pane.currentRow) pane.currentRow = currentIndex
                     HoverPlate {
                         objectName: "rowPlate"
                         // In the content item (a view does not reparent children there itself),
@@ -755,12 +888,12 @@ Rectangle {
                 GridView {
                     id: grid
                     anchors.fill: parent; anchors.margins: 8
-                    visible: pane.gridLive
-                    model: pane.gridLive ? directoryModel : null
+                    visible: !pane.grouped && pane.gridLive
+                    model: !pane.grouped && pane.gridLive ? directoryModel : null
                     enabled: pane.gridMode
                     opacity: pane.morphFrom === "grid" ? pane.leavingOpacity : 1
                     objectName: "fileGrid"
-                    onCurrentIndexChanged: if (pane.gridMode && currentIndex !== pane.currentRow) pane.currentRow = currentIndex
+                    onCurrentIndexChanged: if (!pane.grouped && pane.gridMode && currentIndex !== pane.currentRow) pane.currentRow = currentIndex
                     // As many 176 px tiles as fit, widened to share the row, so no strip is left over.
                     cellWidth: Math.floor(width / Math.max(1, Math.floor(width / (176 * pane.gs))))
                     // Its picture, the gaps and two lines of name (180 at the grid's own size).
@@ -798,7 +931,7 @@ Rectangle {
                         NumberAnimation { property: "opacity"; to: 1; duration: 120 }
                         NumberAnimation { property: "scale"; to: 1; duration: 120 }
                     }
-                    delegate: fileDelegate
+                    delegate: FileEntry {}
                     HoverPlate {
                         objectName: "rowPlate"
                         parent: grid.contentItem; z: 0.5
@@ -807,6 +940,65 @@ Rectangle {
                         animated: pane.animated
                         inset: 4
                         radius: 6; color: pane.theme.hover
+                    }
+                }
+                ListView {
+                    id: groupedList; objectName: "groupedFileList"
+                    anchors.fill: parent; anchors.margins: 8
+                    visible: pane.grouped
+                    model: pane.grouped ? pane.directoryModel.groups : null
+                    contentWidth: pane.gridMode ? width : Math.max(width, pane.columnsWidth + 24)
+                    flickableDirection: Flickable.AutoFlickIfNeeded
+                    clip: true; reuseItems: true; cacheBuffer: 180
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: NookScrollBar {}
+                    ScrollBar.horizontal: NookScrollBar {}
+                    delegate: Item {
+                        id: groupLine
+                        property bool pooled: false
+                        ListView.onPooled: pooled = true
+                        ListView.onReused: pooled = false
+                        required property bool groupHeader
+                        required property string groupKey
+                        required property string groupTitle
+                        required property int itemCount
+                        required property int pickedCount
+                        required property bool groupCollapsed
+                        required property var sourceRows
+                        width: groupedList.contentWidth
+                        height: groupHeader ? pane.groupHeadingHeight : pane.gridMode ? grid.cellHeight : pane.rowHeight
+                        GroupHeading {
+                            visible: groupLine.groupHeader
+                            width: Math.min(groupedList.width, parent.width); height: pane.groupHeadingHeight
+                            x: groupedList.contentX
+                            groupKey: groupLine.groupKey; title: groupLine.groupTitle
+                            count: groupLine.itemCount; picked: groupLine.pickedCount; collapsed: groupLine.groupCollapsed
+                        }
+                        Repeater {
+                            model: groupLine.groupHeader ? [] : groupLine.sourceRows
+                            delegate: Item {
+                                id: slot
+                                required property int index
+                                required property int modelData
+                                x: pane.gridMode ? index * grid.cellWidth : 0
+                                width: pane.gridMode ? grid.cellWidth : groupedList.contentWidth
+                                height: groupLine.height
+                                FileEntry {
+                                    groupedEntry: true
+                                    pooled: groupLine.pooled
+                                    readonly property var record: (pane.directoryModel.groups.revision, pane.directoryModel.entry(index))
+                                    index: slot.modelData
+                                    fileName: record.fileName || ""; fileUri: record.fileUri || ""
+                                    folder: record.folder || false; isLink: record.isLink || false
+                                    sizeText: record.sizeText || ""; modifiedText: record.modifiedText || ""
+                                    createdText: record.createdText || ""; modified: record.modified || 0
+                                    kind: record.kind || ""; iconName: record.iconName || "document"; fullPath: record.fullPath || ""
+                                    selected: (pane.directoryModel.selectedUris, pane.directoryModel.selectedUris.indexOf(fileUri) >= 0)
+                                    bytes: record.bytes || 0; hiddenItem: record.hidden || false
+                                    tags: (pane.tagStore.tags, pane.tagStore.tagsOf(fileUri))
+                                }
+                            }
+                        }
                     }
                 }
                 // Blank-space pointer: click clears, right-click opens the blank menu, and a left
@@ -826,10 +1018,11 @@ Rectangle {
                     property point pointer: Qt.point(0, 0)  // local coordinates
                     property var base: []
                     property int pressRow: -1
-                    readonly property var view: pane.gridMode ? grid : list
+                    property int originLayout: -1
+                    readonly property var view: pane.fileView
                     function contentPoint(x, y) {
                         const p = mapToItem(view, x, y)
-                        return Qt.point(p.x + view.contentX - view.originX, p.y + view.contentY - view.originY)
+                        return Qt.point(p.x + view.contentX - view.originX, p.y + view.contentY - (pane.grouped ? 0 : view.originY))
                     }
                     function onScrollbar(x, y) {
                         const p = mapToItem(view, x, y)
@@ -837,7 +1030,7 @@ Rectangle {
                     }
                     function rowAt(x, y) {
                         const p = mapToItem(view, x, y)
-                        return view.indexAt(p.x + view.contentX, p.y + view.contentY)
+                        return pane.sourceAt(view, p.x + view.contentX, p.y + view.contentY)
                     }
                     // Past the last column is still the row (a click there picks it, a drag draws a band).
                     function emptyAt(x, y) {
@@ -846,6 +1039,11 @@ Rectangle {
                     }
                     function bandAt(x, y) {
                         if (onScrollbar(x, y)) return false
+                        if (pane.grouped) {
+                            const p = mapToItem(view, x, y), visual = view.indexAt(p.x + view.contentX, p.y + view.contentY)
+                            const line = groupedList.itemAtIndex(visual)
+                            if (line && line.groupHeader) return false
+                        }
                         if (pane.pickMode || emptyAt(x, y)) return true
                         if (pane.gridMode) return false
                         const columnX = mapToItem(view, x, y).x + view.contentX - 9
@@ -853,16 +1051,24 @@ Rectangle {
                     }
                     function refreshBand() {
                         const c = contentPoint(pointer.x, pointer.y)
-                        directoryModel.selectRows(pane.rowsIn(Math.min(origin.x, c.x), Math.min(origin.y, c.y),
-                                                              Math.max(origin.x, c.x), Math.max(origin.y, c.y)), base, pane.pickMode)
+                        const rows = pane.grouped
+                            ? pane.groupRowsBetween(originLayout, pane.groupLayoutAtY(c.y), Math.min(origin.x, c.x), Math.max(origin.x, c.x))
+                            : pane.rowsIn(Math.min(origin.x, c.x), Math.min(origin.y, c.y), Math.max(origin.x, c.x), Math.max(origin.y, c.y))
+                        directoryModel.selectRows(rows, base, pane.pickMode)
                     }
                     onPressed: event => {
                         // Right presses on an item belong to it (its context menu).
+                        if (pane.grouped) {
+                            const p = mapToItem(view, event.x, event.y)
+                            const line = groupedList.itemAtIndex(view.indexAt(p.x + view.contentX, p.y + view.contentY))
+                            if (line && line.groupHeader) { event.accepted = false; return }
+                        }
                         const mine = event.button === Qt.RightButton ? emptyAt(event.x, event.y) : bandAt(event.x, event.y)
                         if (!mine) { event.accepted = false; return }
                         selecting = false; dragged = false
                         pressRow = emptyAt(event.x, event.y) ? -1 : rowAt(event.x, event.y)
                         origin = contentPoint(event.x, event.y); pointer = Qt.point(event.x, event.y)
+                        originLayout = pane.grouped ? pane.groupLayoutAtY(origin.y) : -1
                         // Selection mode bands flip what they cover (picked items are let go), keeping
                         // everything outside the band as it was.
                         base = pane.pickMode || (event.modifiers & Qt.ControlModifier) ? directoryModel.selectedUris.slice() : []
@@ -922,7 +1128,7 @@ Rectangle {
                     z: 3
                     // The anchor is stored in content coordinates, so it stays put while scrolling.
                     readonly property point start: band.view.mapToItem(files, band.origin.x - band.view.contentX + band.view.originX,
-                                                                        band.origin.y - band.view.contentY + band.view.originY)
+                                                                        band.origin.y - band.view.contentY + (pane.grouped ? 0 : band.view.originY))
                     readonly property real bandLeft: Math.max(0, Math.min(start.x, band.pointer.x))
                     readonly property real bandTop: Math.max(0, Math.min(start.y, band.pointer.y))
                     x: bandLeft; y: bandTop
@@ -960,9 +1166,9 @@ Rectangle {
                     property bool springArmed: true
                     property point restAt: Qt.point(0, 0)
                     function locate(x, y) {
-                        const view = pane.gridMode ? grid : list
+                        const view = pane.fileView
                         const p = mapToItem(view, x, y)
-                        const row = view.indexAt(p.x + view.contentX, p.y + view.contentY)
+                        const row = pane.sourceAt(view, p.x + view.contentX, p.y + view.contentY)
                         const e = row >= 0 ? directoryModel.entry(row) : null
                         pointerX = x; pointerY = y
                         // A folder under the pointer is the target, unless it is one of the dragged items.
@@ -1041,7 +1247,7 @@ Rectangle {
                     // The listing under a resting pointer changes when a folder opens or loads.
                     Connections {
                         target: pane.directoryModel
-                        function onCountChanged() { if (dropZone.containsDrag) dropZone.locate(dropZone.pointerX, dropZone.pointerY) }
+                        function onCountChanged() { if (dropZone.containsDrag && !pane.grouped) dropZone.locate(dropZone.pointerX, dropZone.pointerY) }
                         function onLocationChanged() {
                             if (!dropZone.containsDrag) return
                             dropZone.targetUri = ""
@@ -1053,7 +1259,7 @@ Rectangle {
                         interval: 16; repeat: true
                         running: dropZone.containsDrag && (dropZone.pointerY < 36 || dropZone.pointerY > dropZone.height - 36)
                         onTriggered: {
-                            const view = pane.gridMode ? grid : list
+                            const view = pane.fileView
                             const step = dropZone.pointerY < 36 ? -12 : 12
                             view.contentY = Math.max(view.originY, Math.min(view.contentY + step, view.originY + view.contentHeight - view.height))
                         }
@@ -1100,10 +1306,41 @@ Rectangle {
             Rectangle { visible: glide.view !== grid; width: 3; height: parent.height - 14; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; color: pane.theme.selectionBar; radius: 2 }
         }
     }
-    Component {
-        id: fileDelegate
-        Item {
+    component GroupHeading: Rectangle {
+        id: heading
+        required property string groupKey
+        required property string title
+        required property int count
+        required property int picked
+        required property bool collapsed
+        objectName: "fileGroupHeader"
+        radius: 6
+        color: headingMouse.containsMouse ? pane.theme.hover : pane.theme.pane
+        MouseArea {
+            id: headingMouse; anchors.fill: parent; hoverEnabled: true
+            acceptedButtons: Qt.LeftButton
+            onClicked: { pane.focused(); pane.focusFiles(); pane.toggleGroup(heading.groupKey, heading) }
+        }
+        RowLayout {
+            anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 8; spacing: 9
+            Text { text: "›"; rotation: heading.collapsed ? 0 : 90; color: pane.muted; font.pixelSize: 20; Layout.preferredWidth: 12
+                Behavior on rotation { enabled: pane.animated; NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+            }
+            Text { text: heading.title; color: pane.ink; font.pixelSize: 13; font.weight: Font.DemiBold }
+            Text { text: heading.count; color: pane.muted; font.pixelSize: 12 }
+            Text { visible: heading.picked > 0; text: "已选 " + heading.picked; color: pane.theme.accentText; font.pixelSize: 12 }
+            Rectangle { Layout.fillWidth: true; height: 1; color: pane.theme.line; opacity: 0.65; Layout.leftMargin: 5; Layout.rightMargin: 4 }
+            ActionButton {
+                objectName: "selectFileGroupButton"; iconName: "select"; hint: "选择“" + heading.title + "”中的全部项目"
+                implicitWidth: 28; implicitHeight: 28; leftPadding: 5; rightPadding: 5
+                foreground: pane.muted
+                onClicked: { pane.focused(); pane.directoryModel.groups.selectGroup(heading.groupKey); pane.focusFiles() }
+            }
+        }
+    }
+    component FileEntry: Item {
             id: item
+            property bool groupedEntry: false
             required property int index
             required property string fileName
             required property string fileUri
@@ -1125,12 +1362,13 @@ Rectangle {
             property bool pooled: false
             readonly property bool live: !removing && !pooled && index >= 0
             readonly property bool hovered: live && mouse.containsMouse && !pane.covered
-            enabled: live && !leaving
+            enabled: live && !leaving && (!groupedEntry || pane.directoryModel.groups.ready)
             function clearHover() {
                 if (pane.hoverOwner === item) { pane.hoverOwner = null; pane.hovered(({})) }
             }
             readonly property bool needsFolderSize: live && visible && !inGrid && !pane.gridMode && pane.columnVisible(3) && folder && !isLink && !directoryModel.loading
-                                                    && y + height >= ownView.contentY && y <= ownView.contentY + ownView.height
+                                                    && (groupedEntry ? (ownView.contentY, mapToItem(ownView, 0, height).y >= 0 && mapToItem(ownView, 0, 0).y <= ownView.height)
+                                                                     : y + height >= ownView.contentY && y <= ownView.contentY + ownView.height)
             property string sizeRequestUri: ""
             property var sizeRequestModel: null
             readonly property var sizeModel: pane.directoryModel
@@ -1159,15 +1397,15 @@ Rectangle {
             readonly property real ghost: hiddenItem ? 0.5 : 1
             // Each view lays its own rows out: during a morph both are alive. The one being
             // left keeps its rows as inert, fading ghosts.
-            readonly property Item ownView: ListView.view ? ListView.view : GridView.view
-            readonly property bool inGrid: ownView === grid
+            readonly property Item ownView: groupedEntry ? groupedList : ListView.view ? ListView.view : GridView.view
+            readonly property bool inGrid: groupedEntry ? pane.gridMode : ownView === grid
             readonly property bool leaving: pane.morphFrom !== "" && inGrid !== pane.gridMode
             objectName: leaving ? "fileEntryLeaving" : "fileEntry"
-            width: inGrid ? grid.cellWidth : list.contentWidth
+            width: inGrid ? grid.cellWidth : groupedEntry ? groupedList.contentWidth : list.contentWidth
             height: inGrid ? grid.cellHeight : pane.rowHeight
             // Its part in a reflow or morph (see motionKind): where it was, where it is now, and
             // how far along this row is.
-            readonly property bool moving: pane.motionKind !== "" && live && !leaving
+            readonly property bool moving: !groupedEntry && pane.motionKind !== "" && live && !leaving
             readonly property var from: moving ? pane.motionFrom[fileUri] : undefined
             readonly property point at: moving && ownView ? pane.placeOf(ownView, x, y, ownView.contentX, ownView.contentY) : Qt.point(0, 0)
             readonly property real travel: !moving ? 1 : pane.motionKind === "morph" ? pane.morphProgress(index - pane.motionFirst) : pane.reflowProgress()
@@ -1217,6 +1455,7 @@ Rectangle {
                 anchors.fill: parent; anchors.margins: item.inGrid ? 4 : 1
                 opacity: item.contentOpacity
                 Rectangle { id: flash; anchors.fill: parent; radius: 6; color: pane.theme.activeFill; opacity: 0; visible: opacity > 0 }
+                Rectangle { anchors.fill: parent; radius: 6; color: pane.theme.hover; visible: item.groupedEntry && item.hovered && !item.selected && !item.dropTarget }
                 // Hover is the view's shared plate (rowPlate), which glides from row to row.
                 // The current selected row is painted by the sliding highlight; this covers the others.
                 Rectangle {
@@ -1225,7 +1464,7 @@ Rectangle {
                     border.width: 1; border.color: pane.theme.selectionBorder
                     // Selection changes apply instantly (as in Windows): fading a whole list in on
                     // Select All reads as a flash. Only single-item motion (the glide) animates.
-                    opacity: item.live && item.selected && !item.current && !item.dropTarget ? 1 : 0
+                    opacity: item.live && item.selected && (item.groupedEntry || !item.current) && !item.dropTarget ? 1 : 0
                 }
                 Rectangle {
                     anchors.fill: parent; radius: 6
@@ -1361,6 +1600,5 @@ Rectangle {
                 }
             }
             NookToolTip { objectName: "fileEntryToolTip"; visible: item.hovered && !dragHandler.active; text: item.fileName + "\n" + item.fullPath; delay: 1000 }
-        }
     }
 }

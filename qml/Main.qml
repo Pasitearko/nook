@@ -69,7 +69,7 @@ ApplicationWindow {
     readonly property var splitLayoutNames: ["单栏", "左右双栏", "上下双栏", "三窗格", "四宫格"]
     readonly property var splitLayoutIcons: ["split-single", "split", "split-vertical", "split-triple", "split-quad"]
     readonly property int splitLayoutIndex: Math.max(0, splitLayouts.indexOf(app.splitLayout))
-    readonly property bool menusOpen: contextMenu.visible || blankMenu.visible || quickAccessMenu.visible || tagMenu.visible || sortBox.popup.visible || scopeBox.popup.visible || typeBox.popup.visible || afterDate.pickerOpen || beforeDate.pickerOpen
+    readonly property bool menusOpen: contextMenu.visible || blankMenu.visible || quickAccessMenu.visible || tagMenu.visible || groupingMenu.visible || sortBox.popup.visible || scopeBox.popup.visible || typeBox.popup.visible || afterDate.pickerOpen || beforeDate.pickerOpen
     property bool closingAfterTask: false
     property var hoveredEntry: ({})
     property string suppressedHoverUri: ""
@@ -772,6 +772,7 @@ ApplicationWindow {
                 ActionButton { plate: toolPlate; iconName: "paste"; hint: "粘贴 · Ctrl+V"; foreground: ink; enabled: !searching && !app.activePane.tagView; onClicked: app.paste() }
                 ActionButton { plate: toolPlate; iconName: "rename"; hint: "重命名 · F2"; foreground: ink; enabled: currentModel().selectedCount === 1 && !app.activePane.uri.startsWith("trash:"); onClicked: window.openInput("rename") }
                 ActionButton { plate: toolPlate; iconName: "trash"; hint: "移入回收站 · Delete"; enabled: currentModel().selectedCount > 0; onClicked: window.removeSelection(false) }
+                ActionButton { objectName: "hiddenFilesButton"; plate: toolPlate; iconName: "hidden"; hint: "显示/隐藏点文件 · Ctrl+H"; foreground: ink; active: app.activePane.showHidden; onClicked: app.activePane.showHidden = !app.activePane.showHidden }
                 Rectangle { width: 1; height: 19; color: line; Layout.leftMargin: 9; Layout.rightMargin: 9 }
                 NookComboBox {
                     id: sortBox; objectName: "sortBox"
@@ -789,7 +790,27 @@ ApplicationWindow {
                         model.sortBy(key, same ? model.sortDescending : (key === "date" || key === "created"))
                     }
                 }
-                ActionButton { plate: toolPlate; text: window.layoutWidth < 1100 ? "" : "隐藏文件"; iconName: "hidden"; hint: "显示/隐藏点文件 · Ctrl+H"; foreground: ink; active: app.activePane.showHidden; onClicked: app.activePane.showHidden = !app.activePane.showHidden }
+                ActionButton {
+                    id: groupingButton; objectName: "groupingButton"; plate: toolPlate
+                    text: window.layoutWidth < 1050 ? "" : "分组"; iconName: "group"; foreground: ink
+                    hint: "文件分组 · 按修改日期、类型或大小"
+                    enabled: !searching && app.activePane.groups.available
+                    active: enabled && app.activePane.groups.active
+                    onClicked: groupingMenu.visible ? groupingMenu.close() : groupingMenu.open()
+                    NookMenu {
+                        id: groupingMenu; objectName: "groupingMenu"
+                        y: groupingButton.height + 5
+                        readonly property var groups: app.activePane.groups
+                        function choose(mode) { groups.mode = mode; window.focusActivePane() }
+                        NookMenuItem { objectName: "groupNone"; text: "不分组"; checkable: true; checked: groupingMenu.groups.mode === "none"; onTriggered: groupingMenu.choose("none") }
+                        NookMenuItem { objectName: "groupDate"; text: "按修改日期分组"; iconName: "calendar"; checkable: true; checked: groupingMenu.groups.mode === "date"; onTriggered: groupingMenu.choose("date") }
+                        NookMenuItem { objectName: "groupType"; text: "按类型分组"; iconName: "document"; checkable: true; checked: groupingMenu.groups.mode === "type"; onTriggered: groupingMenu.choose("type") }
+                        NookMenuItem { objectName: "groupSize"; text: "按大小分组"; checkable: true; checked: groupingMenu.groups.mode === "size"; onTriggered: groupingMenu.choose("size") }
+                        MenuSeparator { contentItem: Rectangle { implicitHeight: 1; color: line; opacity: 0.7 } }
+                        NookMenuItem { objectName: "expandFileGroups"; text: "全部展开"; enabled: groupingMenu.groups.active; onTriggered: { groupingMenu.groups.expandAll(); window.focusActivePane() } }
+                        NookMenuItem { objectName: "collapseFileGroups"; text: "全部折叠"; enabled: groupingMenu.groups.active; onTriggered: { groupingMenu.groups.collapseAll(); window.focusActivePane() } }
+                    }
+                }
                 ActionButton { plate: toolPlate; text: window.layoutWidth < 1050 ? "" : "筛选"; iconName: "filter"; hint: "搜索筛选"; foreground: ink; active: filtersVisible; onClicked: filtersVisible = !filtersVisible }
                 ActionButton {
                     objectName: "selectionModeButton"; plate: toolPlate
