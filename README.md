@@ -136,8 +136,10 @@
 一条命令安装最新版（直接从 [Releases](https://github.com/Pasitearko/nook/releases/latest) 取最新的安装包，bash、zsh、fish 都能用）：
 
 ```bash
-sudo pacman -U "$(curl -fsSL https://api.github.com/repos/Pasitearko/nook/releases/latest | grep -o 'https://[^"]*x86_64\.pkg\.tar\.zst')"
+curl -fL -o nook-latest.pkg.tar.zst "$(curl -fsSL https://api.github.com/repos/Pasitearko/nook/releases/latest | grep -o '"browser_download_url": *"[^"]*x86_64\.pkg\.tar\.zst"' | head -1 | cut -d'"' -f4)" && sudo pacman -U ./nook-latest.pkg.tar.zst
 ```
+
+先把安装包下载到当前目录再安装，是因为 pacman 对远程地址（`pacman -U https://…`）会按 `RemoteFileSigLevel`（默认等同于 `SigLevel` 的 Required）要求同目录的 `.sig` 签名文件；本项目发布包未附带签名，会报 `404` 并拒绝安装。本地文件按 `LocalFileSigLevel = Optional` 处理，可以直接安装。
 
 也可以在 [Releases](https://github.com/Pasitearko/nook/releases/latest) 页面手动下载 `nook-<版本>-x86_64.pkg.tar.zst`，在它所在的文件夹里运行（文件夹里只留一个 nook 安装包）：
 
