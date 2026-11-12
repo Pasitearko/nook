@@ -134,6 +134,9 @@ class FeatureUiTest : public QObject {
             QCOMPARE(split->property("iconName").toString(), icons[i]);
             QVERIFY(!split->property("hint").toString().isEmpty());
         }
+        // SplitView relayout is deferred; wait until the single pane fills its parent
+        // before mapping header positions, otherwise the last columns are still clipped.
+        QTRY_COMPARE(left->width(), left->parentItem()->width());
         settings.set("columnWidths", QVariantList{220, 140, 90, 80, 140});
         const auto center = [](QQuickItem *item) {
             return item->mapToScene({item->width()/2, item->height()/2}).toPoint();

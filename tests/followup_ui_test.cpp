@@ -1947,6 +1947,97 @@ class FollowupUiTest : public QObject {
         }
         QMetaObject::invokeMethod(panel, "close");
     }
+    void scrollbarDragKeepsGrab_data() {
+        QTest::addColumn<bool>("searchMode");
+        QTest::addColumn<bool>("gridMode");
+        QTest::addColumn<bool>("grouped");
+        QTest::addColumn<bool>("animations");
+        for (bool searchMode : {false, true})
+            for (bool gridMode : {false, true})
+                for (bool grouped : {false, true}) {
+                    if (searchMode && grouped)
+                        continue; // Search results do not use grouped layouts.
+                    for (bool animations : {false, true})
+                        QTest::newRow(qPrintable(QString("%1-%2-%3-%4")
+                            .arg(searchMode ? "search" : "folder", gridMode ? "grid" : "list",
+                                 grouped ? "grouped" : "plain", animations ? "animated" : "instant")))
+                            << searchMode << gridMode << grouped << animations;
+                }
+    }
+    void scrollbarDragKeepsGrab() {
+        QFETCH(bool, searchMode);
+        QFETCH(bool, gridMode);
+        QFETCH(bool, grouped);
+        QFETCH(bool, animations);
+        auto *model = searchMode ? controller->search()->model() : controller->left();
+        QList<nook::Entry> rows;
+        for (int i = 0; i < 500; ++i) {
+            nook::Entry row;
+            row.name = QStringLiteral("scroll-%1.txt").arg(i, 4, 10, QChar('0'));
+            row.uri = uri(row.name);
+            row.kind = "Text";
+            row.icon = "document";
+            rows.append(row);
+        }
+        controller->setGrid(gridMode);
+        settings->set("animations", animations);
+        if (searchMode) {
+            item("searchField")->setProperty("text", "scroll");
+            QTest::qWait(300); // Let the debounced query finish before feeding synthetic results.
+            QTRY_VERIFY(!model->loading());
+            QTRY_VERIFY(left->property("searchMode").toBool());
+            QCOMPARE(left->property("directoryModel").value<DirectoryModel *>(), model);
+        }
+        model->replaceEntries(rows);
+        if (grouped)
+            model->groups()->setMode("type");
+        auto *view = item(grouped ? "groupedFileList" : gridMode ? "fileGrid" : "fileList");
+        QVERIFY(view);
+        QTRY_VERIFY(view->isVisible() && view->isEnabled());
+        QTRY_VERIFY(view->property("contentHeight").toReal() > view->height() * 3);
+        // Resolve the attached control, not a row or the selection overlay over the view.
+        QQmlExpression expression(qmlContext(view), view, "ScrollBar.vertical");
+        auto *bar = qobject_cast<QQuickItem *>(expression.evaluate().value<QObject *>());
+        QVERIFY2(bar, qPrintable(expression.error().toString()));
+        QTRY_VERIFY(bar->isVisible() && bar->width() > 0);
+        QTest::qWait(300); // Finish the hover-width animation before choosing a thumb point.
+        auto *thumb = bar->property("contentItem").value<QQuickItem *>();
+        QVERIFY(thumb);
+        QPoint start = thumb->mapToScene({thumb->width() / 2, thumb->height() / 2}).toPoint();
+        QTest::mouseMove(window, start);
+        QTest::qWait(200);
+        start = thumb->mapToScene({thumb->width() / 2, thumb->height() / 2}).toPoint();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start);
+        QVERIFY(bar->property("pressed").toBool());
+        const QPoint end(start.x(), bar->mapToScene({bar->width() / 2, bar->height() - thumb->height() / 2 - 3}).toPoint().y());
+        for (int step = 1; step <= 30; ++step) {
+            QTest::mouseMove(window, start + (end - start) * step / 30, 20);
+            if (!bar->property("pressed").toBool())
+                qWarning() << "scrollbar grab lost to" << window->mouseGrabberItem()
+                           << "view dragging" << view->property("dragging")
+                           << "bar position" << bar->property("position");
+            QVERIFY2(bar->property("pressed").toBool(), qPrintable(QString("Scrollbar lost pointer grab at step %1/30").arg(step)));
+            QVERIFY(!item("selectionBand")->isVisible());
+        }
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, end);
+        QVERIFY(!bar->property("pressed").toBool());
+        QVERIFY(view->property("interactive").toBool());
+        QVERIFY(bar->property("position").toReal() > 0.85);
+        QVERIFY(view->property("contentY").toReal() > view->height());
+        // The same gesture must still work in reverse after the first release.
+        start = thumb->mapToScene({thumb->width() / 2, thumb->height() / 2}).toPoint();
+        const QPoint top(start.x(), bar->mapToScene({bar->width() / 2, thumb->height() / 2 + 3}).toPoint().y());
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start);
+        for (int step = 1; step <= 30; ++step) {
+            QTest::mouseMove(window, start + (top - start) * step / 30, 20);
+            QVERIFY(bar->property("pressed").toBool());
+        }
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, top);
+        QVERIFY(!bar->property("pressed").toBool());
+        QVERIFY(view->property("interactive").toBool());
+        QVERIFY(bar->property("position").toReal() < 0.05);
+        QCOMPARE(model->selectedCount(), 0);
+    }
     void rubberBandSelection() {
         auto *list = item("fileList");
         QVERIFY(list);

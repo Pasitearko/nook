@@ -832,6 +832,9 @@ Rectangle {
                     contentWidth: Math.max(width, pane.columnsWidth + 24)
                     flickableDirection: Flickable.AutoFlickIfNeeded
                     ScrollBar.horizontal: NookScrollBar {}
+                    // The attached bars drive content offsets themselves. Do not let Flickable's
+                    // content-drag recognizer take their mouse grab once the drag threshold is met.
+                    interactive: !ScrollBar.vertical.pressed && !ScrollBar.horizontal.pressed
                     // Alive, fading and inert while a morph leaves it.
                     visible: !pane.grouped && pane.listLive
                     model: !pane.grouped && pane.listLive ? directoryModel : null
@@ -900,6 +903,7 @@ Rectangle {
                     cellHeight: Math.round(144 * pane.gs + pane.gridFont * 3.08 - 4)
                     reuseItems: true; cacheBuffer: 180
                     boundsBehavior: Flickable.StopAtBounds
+                    interactive: !ScrollBar.vertical.pressed
                     ScrollBar.vertical: NookScrollBar {}
                     highlightFollowsCurrentItem: false
                     highlight: selectionHighlight
@@ -953,6 +957,7 @@ Rectangle {
                     boundsBehavior: Flickable.StopAtBounds
                     ScrollBar.vertical: NookScrollBar {}
                     ScrollBar.horizontal: NookScrollBar {}
+                    interactive: !ScrollBar.vertical.pressed && !ScrollBar.horizontal.pressed
                     delegate: Item {
                         id: groupLine
                         property bool pooled: false
