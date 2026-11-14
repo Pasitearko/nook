@@ -1582,6 +1582,102 @@ class FollowupUiTest : public QObject {
         QVERIFY(QFileInfo::exists(fixture->path() + "/folder"));
     }
 
+    void deletedRowLeavesNoPaintedCopy_data() {
+        QTest::addColumn<bool>("gridMode");
+        QTest::addColumn<bool>("animations");
+        QTest::addColumn<bool>("settleFirst");
+        for (bool gridMode : {false, true})
+            for (bool animations : {false, true})
+                for (bool settleFirst : {false, true})
+                    QTest::newRow(qPrintable(QString("%1-%2-%3")
+                        .arg(gridMode ? "grid" : "list", animations ? "animated" : "instant",
+                             settleFirst ? "settled" : "interrupted"))) << gridMode << animations << settleFirst;
+    }
+    // Check actual pixels as well as geometry: Qt can cull a pooled item without changing
+    // QQuickItem::isVisible(), so that property alone cannot prove there is painted residue.
+    void deletedRowLeavesNoPaintedCopy() {
+        QFETCH(bool, gridMode);
+        QFETCH(bool, animations);
+        QFETCH(bool, settleFirst);
+        settings->set("theme", "dark"); // Fixed contrast for the rendered-ink comparison below.
+        controller->setGrid(gridMode);
+        settings->set("animations", animations);
+        for (const char *name : {"alpha", "beta", "gamma", "delta"})
+            QVERIFY(QDir().mkpath(fixture->path() + "/" + name));
+        controller->left()->refresh();
+        QTRY_VERIFY(!controller->left()->loading());
+        QTRY_VERIFY(entry(uri("beta")));
+        if (settleFirst)
+            QTest::qWait(600);
+        controller->left()->selectUri(uri("beta"));
+        QTRY_COMPARE(controller->left()->selectedCount(), 1);
+        window->requestActivate();
+        QTest::keyClick(window, Qt::Key_Delete);
+        QTRY_VERIFY_WITH_TIMEOUT(!QFileInfo::exists(fixture->path() + "/beta"), 10000);
+        QTRY_VERIFY(!operations->busy());
+        QTRY_VERIFY(!controller->left()->loading());
+        QTRY_COMPARE(controller->left()->count(), 5);
+
+        auto *view = item(gridMode ? "fileGrid" : "fileList");
+        QVERIFY(view);
+        auto *content = view->property("contentItem").value<QQuickItem *>();
+        QVERIFY(content);
+        QTest::mouseMove(window, QPoint(2, 2));
+        controller->left()->clearSelection();
+        QTest::qWait(700); // Past add/remove, displaced, reflow and highlight animations.
+        const auto imageRect = view->mapRectToScene(QRectF(0, 0, 300, 300));
+        auto capture = [&] {
+            window->update();
+            QTest::qWait(60);
+            auto image = window->grabWindow();
+            const auto dpr = image.devicePixelRatio();
+            image = image.copy(QRect(qRound(imageRect.x() * dpr), qRound(imageRect.y() * dpr),
+                                     qRound(imageRect.width() * dpr), qRound(imageRect.height() * dpr)));
+            // Ignore low-contrast hover-plate fading; compare the actual text/icon ink.
+            for (int y = 0; y < image.height(); ++y)
+                for (int x = 0; x < image.width(); ++x) {
+                    const auto pixel = image.pixel(x, y);
+                    image.setPixel(x, y, qRed(pixel) > 140 || qGreen(pixel) > 140 || qBlue(pixel) > 140
+                                            ? qRgb(255, 255, 255) : qRgb(0, 0, 0));
+                }
+            return image;
+        };
+        const auto before = capture();
+        QVERIFY(!before.isNull());
+        // Retired delegates must not contribute text/icons to the viewport.
+        for (auto *row : content->childItems())
+            if (row->objectName() == "fileEntry" &&
+                (row->property("pooled").toBool() || row->property("removing").toBool()))
+                row->setVisible(false);
+        const auto after = capture();
+        QCOMPARE(before.size(), after.size());
+        int changedInk = 0;
+        for (int y = 0; y < before.height(); ++y)
+            for (int x = 0; x < before.width(); ++x)
+                changedInk += before.pixel(x, y) != after.pixel(x, y);
+        // Allow a few antialias threshold crossings as the hover background fades, but
+        // never the tens/hundreds of ink pixels contributed by a leftover label/icon.
+        const int tolerance = qCeil(8 * qPow(window->devicePixelRatio(), 2));
+        QVERIFY2(changedInk <= tolerance, qPrintable(QString("Retired rows painted %1 ink pixels").arg(changedInk)));
+
+        // Every survivor must occupy the view's computed cell, not a frozen transition position.
+        const int columns = gridMode ? qMax(1, int(view->width() / view->property("cellWidth").toReal())) : 1;
+        const qreal rowHeight = gridMode ? view->property("cellHeight").toReal() : left->property("rowHeight").toReal();
+        for (int i = 0; i < controller->left()->count(); ++i) {
+            QQuickItem *row = nullptr;
+            QVERIFY(QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row), Q_ARG(int, i)));
+            QVERIFY(row && row->isVisible());
+            QCOMPARE(row->property("index").toInt(), i);
+            const qreal expectedX = gridMode ? (i % columns) * view->property("cellWidth").toReal() : 0;
+            QVERIFY(qAbs(row->x() - expectedX) < 1);
+            QVERIFY2(qAbs(row->y() - (i / columns) * rowHeight) < 1,
+                     qPrintable(QString("%1: y=%2 expected=%3").arg(row->property("fileName").toString())
+                                    .arg(row->y()).arg((i / columns) * rowHeight)));
+            QCOMPARE(row->opacity(), 1.0);
+            QCOMPARE(row->scale(), 1.0);
+        }
+    }
+
     void selectionMode() {
         auto *folderRow = entry(uri("folder"));
         auto *sampleRow = entry(uri("sample.txt"));

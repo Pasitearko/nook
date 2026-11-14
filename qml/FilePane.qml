@@ -846,18 +846,20 @@ Rectangle {
                     ScrollBar.vertical: NookScrollBar {}
                     highlightFollowsCurrentItem: false
                     highlight: selectionHighlight
+                    // Use the same GUI timeline as displaced/move, including when interrupted.
+                    // Mixing render-thread Animators here can strand surviving rows at old positions.
                     add: Transition {
                         enabled: pane.rowAnimations
                         ParallelAnimation {
-                            OpacityAnimator { from: 0; to: 1; duration: 220; easing.type: Easing.OutCubic }
-                            ScaleAnimator { from: 0.96; to: 1; duration: 220; easing.type: Easing.OutCubic }
+                            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 220; easing.type: Easing.OutCubic }
+                            NumberAnimation { property: "scale"; from: 0.96; to: 1; duration: 220; easing.type: Easing.OutCubic }
                         }
                     }
                     remove: Transition {
                         enabled: pane.rowAnimations
                         ParallelAnimation {
-                            OpacityAnimator { to: 0; duration: 160; easing.type: Easing.InCubic }
-                            ScaleAnimator { to: 0.96; duration: 160; easing.type: Easing.InCubic }
+                            NumberAnimation { property: "opacity"; to: 0; duration: 160; easing.type: Easing.InCubic }
+                            NumberAnimation { property: "scale"; to: 0.96; duration: 160; easing.type: Easing.InCubic }
                         }
                     }
                     // Displacement is retargeted while rows keep moving, so it stays a GUI-side
@@ -907,18 +909,20 @@ Rectangle {
                     ScrollBar.vertical: NookScrollBar {}
                     highlightFollowsCurrentItem: false
                     highlight: selectionHighlight
+                    // Use the same GUI timeline as displaced/move, including when interrupted.
+                    // Mixing render-thread Animators here can strand surviving rows at old positions.
                     add: Transition {
                         enabled: pane.rowAnimations
                         ParallelAnimation {
-                            OpacityAnimator { from: 0; to: 1; duration: 220; easing.type: Easing.OutCubic }
-                            ScaleAnimator { from: 0.96; to: 1; duration: 220; easing.type: Easing.OutCubic }
+                            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 220; easing.type: Easing.OutCubic }
+                            NumberAnimation { property: "scale"; from: 0.96; to: 1; duration: 220; easing.type: Easing.OutCubic }
                         }
                     }
                     remove: Transition {
                         enabled: pane.rowAnimations
                         ParallelAnimation {
-                            OpacityAnimator { to: 0; duration: 160; easing.type: Easing.InCubic }
-                            ScaleAnimator { to: 0.96; duration: 160; easing.type: Easing.InCubic }
+                            NumberAnimation { property: "opacity"; to: 0; duration: 160; easing.type: Easing.InCubic }
+                            NumberAnimation { property: "scale"; to: 0.96; duration: 160; easing.type: Easing.InCubic }
                         }
                     }
                     // Displacement is retargeted while rows keep moving, so it stays a GUI-side
@@ -1366,6 +1370,9 @@ Rectangle {
             property bool removing: false
             property bool pooled: false
             readonly property bool live: !removing && !pooled && index >= 0
+            // A cancelled remove transition can leave a pooled row half-painted. Explicitly
+            // retire its visuals; normal remove fades still run before the row enters the pool.
+            visible: !pooled
             readonly property bool hovered: live && mouse.containsMouse && !pane.covered
             enabled: live && !leaving && (!groupedEntry || pane.directoryModel.groups.ready)
             function clearHover() {
