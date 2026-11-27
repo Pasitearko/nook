@@ -3,6 +3,7 @@
 #include "preview.h"
 #include <QDBusMetaType>
 #include <QGuiApplication>
+#include <QJSValue>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
@@ -195,6 +196,130 @@ class ChooserTest : public QObject {
         const auto results = finished[0][1].toMap();
         QCOMPARE(results.value("uris").toStringList(), (QStringList{uri("notes.md"), uri("todo.txt")}));
         QCOMPARE(results.value("current_filter").value<Filter>().name, QString("文本文档"));
+    }
+
+    void footerDropdownStaysInsideWindow_data() {
+        QTest::addColumn<QString>("mode");
+        QTest::addColumn<bool>("choice");
+        QTest::addColumn<int>("count");
+        QTest::addColumn<double>("scale");
+        QTest::addColumn<bool>("animated");
+        QTest::newRow("open-short") << QString("open") << false << 2 << 1.0 << false;
+        QTest::newRow("save-short") << QString("save") << false << 2 << 1.0 << false;
+        QTest::newRow("open-long-small-scale") << QString("open") << false << 40 << 0.75 << false;
+        QTest::newRow("save-long") << QString("save") << false << 40 << 1.0 << false;
+        QTest::newRow("open-long-large-scale-animated") << QString("open") << false << 40 << 1.5 << true;
+        QTest::newRow("save-long-scaled-animated") << QString("save") << false << 40 << 1.25 << true;
+        QTest::newRow("choice-long") << QString("open") << true << 40 << 1.0 << false;
+        QTest::newRow("choice-long-scaled-animated") << QString("save") << true << 40 << 1.5 << true;
+    }
+    void footerDropdownStaysInsideWindow() {
+        QFETCH(QString, mode);
+        QFETCH(bool, choice);
+        QFETCH(int, count);
+        QFETCH(double, scale);
+        QFETCH(bool, animated);
+        settings->set("uiScale", scale);
+        settings->set("animations", animated);
+        if (count == 2) settings->set("theme", "light");
+        QList<Filter> filters;
+        QList<ChoiceOption> choices;
+        for (int i = 0; i < count; ++i) {
+            filters.append(Filter{QString("Type %1").arg(i), {FilterRule{0, "*"}}});
+            choices.append(ChoiceOption{QString::number(i), QString("Option %1").arg(i)});
+        }
+        open(mode, options(choice ? QVariantMap{{"choices", QVariant::fromValue(QList<Choice>{
+                                        Choice{"encoding", "Encoding", choices, "0"}})}}
+                                  : QVariantMap{{"filters", QVariant::fromValue(filters)}}));
+        auto *box = item(choice ? "chooserChoice_encoding" : mode == "save" ? "chooserSaveType" : "chooserFilter");
+        QVERIFY(box);
+        auto *popup = box->property("popup").value<QObject *>();
+        QVERIFY(popup);
+        QSignalSpy finished(request.get(), &ChooserRequest::finished);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          box->mapToScene(QPointF(box->width() / 2, box->height() / 2)).toPoint());
+        QTRY_VERIFY(popup->property("opened").toBool());
+        auto *rows = popup->property("contentItem").value<QQuickItem *>();
+        QVERIFY(rows && rows->parentItem());
+        auto bounded = [&] {
+            const auto rect = rows->parentItem()->mapRectToScene(rows->parentItem()->boundingRect());
+            return rect.top() >= -1 && rect.left() >= -1 && rect.bottom() <= window->height() + 1
+                && rect.right() <= window->width() + 1 && rect.height() > 0;
+        };
+        QTRY_VERIFY(bounded());
+        QVERIFY(popup->property("opensAbove").toBool());
+        if (mode == "open" && count == 2)
+            window->grabWindow().save("/tmp/nook-chooser-dropdown-fixed.png");
+        // Reposition an already-open card after the footer moves during resize.
+        window->resize(620, 400);
+        QTRY_VERIFY(bounded());
+        QTest::qWait(50); // Let the footer layout polish before checking the anchor.
+        QTRY_VERIFY(bounded());
+        settings->set("uiScale", scale == 1.5 ? 0.75 : 1.5);
+        QTest::qWait(50);
+        QTRY_VERIFY(bounded());
+        if (count > 2)
+            QVERIFY(rows->property("contentHeight").toReal() > rows->height());
+        window->requestActivate();
+        box->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(window, Qt::Key_End);
+        QTRY_COMPARE(box->property("highlightedIndex").toInt(), count - 1);
+        auto *last = rows->property("currentItem").value<QQuickItem *>();
+        QVERIFY(last);
+        QTRY_VERIFY(rows->mapRectFromItem(last, last->boundingRect()).top() >= -1);
+        QTRY_VERIFY(rows->mapRectFromItem(last, last->boundingRect()).bottom() <= rows->height() + 1);
+        // The final item must really be clickable, not merely present in the model.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          last->mapToScene(QPointF(last->width() / 2, last->height() / 2)).toPoint());
+        QTRY_VERIFY(!popup->property("visible").toBool());
+        QCOMPARE(box->property("currentIndex").toInt(), count - 1);
+        if (choice)
+            QCOMPARE(root->property("choiceState").value<QJSValue>().toVariant().toMap().value("encoding").toString(),
+                     QString::number(count - 1));
+        else
+            QCOMPARE(root->property("filterIndex").toInt(), count - 1);
+        // Reopening must scroll the selected item into view. Escape dismisses only
+        // the popup, never the underlying portal request.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          box->mapToScene(QPointF(box->width() / 2, box->height() / 2)).toPoint());
+        QTRY_VERIFY(popup->property("opened").toBool());
+        QTRY_VERIFY(bounded());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!popup->property("visible").toBool());
+        QCOMPARE(finished.size(), 0);
+    }
+
+    void sharedDropdownOpensDownwardAndClampsRightEdge() {
+        open("open", options());
+        QQmlComponent component(engine.get(), QUrl::fromLocalFile(QString(NOOK_SOURCE_DIR) + "/qml/NookComboBox.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        QQuickItem holder(window->contentItem());
+        std::unique_ptr<QObject> object(component.createWithInitialProperties({
+            {"model", QStringList{"First", "Second", "Third"}},
+            {"hostWindow", QVariant::fromValue(window)}}));
+        auto *box = qobject_cast<QQuickItem *>(object.get());
+        QVERIFY(box);
+        box->setParentItem(&holder);
+        box->setSize(QSizeF(140, 34));
+        box->setPosition(QPointF(window->width() - 100, 20));
+        auto *popup = box->property("popup").value<QObject *>();
+        QVERIFY(popup);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          box->mapToScene(QPointF(20, 17)).toPoint());
+        QTRY_VERIFY(popup->property("opened").toBool());
+        QVERIFY(!popup->property("opensAbove").toBool());
+        auto *rows = popup->property("contentItem").value<QQuickItem *>();
+        QVERIFY(rows && rows->parentItem());
+        const auto card = rows->parentItem()->mapRectToScene(rows->parentItem()->boundingRect());
+        QVERIFY(card.top() >= box->y() + box->height());
+        QVERIFY(card.right() <= window->width() - 7);
+        // An ancestor moves, while the combo's own x/y stay unchanged.
+        holder.setPosition(QPointF(-200, 80));
+        QTRY_VERIFY(qAbs(rows->parentItem()->mapRectToScene(rows->parentItem()->boundingRect()).top()
+                         - box->mapToScene(QPointF(0, box->height())).y() - 5) <= 1);
+        QTRY_VERIFY(qAbs(rows->parentItem()->mapRectToScene(rows->parentItem()->boundingRect()).left()
+                         - box->mapToScene(QPointF()).x()) <= 1);
+        QMetaObject::invokeMethod(popup, "close");
     }
 
     void openTypedName() {

@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQml.Models
 import "palette.js" as Palette
 import "motion.js" as Motion
 
@@ -36,12 +37,57 @@ ComboBox {
     }
     popup: Popup {
         id: drop
-        y: control.height + 5
-        // The list grows out of the box itself (Open spring) and its rows wait for the card.
+        // Place the card in the (possibly UI-scaled) overlay's coordinates, not
+        // below the control unconditionally: chooser controls sit at the bottom.
+        parent: control.Overlay.overlay
+        margins: 8
+        property point anchor: Qt.point(0, 0)
+        readonly property real above: Math.max(0, anchor.y - margins - 5)
+        readonly property real below: Math.max(0, (parent ? parent.height : 0) - margins - anchor.y - control.height - 5)
+        readonly property bool opensAbove: implicitHeight > below && above > below
+        function place() {
+            if (parent) anchor = control.mapToItem(parent, 0, 0)
+        }
+        function schedulePlacement() { if (visible) Qt.callLater(place) }
+        onAboutToShow: place()
+        onOpened: rows.positionViewAtIndex(control.currentIndex, ListView.Contain)
+        x: Math.max(margins, Math.min(anchor.x, (parent ? parent.width : control.width) - margins - width))
+        y: Math.max(margins, Math.min(opensAbove ? anchor.y - 5 - height : anchor.y + control.height + 5,
+                                     (parent ? parent.height : 0) - margins - height))
+        height: Math.min(implicitHeight, opensAbove ? above : below,
+                         Math.max(0, (parent ? parent.height : 0) - margins * 2))
+        transformOrigin: opensAbove ? Popup.Bottom : Popup.Top
+        Connections {
+            target: drop.parent
+            function onWidthChanged() { drop.schedulePlacement() }
+            function onHeightChanged() { drop.schedulePlacement() }
+        }
+        // A footer/layout or scrolling ancestor can move without changing the
+        // control's local x/y. Observe the chain only while open; no idle polling.
+        Instantiator {
+            model: {
+                let ancestors = []
+                if (drop.visible)
+                    for (let item = control; item; item = item.parent) ancestors.push(item)
+                return ancestors
+            }
+            delegate: Connections {
+                required property var modelData
+                target: modelData
+                function onXChanged() { drop.schedulePlacement() }
+                function onYChanged() { drop.schedulePlacement() }
+                function onWidthChanged() { drop.schedulePlacement() }
+                function onHeightChanged() { drop.schedulePlacement() }
+                function onScaleChanged() { drop.schedulePlacement() }
+                function onRotationChanged() { drop.schedulePlacement() }
+                function onChildrenRectChanged() { drop.schedulePlacement() }
+            }
+        }
+        // Animate the surface, not y/height: geometry animations would override
+        // the edge-aware placement and expose clipped rows during opening.
         enter: Transition {
             ParallelAnimation {
-                NumberAnimation { property: "y"; from: 0; to: control.height + 5; duration: control.animated ? Motion.open.ms : 0; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.open.curve }
-                NumberAnimation { property: "height"; from: control.height; to: drop.implicitHeight; duration: control.animated ? Motion.open.ms : 0; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.open.curve }
+                NumberAnimation { property: "scale"; from: 0.98; to: 1; duration: control.animated ? Motion.open.ms : 0; easing.type: Easing.OutCubic }
                 NumberAnimation { property: "opacity"; from: 0.4; to: 1; duration: control.animated ? 90 : 0 }
                 SequentialAnimation {
                     PropertyAction { target: drop.contentItem; property: "opacity"; value: control.animated ? 0 : 1 }
@@ -51,12 +97,16 @@ ComboBox {
             }
         }
         clip: true
-        width: control.width
+        width: Math.min(control.width, Math.max(0, (parent ? parent.width : control.width + 16) - margins * 2))
         padding: 5
-        implicitHeight: contentItem.implicitHeight + 10
+        // Delegates have a fixed height; do not depend on a not-yet-populated
+        // ListView's contentHeight when deciding which side has enough room.
+        implicitHeight: control.count * 34 + topPadding + bottomPadding
         background: Rectangle { radius: 10; color: control.theme.raised; border.color: control.theme.line }
         contentItem: ListView {
+            id: rows
             clip: true; implicitHeight: contentHeight
+            boundsBehavior: Flickable.StopAtBounds
             model: control.popup.visible ? control.delegateModel : null
             currentIndex: control.highlightedIndex
             ScrollIndicator.vertical: ScrollIndicator {}
@@ -65,7 +115,7 @@ ComboBox {
     delegate: ItemDelegate {
         required property int index
         required property var modelData
-        width: control.width - 10; height: 34
+        width: drop.availableWidth; height: 34
         highlighted: control.highlightedIndex === index
         contentItem: Text { text: modelData; color: control.ink; font.pixelSize: 13; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
         background: Rectangle { radius: 6; color: parent.highlighted ? control.theme.menuHighlight : "transparent" }

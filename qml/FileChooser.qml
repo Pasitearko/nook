@@ -370,6 +370,7 @@ ApplicationWindow {
                                 spacing: 6
                                 Text { visible: modelData.options.length > 0; text: modelData.label; color: muted; font.pixelSize: 13 }
                                 NookComboBox {
+                                    objectName: "chooserChoice_" + modelData.id
                                     visible: modelData.options.length > 0
                                     Layout.preferredWidth: 130; Layout.preferredHeight: 34
                                     model: modelData.options.map(o => o.label)
